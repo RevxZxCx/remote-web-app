@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 11 及以下的备份规则（`android:fullBackupContent`）。
+
+  与 `data_extraction_rules.xml` 同一个意图：本 App 本地只存一条设备凭证（等价于
+  FULL-CONTROL，见 D16），**不应**被备份或迁移到另一台设备——换设备必须重新配对。
+  `android:allowBackup="false"` 已经关掉了备份，这里再显式排除一次，是为了让
+  minSdk 26 的老系统上也有一份声明（lint 的 DataExtractionRules 要求两者成对出现）。
+-->
+<full-backup-content>
+    <exclude domain="root" />
+    <exclude domain="file" />
+    <exclude domain="database" />
+    <exclude domain="sharedpref" />
+    <exclude domain="external" />
+</full-backup-content>

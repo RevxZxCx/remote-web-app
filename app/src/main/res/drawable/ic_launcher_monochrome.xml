@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 主题图标（monochrome）用的单色版本：形状与 ic_launcher_foreground 一致，颜色交给系统。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,42c0,-6 5,-11 11,-11h26c6,0 11,5 11,11v12c0,6 -5,11 -11,11h-8l-10,10v-10h-8c-6,0 -11,-5 -11,-11z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M43,47m-3,0a3,3 0 1,0 6,0a3,3 0 1,0 -6,0" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M57,47m-3,0a3,3 0 1,0 6,0a3,3 0 1,0 -6,0" />
+</vector>

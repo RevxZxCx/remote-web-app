@@ -70,7 +70,11 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
 
+    // 扫码配对：只用它的 DecoratedBarcodeView 嵌进 Compose，不用它的 CaptureActivity。
+    implementation(libs.zxing.android.embedded)
+
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.mockwebserver3)
     androidTestImplementation(libs.androidx.junit)
 }
