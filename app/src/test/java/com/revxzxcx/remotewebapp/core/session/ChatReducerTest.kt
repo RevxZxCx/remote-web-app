@@ -15,7 +15,7 @@ import org.junit.Test
  * 三条不变量（见 [ChatReducer] 的 KDoc）：
  * 1. `items` 按 `seq` 严格升序且不重复
  * 2. 同 `(turn, step)` 的助手消息落盘时，预览必须被丢弃
- * 3. 快照**替换**而不是追加条目
+ * 3. 快照替换它覆盖的窗口，但保留窗口之前已加载的历史（FR-4.2）
  */
 class ChatReducerTest {
 
@@ -95,7 +95,7 @@ class ChatReducerTest {
     }
 
     @Test
-    fun `第二次快照替换而不是追加`() {
+    fun `第二次快照替换窗口但保留更早的已翻页历史`() {
         val first = ChatReducer.reduce(
             ChatUiState(),
             ChatFrame.Snapshot(listOf(ChatItem.User(1, 1, text = "旧")), 1, false, null, null, emptyList()),
@@ -104,8 +104,104 @@ class ChatReducerTest {
             first,
             ChatFrame.Snapshot(listOf(ChatItem.User(7, 7, text = "新")), 7, false, null, null, emptyList()),
         )
-        // 窗口被替换：只剩新的那条，不是 1 + 7。
-        assertEquals(listOf(7L), second.items.map { it.seq })
+        // FR-4.2：seq 1 在快照窗口（最小 seq = 7）之前，属于用户已经翻出来的历史，
+        // 重连重发窗口时**不能**把它丢掉；窗口内的内容由快照权威替换。
+        assertEquals(listOf(1L, 7L), second.items.map { it.seq })
+    }
+
+    @Test
+    fun `重连快照不丢已翻页的更早历史`() {
+        // 造出「翻过页」的状态：更早的第 1、2 条 + 快照带来的第 50、51 条。
+        val paged = ChatUiState(
+            items = listOf(
+                ChatItem.User(1, 1, text = "最早"),
+                ChatItem.User(2, 2, text = "次早"),
+                ChatItem.User(50, 50, text = "窗口头"),
+                ChatItem.User(51, 51, text = "窗口尾"),
+            ),
+            ready = true,
+            loading = false,
+            cursor = 51,
+        )
+        // 重连后服务端只重发尾部窗口（50、51，外加新到的 52）。
+        val reconnected = ChatReducer.reduce(
+            paged,
+            ChatFrame.Snapshot(
+                items = listOf(
+                    ChatItem.User(50, 50, text = "窗口头"),
+                    ChatItem.User(51, 51, text = "窗口尾"),
+                    ChatItem.User(52, 52, text = "新的"),
+                ),
+                cursor = 52,
+                hasMore = true,
+                title = null,
+                cwd = null,
+                baseline = emptyList(),
+            ),
+        )
+        assertEquals(listOf(1L, 2L, 50L, 51L, 52L), reconnected.items.map { it.seq })
+        assertEquals(52L, reconnected.cursor)
+        // 已经翻到 seq=1（日志开头）就不该再说「还有更早的」：快照的 `hasMore=true` 是相对
+        // **快照窗口**说的，而合并后的 items 已经延伸到窗口之前。直取快照值会留下一个点了
+        // 没用的「加载更早」（R006 P2-9）。
+        assertFalse(reconnected.hasMore)
+    }
+
+    @Test
+    fun `快照窗口之下的历史仍会有更早的`() {
+        // 与上一条相反：只翻到 seq=7（窗口最小 seq 是 8），日志里确实还有更早的内容。
+        val paged = ChatUiState(
+            items = listOf(ChatItem.User(7, 7, text = "更早")),
+            ready = true,
+            loading = false,
+            cursor = 8,
+        )
+        val reconnected = ChatReducer.reduce(
+            paged,
+            ChatFrame.Snapshot(
+                items = listOf(ChatItem.User(8, 8, text = "窗口")),
+                cursor = 9,
+                hasMore = true,
+                title = null,
+                cwd = null,
+                baseline = emptyList(),
+            ),
+        )
+
+        assertEquals(listOf(7L, 8L), reconnected.items.map { it.seq })
+        assertTrue(reconnected.hasMore)
+    }
+
+    @Test
+    fun `空快照不丢弃已加载的历史`() {
+        // 空窗口只说明「这个窗口没有消息」，不说明日志是空的（例如窗口参数把尾部截没了）。
+        val loaded = ChatUiState(items = listOf(ChatItem.User(3, 3, text = "有")), ready = true)
+        val after = ChatReducer.reduce(
+            loaded,
+            ChatFrame.Snapshot(emptyList(), 9, false, null, null, emptyList()),
+        )
+        assertEquals(listOf(3L), after.items.map { it.seq })
+    }
+
+    @Test
+    fun `窗口内的同 seq 由快照内容权威覆盖`() {
+        // 旧的同 seq 条目（例如缓存里的占位）必须被快照里的真实内容替换，而不是两份并存。
+        val cached = ChatUiState(items = listOf(ChatItem.User(7, 7, text = "缓存版")), ready = false)
+        val after = ChatReducer.reduce(
+            cached,
+            ChatFrame.Snapshot(listOf(ChatItem.User(7, 7, text = "服务端版")), 7, false, null, null, emptyList()),
+        )
+        assertEquals(1, after.items.size)
+        assertEquals("服务端版", (after.items.single() as ChatItem.User).text)
+    }
+
+    @Test
+    fun `收到任何一帧后 fromCache 归假`() {
+        val cached = ChatUiState(fromCache = true)
+        assertFalse(ChatReducer.reduce(cached, event(1, "来网了")).fromCache)
+        assertFalse(
+            ChatReducer.reduce(cached, ChatFrame.Snapshot(emptyList(), 1, false, null, null, emptyList())).fromCache,
+        )
     }
 
     @Test
@@ -237,7 +333,10 @@ class ChatReducerTest {
             ChatFrame.Live(ChatFrame.LiveFrame.End("att-1", 1, committedSeq = null)),
         )
         assertNull(state.live)
-        assertFalse(state.generating)
+        // **不动 generating**：不变量 4 规定它只由 `turn/start`/`turn/end` 翻转。一次尝试被
+        // 丢弃不等于本轮结束——多步轮次里控制器会立刻开新尝试，若在这里置假，中止按钮会提前
+        // 消失且直到下一轮 `turn/start` 才恢复（R006 P2-11）。
+        assertTrue(state.generating)
     }
 
     @Test
@@ -484,6 +583,138 @@ class ChatReducerTest {
             ),
         )
         assertEquals(1, state.items.size)
+    }
+
+    // ---------------------------------------------------------------- R006 回归
+
+    @Test
+    fun `窗口内噪声事件的 seq 也属于快照覆盖范围`() {
+        // `turn/start` / `step/end` 不占行、解析不出条目，但同样在快照窗口内。若窗口下界只取
+        // **条目**的最小 seq，这些事件会被当成「窗口之外」而从旧 items 里保留同 seq 的副本，
+        // `distinctBy` 又保留首次出现 → 旧内容胜出（R006 P3-1）。
+        val stale = ChatReducer.reduce(
+            ChatUiState(),
+            ChatFrame.Snapshot(
+                items = listOf(ChatItem.User(8, 8, text = "旧的窗口头")),
+                cursor = 9,
+                hasMore = false,
+                title = null,
+                cwd = null,
+                baseline = emptyList(),
+                // 解析器给的窗口下界：噪声事件 seq=5 比条目最小 seq=8 更小。
+                windowMinSeq = 5L,
+            ),
+        )
+
+        val merged = ChatReducer.reduce(
+            stale,
+            ChatFrame.Snapshot(
+                items = listOf(ChatItem.User(8, 8, text = "新的窗口头")),
+                cursor = 9,
+                hasMore = false,
+                title = null,
+                cwd = null,
+                baseline = emptyList(),
+                windowMinSeq = 5L,
+            ),
+        )
+
+        // seq=5 落在窗口内，旧 items 里那条必须被替换而不是留下第二份。
+        assertEquals(listOf(8L), merged.items.map { it.seq })
+        assertEquals("新的窗口头", (merged.items.single() as ChatItem.User).text)
+    }
+
+    @Test
+    fun `同 seq 的新事件替换旧事件而不是保留首条`() {
+        // 写成 `items + item` 再 `distinctBy` 会保留**首次**出现的那份（旧内容），于是一条
+        // 被重新投递、内容已更新的同 seq 事件被静默丢弃（R006 P3-13）。
+        val first = ChatReducer.reduce(ChatUiState(), event(1, "第一版"))
+        val second = ChatReducer.reduce(first, event(1, "第二版"))
+
+        assertEquals(1, second.items.size)
+        assertEquals("第二版", (second.items.single() as ChatItem.User).text)
+    }
+
+    @Test
+    fun `噪声事件也推进游标`() {
+        // 早前「与预览无关的噪声事件」提前 return state，走不到游标推进：断线重连后 cursor
+        // 会落后于真实收到的事件，下一次翻页会重复请求已经拿到的区间（R006 P3-15）。
+        var state = ChatReducer.reduce(ChatUiState(), event(10, "早"))
+        state = ChatReducer.reduce(
+            state,
+            ChatFrame.Event(eventType = "step/end", seq = 11, item = null, turn = 0, step = 0),
+        )
+
+        assertEquals(11L, state.cursor)
+        // 收到过真实事件就不再是「正在加载」——即使这条不占行（R006 P3-14）。
+        assertFalse(state.loading)
+        assertTrue(state.ready)
+        // 噪声事件本身不占一行。
+        assertEquals(listOf(10L), state.items.map { it.seq })
+    }
+
+    @Test
+    fun `committedSeq 兜底作废时同时清预览`() {
+        // `committed` 的落盘事件若因信封畸形被解析器整帧丢弃，「seq == committedSeq」这条永远
+        // 等不到。游标一旦越过它，预览就该被放弃——否则会一直显示到本轮 turn/end，看上去像
+        // 同一条消息渲染两遍。**清 committedSeq 的地方必须同时清 live**（R006 P2-10）。
+        var state = ChatReducer.reduce(
+            ChatUiState(),
+            ChatFrame.Live(ChatFrame.LiveFrame.Start("att-1", 0, 0)),
+        )
+        state = reduceChunk(state, "att-1", 0, AssistantStreamExpander.Delta.Text(1, 0, "半句"))
+        state = ChatReducer.reduce(
+            state,
+            ChatFrame.Live(ChatFrame.LiveFrame.End("att-1", 1, committedSeq = 7)),
+        )
+        assertNotNull(state.live)
+
+        // seq=9 > 7：落盘事件（seq 7）没来，游标已经越过它。
+        state = ChatReducer.reduce(state, event(9, "后面的消息"))
+
+        assertNull("committed 的落盘事件已不可能到达，预览必须作废", state.live)
+        assertEquals(-1L, state.committedSeq)
+    }
+
+    @Test
+    fun `index 超出 Int 范围时不推进 nextIndex`() {
+        // `index.toInt()` 高位截断会让畸形的巨大 index 恰好等于 nextIndex 而错误推进
+        // （R006 P3-17）。
+        var state = ChatReducer.reduce(
+            ChatUiState(),
+            ChatFrame.Live(ChatFrame.LiveFrame.Start("att-1", 0, 0)),
+        )
+        state = reduceChunk(state, "att-1", 0, AssistantStreamExpander.Delta.Text(1, 0, "一"))
+        val before = state.live!!.nextIndex
+
+        // 2^32 + 0 → toInt() == 0 == nextIndex，错误地会推进一次。
+        state = reduceChunk(
+            state,
+            "att-1",
+            (1L shl 32) + 0L,
+            AssistantStreamExpander.Delta.Text(2, 0, "二"),
+        )
+
+        assertEquals(before, state.live!!.nextIndex)
+        // 不推进但也不丢内容：宁可多拼一段，也不静默丢字。
+        assertTrue(state.live!!.text.contains("二"))
+    }
+
+    @Test
+    fun `三类错误字段互不干扰`() {
+        // R006 P3-6：流断开 / 发送失败 / 翻页失败共用一个 `error` 字段时，发送失败的「重试」
+        // 也去重启整条 follow 流。三个字段必须能独立存在。
+        val state = ChatUiState(error = "流断了", sendError = "发送失败", pageError = "翻页失败")
+
+        assertEquals("流断了", state.error)
+        assertEquals("发送失败", state.sendError)
+        assertEquals("翻页失败", state.pageError)
+
+        // 只清其中一个（ViewModel 的 retrySend / retryLoadMore / retry 各清各的）。
+        val afterRetrySend = state.copy(sendError = null)
+        assertEquals("流断了", afterRetrySend.error)
+        assertNull(afterRetrySend.sendError)
+        assertEquals("翻页失败", afterRetrySend.pageError)
     }
 
     private fun reduceChunk(

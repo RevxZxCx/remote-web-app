@@ -5,7 +5,9 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.revxzxcx.remotewebapp.core.cache.DshCache
 import com.revxzxcx.remotewebapp.core.connection.DshConnection
+import com.revxzxcx.remotewebapp.core.protocol.CarrierState
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
 import com.revxzxcx.remotewebapp.core.session.SessionListResult
@@ -17,10 +19,13 @@ import com.revxzxcx.remotewebapp.core.workspace.WorkspaceSnapshot
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /**
@@ -44,14 +49,10 @@ data class HomeUiState(
     val sessionsError: String? = null,
     /** 展开的工作区 id 集合。 */
     val expandedWorkspaceIds: Set<String> = emptySet(),
-    /** 连接状态文案：`已连接` / `重连中…`。 */
-    val connection: String = "连接中…",
     /** 不可恢复的错误（例如 403 unpaired）。 */
     val error: String? = null,
     /** 凭证是否已失效，需要重新配对。 */
     val needsRepair: Boolean = false,
-    /** 最近一次收到的原始帧，供 M4 调试页使用。 */
-    val lastRawFrame: String? = null,
     /**
      * 全部工作区里最近活动的顶层会话（抽屉「最近」用）。
      *
@@ -63,6 +64,23 @@ data class HomeUiState(
     val recent: List<SessionSummary> = emptyList(),
     /** 全局置顶会话（抽屉「置顶」用），带归属工作区。 */
     val pinned: List<Pair<SessionSummary, Workspace?>> = emptyList(),
+    /**
+     * 当前列表来自本地缓存、还没被网络帧覆盖（需求 FR-4.3）。
+     *
+     * UI 用它显示「缓存」角标。为什么需要显式标志而不是比较时间戳：缓存是**同一次进程
+     * 冷启动**里铺上来的，时间戳与网络数据几乎同时，靠时间无法判断「屏幕上这份是不是
+     * 还没对齐」。
+     */
+    val fromCache: Boolean = false,
+    /**
+     * 是否已经收到过**网络**的工作区快照（与 [loading] 分开）。
+     *
+     * 为什么不能拿 [loading] 代替：`loading` 在重试退避时也会被置 false（那时网络并没有
+     * 数据），用它当「网络数据已到」的判据会让缓存铺不上去。这个标志只为
+     * [HomeViewModel.warmStart] 的竞态守卫服务——读缓存是挂起操作，期间 baseline 可能
+     * 已经先到，此时**绝不能让旧缓存盖掉权威快照**（R006 P1-1）。
+     */
+    val networkArrived: Boolean = false,
 )
 
 /**
@@ -84,6 +102,8 @@ data class HomeUiState(
  */
 class HomeViewModel(
     private val connection: DshConnection,
+    private val cache: DshCache? = null,
+    private val ownerId: String = "",
 ) : ViewModel() {
 
     private val workspaces = WorkspaceRepository(connection)
@@ -92,10 +112,22 @@ class HomeViewModel(
     private val _state = MutableStateFlow(HomeUiState())
     val state: StateFlow<HomeUiState> = _state.asStateFlow()
 
+    /**
+     * 全局连接状态（需求 FR-4.4），直接取自唯一的载波。
+     *
+     * 为什么不像别的字段那样塞进 [HomeUiState]：那不是「本页面的状态」，而是全局事实，
+     * 聊天页读的是同一个 [DshConnection.mux]。放进页面状态里就要在每一处 `copy` 里同步它，
+     * 迟早会漏一处而让状态条显示旧值。
+     */
+    val carrier: StateFlow<CarrierState> = connection.mux.stats
+        .map { it.carrier }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, connection.mux.stats.value.carrier)
+
     private var job: Job? = null
     private var sessionJob: Job? = null
 
     init {
+        warmStart()
         start()
     }
 
@@ -107,12 +139,15 @@ class HomeViewModel(
         // `loadSessions()`，而那时旧 job 的 `isActive` 可能仍为 true，会被重入保护
         // 静默丢掉——会话列表就再也刷不出来了（R003 P1-2）。
         sessionJob = null
+        job = null
         _state.value = _state.value.copy(
             error = null,
             needsRepair = false,
-            connection = "连接中…",
             sessionsLoading = false,
             sessionsError = null,
+            // 重连后即将拿到权威数据，缓存标记必须复位：不复位会让横幅一直说
+            // 「当前显示的是上次的缓存内容」，即使网络数据早就到了（R006 P3-1）。
+            fromCache = false,
         )
         start()
     }
@@ -128,24 +163,68 @@ class HomeViewModel(
         )
     }
 
+    /**
+     * 冷启动先铺缓存（需求 FR-4.3）。
+     *
+     * 这一步**必须先于** `workspace/follow` 的首帧：网络是异步且可能慢到几秒的，
+     * 而用户看到的第一屏不该是空白转圈。铺缓存后立即显示，网络第几秒回来再覆盖即可。
+     *
+     * 注意这里刻意**不**把 `loading` 置 false：缓存只是「先看一眼」，真正的权威数据
+     * 还没到；`loading=true` 同时驱动那条细进度条与「这个桌面端还没有工作区」占位文案的
+     * 判定（见 `HomeScreen`）。用 [fromCache] 让 UI 能区分「这是缓存」。
+     */
+    private fun warmStart() {
+        val store = cache ?: return
+        viewModelScope.launch {
+            val cachedWorkspaces = store.readWorkspaces(ownerId)
+            val cachedSessions = store.readSessions(ownerId)
+            if (cachedWorkspaces == null && cachedSessions == null) return@launch
+            // 必须守住「网络帧已经到了」这一条件（R006 P1-1）：`warmStart()` 与 `start()`
+            // 都是 `viewModelScope.launch`，而读缓存会在 `readWorkspaces` 处挂起。如果
+            // baseline 先返回，这里就把**旧缓存**盖在刚到的权威快照上，并把 `fromCache`
+            // 重新置真——网络数据只在下一帧快照到达时才复位，期间屏幕上显示的是过期数据
+            // 却标着「正在同步」。与 `ChatViewModel.warmStart` 的 `if (current.ready) return`
+            // 同一策略。
+            val current = _state.value
+            if (current.networkArrived) return@launch
+            val snapshot = cachedWorkspaces ?: current.snapshot
+            val sessions = cachedSessions?.let { SessionListResult(items = it) } ?: current.sessions
+            // 读完后再判一次：上面的读是挂起点，期间可能已有网络帧写入并置位。
+            if (_state.value.networkArrived) return@launch
+            _state.value = current.copy(
+                snapshot = snapshot,
+                sessions = sessions,
+                fromCache = true,
+            ).withDerived(snapshot, sessions)
+        }
+    }
+
     private fun start() {
         job = viewModelScope.launch {
             // 每次订阅（含手动 retry 后重启）只补一次会话摘要。用局部变量而不是读
             // `_state.value.loading`：后者是全局标志，重连时已被置 false，会导致
             // retry 之后会话列表再也不刷新（R003 P1-2）。
             var firstSnapshot = true
-            workspaces.snapshotFlow(onRawFrame = { raw ->
-                _state.value = _state.value.copy(lastRawFrame = raw)
-            })
+            workspaces.snapshotFlow()
                 .retryWhen { cause, attempt ->
                     if (cause is TypertException && cause.isUnpaired) {
-                        false // 凭证失效：不再重试，交给 UI 引导重新配对。
+                        // 凭证失效：不再重试，交给 UI 引导重新配对。同时把这一事实投影到
+                        // 唯一的载波状态上，免得别处的状态条还在说「重连中…」（R002 P1-1）。
+                        connection.mux.noteRetry(
+                            reason = cause.message ?: "设备未配对",
+                            delayMillis = 0L,
+                            unpaired = true,
+                        )
+                        false
                     } else {
                         val backoffMs = backoffMillis(attempt)
-                        _state.value = _state.value.copy(
-                            loading = false,
-                            connection = "重连中…（${backoffMs / 1000}s 后重试）",
+                        // 把重试计划汇报给 mux：它是唯一的载波，全局状态条读它的 stats。
+                        connection.mux.noteRetry(
+                            reason = (cause as? TypertException)?.let { "${it.code}：${it.message}" }
+                                ?: (cause.message ?: cause.javaClass.simpleName),
+                            delayMillis = backoffMs,
                         )
+                        _state.value = _state.value.copy(loading = false)
                         delay(backoffMs)
                         // 重连成功后重新补一次会话摘要（断线期间的变更要补回来）。
                         firstSnapshot = true
@@ -156,7 +235,6 @@ class HomeViewModel(
                     val typert = cause as? TypertException
                     _state.value = _state.value.copy(
                         loading = false,
-                        connection = "已断开",
                         error = typert?.let { "${it.code}：${it.message}" }
                             ?: (cause.message ?: cause.javaClass.simpleName),
                         needsRepair = typert?.isUnpaired == true,
@@ -167,10 +245,16 @@ class HomeViewModel(
                         .copy(
                             loading = false,
                             snapshot = snapshot,
-                            connection = "已连接",
                             error = null,
+                            fromCache = false,
+                            // 网络数据到了：此后缓存不得再覆盖状态（warmStart 的竞态守卫）。
+                            networkArrived = true,
                         )
                         .withDerived(snapshot, _state.value.sessions)
+                    // 写穿缓存：拿到权威快照就落盘，供下次冷启动先铺。
+                    cache?.let { store ->
+                        viewModelScope.launch { store.writeWorkspaces(ownerId, snapshot) }
+                    }
                     // 工作区刚拿到时补一次会话摘要。已在跑就不重复发。
                     if (firstSnapshot) {
                         firstSnapshot = false
@@ -223,6 +307,10 @@ class HomeViewModel(
                         sessionsError = null,
                     )
                     .withDerived(_state.value.snapshot, result)
+                // 会话列表是权威全量（实测无游标、limit 被忽略），直接整表覆盖。
+                cache?.let { store ->
+                    viewModelScope.launch { store.writeSessions(ownerId, result.items) }
+                }
             } catch (cause: Exception) {
                 // `CancellationException` 是 Exception 的子类，绝不能在这里被吞掉：
                 // 协程被取消时（离开页面 / retry() 取消旧 job）如果写一条
@@ -262,8 +350,12 @@ class HomeViewModel(
     companion object {
         private const val MAX_BACKOFF_MS = 30_000L
 
-        fun factory(connection: DshConnection): ViewModelProvider.Factory = viewModelFactory {
-            initializer { HomeViewModel(connection) }
+        fun factory(
+            connection: DshConnection,
+            cache: DshCache? = null,
+            ownerId: String = "",
+        ): ViewModelProvider.Factory = viewModelFactory {
+            initializer { HomeViewModel(connection, cache, ownerId) }
         }
     }
 }

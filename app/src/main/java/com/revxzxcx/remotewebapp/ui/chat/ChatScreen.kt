@@ -42,11 +42,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
+import com.revxzxcx.remotewebapp.core.protocol.isHealthy
 import com.revxzxcx.remotewebapp.core.session.ChatItem
 import com.revxzxcx.remotewebapp.core.session.ContentBlock
 import com.revxzxcx.remotewebapp.core.session.LiveAttempt
 import com.revxzxcx.remotewebapp.core.session.ToolFilePaths
 import com.revxzxcx.remotewebapp.core.session.visibleAssistantBlocks
+import com.revxzxcx.remotewebapp.ui.common.CacheNotice
+import com.revxzxcx.remotewebapp.ui.common.ConnectionBanner
 import com.revxzxcx.remotewebapp.ui.files.FileTarget
 import com.revxzxcx.remotewebapp.ui.home.TimeText
 import com.revxzxcx.remotewebapp.ui.home.rememberNow
@@ -69,8 +72,10 @@ fun ChatScreen(
     title: String,
     onBack: () -> Unit,
     onOpenFile: (FileTarget) -> Unit,
+    onUnpair: (() -> Unit)? = null,
 ) {
     val state by viewModel.state.collectAsState()
+    val carrier by viewModel.carrier.collectAsState()
     val draft by viewModel.draft.collectAsState()
     val listState = rememberLazyListState()
     val now = rememberNow()
@@ -91,15 +96,19 @@ fun ChatScreen(
     // 滚动目标必须是**最后一行**：列表里除了 [ChatUiState.items] 还可能有
     // 「加载更早」的转圈行和流式预览行，只按 `items.size` 算会少滚一两行，
     // 表现是新消息停在屏幕下沿看不全。
+    //
+    // key **只含 `lastIndex`**：流式生成时文本每个 token 变一次，把它当 key 会不停取消正在
+    // 进行的滚动（`scrollToItem` 是挂起函数），在高频 token 下表现为抖动甚至完全跟不上
+    // （R006 P3-4）。文本增长改在同一个 effect 内用 `snapshotFlow` 收集——它天然按快照帧
+    // 合并，一秒几十次 chunk 只会滚几次。
     val itemCount = state.items.size
-    val liveLength = state.live?.text?.length ?: 0
     val lastIndex = itemCount +
         (if (state.loadingMore) 1 else 0) +
         (if (state.live != null) 1 else 0) - 1
-    LaunchedEffect(lastIndex, liveLength) {
-        if (atBottom.value && lastIndex >= 0) {
-            listState.scrollToItem(lastIndex)
-        }
+    LaunchedEffect(listState, lastIndex) {
+        if (lastIndex < 0) return@LaunchedEffect
+        snapshotFlow { state.live?.text?.length ?: 0 }
+            .collect { if (atBottom.value) listState.scrollToItem(lastIndex) }
     }
 
     // 滚到顶时自动加载更早历史。
@@ -146,6 +155,24 @@ fun ChatScreen(
         },
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            // 全局状态条（FR-4.4）。与工作区页读的是同一个载波状态，所以两处永远一致。
+            // 只在非健康时显示：正常聊天时它占的那一行高度没有价值，异常时才是关键信息。
+            if (!carrier.isHealthy) {
+                ConnectionBanner(
+                    carrier = carrier,
+                    nowMillis = now,
+                    onRepair = onUnpair,
+                    onRetry = viewModel::retry,
+                )
+            }
+
+            if (state.fromCache) {
+                CacheNotice("正在同步：当前显示的是上次缓存的会话内容。")
+            }
+
+            // 三类错误各自带自己的重试动作（R006 P3-6）：共用一个字段时，「发送失败」的
+            // 错误条上那个「重试」也去重启整条 follow 流——比失败本身重得多，还不会重新
+            // 发送那条消息。用户点了按钮发现什么都没发生。
             state.error?.let { error ->
                 Surface(color = Color(0xFF3A1E22), modifier = Modifier.fillMaxWidth()) {
                     Row(
@@ -159,6 +186,40 @@ fun ChatScreen(
                             modifier = Modifier.weight(1f),
                         )
                         TextButton(onClick = viewModel::retry) { Text("重试") }
+                    }
+                }
+            }
+
+            state.sendError?.let { error ->
+                Surface(color = Color(0xFF3A1E22), modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFFFB4AB),
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = viewModel::retrySend) { Text("重试") }
+                    }
+                }
+            }
+
+            state.pageError?.let { error ->
+                Surface(color = Color(0xFF3A1E22), modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFFFB4AB),
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = viewModel::retryLoadMore) { Text("重试") }
                     }
                 }
             }

@@ -34,8 +34,19 @@ data class ChatUiState(
      * 所以**不能**因为落盘就置假——那会让中止按钮在第 1 步之后就消失。
      */
     val generating: Boolean = false,
-    /** 发送/中止等操作的错误提示。 */
+    /**
+     * 流（`session/follow`）断开的错误提示。
+     *
+     * 与 [sendError] / [pageError] 分开是刻意的（R006 P3-6）：早前三类故障共用一个字段，
+     * 于是「发送失败」「翻页失败」的错误条上那个「重试」也去调 `retry()`——重启整条 follow 流。
+     * 重启流比失败本身重得多（丢掉 live 预览、重新拉整个窗口），而且**不会**重新发送那条
+     * 消息、也不会重新翻那一页，用户点了按钮发现什么都没发生。三处各自带自己的重试动作。
+     */
     val error: String? = null,
+    /** 发送 / 中止失败。重试动作是重新发送，不是重启流。 */
+    val sendError: String? = null,
+    /** 翻页（加载更早历史）失败。重试动作是重新翻页。 */
+    val pageError: String? = null,
     /** 是否已成功收到过第一帧（用于区分「空会话」与「还没加载」）。 */
     val ready: Boolean = false,
     /**
@@ -59,6 +70,13 @@ data class ChatUiState(
     val changes: Map<Long, ChangesEntry> = emptyMap(),
     /** 正在拉取摘要的 seq 集合（UI 显示转圈）。 */
     val changesLoading: Set<Long> = emptySet(),
+    /**
+     * 当前条目来自本地缓存、还没有被网络快照确认（需求 FR-4.3）。
+     *
+     * 与工作区页的 `HomeUiState.fromCache` 同一用途：让聊天页能显示一条「正在同步…」的
+     * 细提示，而不是让用户以为看到的就是最新状态。收到任何一帧后由 reducer 置假。
+     */
+    val fromCache: Boolean = false,
 )
 
 /**
@@ -70,39 +88,78 @@ data class ChatUiState(
  * 四条不变量：
  * 1. [ChatUiState.items] 永远按 `seq` 严格升序且不重复（用 `seq` 去重）。
  * 2. 同 `(turn, step)` 的助手消息到达时，对应的 [ChatUiState.live] 预览**必须**被丢弃。
- * 3. 快照（`snapshot` 帧）**替换**而不是追加条目——它是一段窗口，不是增量。
+ * 3. 快照（`snapshot` 帧）**替换**它覆盖到的那段窗口，但**保留**窗口之前的已加载历史
+ *    （`seq < 快照最小 seq`）——否则每次重连都会丢掉用户翻出来的旧消息（FR-4.2）。
  * 4. [ChatUiState.generating] 只由 `turn/start` / `turn/end`（以及快照的活跃尝试）决定。
  */
 object ChatReducer {
 
-    /** 折叠一帧。 */
-    fun reduce(state: ChatUiState, frame: ChatFrame): ChatUiState = when (frame) {
-        is ChatFrame.Snapshot -> onSnapshot(state, frame)
-        is ChatFrame.Event -> onEvent(state, frame)
-        is ChatFrame.Live -> onLive(state, frame.frame)
-    }
+    /**
+     * 折叠一帧。
+     *
+     * `fromCache` 在**任何**一帧到达后都归假：帧只可能来自存活的 `session/follow` 流，
+     * 所以「收到帧」本身就等于「网络已通、屏幕上的东西即将/已经被权威数据覆盖」。
+     * 放在这里统一处理，而不是在三个 `onXxx` 里各写一遍——漏一处就会让「正在同步…」
+     * 的提示永久挂在界面上（这类「标志位没复位」的缺陷本工程已出现过三次：R003 P1-2、
+     * R004 P2-1、R005b P3-11）。
+     */
+    fun reduce(state: ChatUiState, frame: ChatFrame): ChatUiState =
+        when (frame) {
+            is ChatFrame.Snapshot -> onSnapshot(state, frame)
+            is ChatFrame.Event -> onEvent(state, frame)
+            is ChatFrame.Live -> onLive(state, frame.frame)
+        }.copy(fromCache = false)
 
     /**
      * 开场快照。
      *
-     * 条目**替换**（快照是一段窗口）；`hasMore`/`cursor` 用快照的值。
-     * 重连时会再次收到快照，此时用新窗口覆盖旧窗口是正确的——服务端保证窗口是
-     * 从同一游标往前推的连续区间（`history.js:395-426` `paginate`）。
+     * **重连补齐（FR-4.2）**：快照是一段窗口而不是全量——`session/follow` 的
+     * `maxMessages` 只有几百条，而用户可能已经用 `session/page` 翻出更早的历史。
+     * 早前这里直接「用帧内容替换 items」，于是每断一次线、每重连一次，用户翻出来的旧历史
+     * 就被静默丢掉（而他仍停留在原来的滚动位置，看到的是消息凭空消失）。
+     *
+     * 现在的合并规则分两段，判据是**快照自身的最小 seq**：
+     *  - `seq < snapshotMinSeq` 的旧条目：快照窗口根本没覆盖它们，**保留**；
+     *  - `seq >= snapshotMinSeq` 的：快照是权威，一律以帧内容为准（这不是「新数据覆盖旧数据」
+     *    的猜测，而是服务端对同一段日志的重新下发——同 seq 的事件内容必然相同）。
+     *
+     * 边界：快照为空时 `snapshotMinSeq` 取 [Long.MAX_VALUE]，于是所有已加载的历史都被保留。
+     * 这是刻意的——空快照只说明「这个窗口没有消息」，不说明「日志是空的」，把用户已翻出来的
+     * 历史清掉才是错的。
+     *
+     * `cursor` 一律用快照的：它是日志尾部游标，服务端权威。
      */
     private fun onSnapshot(state: ChatUiState, frame: ChatFrame.Snapshot): ChatUiState {
-        val items = frame.items.distinctBy { it.seq }.sortedBy { it.seq }
+        val window = frame.items.distinctBy { it.seq }.sortedBy { it.seq }
+        // 窗口边界取**两者更小**的那个：`windowMinSeq`（窗口信封的最小 seq）与条目最小 seq
+        // 取 min，是因为 `turn/start` / `step/end` 这类事件不占行、解析不出条目，却同样属于
+        // 「快照已覆盖」的范围。只看条目最小 seq 会把它们当成窗口之外而从旧 items 里保留同
+        // seq 的副本，而 `distinctBy` 保留首次出现 → 旧内容胜出（R006 P3-1）。解析器没给
+        // （单测手工构造的帧）时退回条目最小 seq；两者都没有说明窗口是空的。
+        val snapshotMinSeq = minOf(
+            frame.windowMinSeq ?: Long.MAX_VALUE,
+            window.firstOrNull()?.seq ?: Long.MAX_VALUE,
+        )
+        val older = state.items.filter { it.seq < snapshotMinSeq }
+        // `distinctBy` 不只是洁癖：`ChatScreen` 用 `key = { it.seq }` 渲染
+        // `LazyColumn`，重复 key 会直接抛 `IllegalArgumentException`。服务端窗口
+        // 理论上不会重复，但这一行是零成本的保险（R003 P1-1 同类问题）。
+        val items = (older + window).distinctBy { it.seq }.sortedBy { it.seq }
         // 快照替换窗口后，窗口外的摘要就该丢掉：否则长时间挂着会随会话越长越吃内存。
         // 仍在窗口内的必须保留——同一轮次的摘要没有必要重新拉一遍（每次都是一次网络往返）。
         val liveSeqs = items.asSequence().filterIsInstance<ChatItem.Changes>().map { it.seq }.toSet()
+        // 游标与 hasMore 必须相对**合并后的 items** 判断，不能直取快照窗口值（R006 P2-9）：
+        // items 已经是「更早历史 ∪ 快照窗口」，若用户此前已翻到 seq=1，快照窗口最小 seq
+        // 可能远大于 1，直取 `frame.hasMore` 就会留下一个点了没用的「加载更早」。
+        val oldest = items.firstOrNull()?.seq
         val next = state.copy(
-            // `distinctBy` 不只是洁癖：`ChatScreen` 用 `key = { it.seq }` 渲染
-            // `LazyColumn`，重复 key 会直接抛 `IllegalArgumentException`。服务端窗口
-            // 理论上不会重复，但这一行是零成本的保险（R003 P1-1 同类问题）。
             items = items,
             loading = false,
             ready = true,
-            hasMore = frame.hasMore,
-            cursor = frame.cursor,
+            hasMore = frame.hasMore && (oldest == null || oldest > 1L),
+            // `cursor` 是日志**尾部**游标，服务端权威；但快照缺该字段时解析器给的是 -1，
+            // 直取会把已推进的有效游标覆盖回去（`onEvent` 用的是 `maxOf`，两处不一致）。
+            cursor = if (frame.cursor >= 0L) maxOf(state.cursor, frame.cursor) else state.cursor,
             title = frame.title ?: state.title,
             cwd = frame.cwd ?: state.cwd,
             error = null,
@@ -160,38 +217,45 @@ object ChatReducer {
                 (seq >= 0L && seq == state.committedSeq) ||
                 (type == "assistant/message" && frame.turn == live.turn && frame.step == live.step)
             )
+        // committed 预览的兜底作废：`committed` 的落盘事件若因信封畸形被解析器整帧丢弃，
+        // 「seq == committedSeq」这条永远等不到。游标一旦越过它，这个预览就不可能再被
+        // 对应的落盘事件清掉了——继续留着会一直显示到本轮 `turn/end`，看上去像同一条消息
+        // 渲染了两遍。**清 committedSeq 的地方必须同时清 live**（R006 P2-10）。
+        val committedExpired = !clearLive && seq >= 0L && state.committedSeq in 0L until seq
+        val dropLive = clearLive || committedExpired
         val committedSeq = when {
-            clearLive -> -1L
-            seq >= 0L && state.committedSeq in 0L until seq -> -1L
+            clearLive || committedExpired -> -1L
             else -> state.committedSeq
         }
 
         if (item == null || item.isInvisible()) {
-            // 纯噪声事件，或「只承载工具调用」的助手消息：不动条目，只同步状态标志。
+            // 不占行的东西：纯噪声事件（`step/end` 等），或「只承载工具调用」的助手消息。
             //
-            // 后者必须仍然走这里——它是「本步已落盘」的信号，预览要靠它清掉
-            // （见上面 `clearLive` 的第三条）。只是它自己不该占一行：
-            // 那次工具调用由独立的 `tool/call` 事件渲染。
-            if (type != "turn/start" && type != "turn/end" && !clearLive) return state
+            // 这里**不能**提前 return state。早前对「与预览无关的噪声事件」直接返回，
+            // 于是走不到下面的游标推进：断线重连后 `cursor` 会落后于真实收到的事件，
+            // 下一次翻页会重复请求已经拿到的区间（R006 P3-15）。
+            //
+            // `ready`/`loading` 也一样必须更新，判据是「收到了一条可解析的真实事件信封」
+            // 而不是「解析出了卡片」：整个会话只有工具调用时，用 `item != null` 当判据会让
+            // 页面永远停在转圈（R006 P3-14）。
             return state.copy(
                 generating = generating,
-                live = if (clearLive) null else live,
+                live = if (dropLive) null else live,
                 committedSeq = committedSeq,
                 cursor = if (seq >= 0L) maxOf(state.cursor, seq) else state.cursor,
-                // 收到过真实事件就不再是「正在加载」——即使这条不占行
-                // （整个会话只有工具调用时，否则会永远停在转圈）。
-                ready = state.ready || item != null,
-                loading = if (item != null) false else state.loading,
+                ready = true,
+                loading = false,
             )
         }
 
-        val items = (state.items + item)
-            .distinctBy { it.seq }
-            .sortedBy { it.seq }
+        // 同 seq 的新条目必须**替换**旧条目。写成 `state.items + item` 再 `distinctBy` 会保留
+        // 首次出现的那份（旧内容），于是一条被重新投递、内容已更新的同 seq 事件被静默丢弃
+        // （R006 P3-13）。
+        val items = (state.items.filterNot { it.seq == item.seq } + item).sortedBy { it.seq }
 
         return state.copy(
             items = items,
-            live = if (clearLive) null else live,
+            live = if (dropLive) null else live,
             committedSeq = committedSeq,
             ready = true,
             loading = false,
@@ -227,7 +291,11 @@ object ChatReducer {
                 state
             } else if (frame.committedSeq == null) {
                 // `abandoned`：这次尝试被丢弃，预览内容不该留下。
-                state.copy(live = null, generating = false)
+                //
+                // **不动 `generating`**：不变量 4 规定它只由 `turn/start`/`turn/end` 翻转。
+                // 一次尝试被丢弃并不代表本轮结束——多步轮次里控制器会立刻开新尝试，若在这里
+                // 置 false，中止按钮会提前消失且直到下一轮 `turn/start` 才恢复（R006 P2-11）。
+                state.copy(live = null)
             } else {
                 // `committed`：对应的持久化事件随后到达，届时由 [onEvent] 清预览。
                 // 这里**不**清，否则会在落盘事件与预览之间闪一下空白；只记下 seq 兜底。
@@ -277,9 +345,14 @@ object ChatReducer {
      *
      * `index < 0`（基线回放）**不推进**：基线没有逐块 index，推进只会让计数虚高，
      * 后面真实 chunk 的 index 就永远对不上期望值。
+     *
+     * `index` 超 `Int` 范围时**不推进**：早前写成 `index.toInt() == nextIndex`，`toInt()`
+     * 高位截断会让畸形的巨大 index 恰好等于 `nextIndex` 而错误推进（R006 P3-17）。
      */
-    private fun advance(attempt: LiveAttempt, index: Long): Int =
-        if (index >= 0L && index.toInt() == attempt.nextIndex) attempt.nextIndex + 1 else attempt.nextIndex
+    private fun advance(attempt: LiveAttempt, index: Long): Int {
+        if (index < 0L || index > Int.MAX_VALUE.toLong()) return attempt.nextIndex
+        return if (index.toInt() == attempt.nextIndex) attempt.nextIndex + 1 else attempt.nextIndex
+    }
 
     /** 预览里是否有任何可见内容。 */
     private fun LiveAttempt.hasContent(): Boolean =

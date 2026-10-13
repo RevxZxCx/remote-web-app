@@ -4,7 +4,11 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
@@ -20,6 +24,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -93,6 +98,15 @@ class RemoteStreamMux(
     /** 当前是否有可用连接（调试页用）。 */
     val isConnected: Boolean get() = socket != null
 
+    private val _stats = MutableStateFlow(MuxStats())
+    private val _errors = MutableStateFlow<List<MuxError>>(emptyList())
+
+    /** 帧收发计数、握手成败、当前载波状态（需求 FR-4.4 与「可观测」非功能需求）。 */
+    val stats: StateFlow<MuxStats> = _stats.asStateFlow()
+
+    /** 最近 [ERROR_RING_SIZE] 条故障，新的在前（调试页）。 */
+    val errors: StateFlow<List<MuxError>> = _errors.asStateFlow()
+
     /**
      * 打开一条服务端流。
      *
@@ -109,7 +123,7 @@ class RemoteStreamMux(
             var terminal = false
             try {
                 val ws = waitForSocket()
-                ws.send(
+                ws.sendCounted(
                     buildJsonObject {
                         put("type", JsonPrimitive(MuxFrame.TYPE_OPEN))
                         put("streamId", JsonPrimitive(streamId))
@@ -137,7 +151,7 @@ class RemoteStreamMux(
                 streams.remove(streamId)
                 inbox.close()
                 if (!terminal) {
-                    socket?.send(
+                    socket?.sendCounted(
                         buildJsonObject {
                             put("type", JsonPrimitive(MuxFrame.TYPE_CANCEL))
                             put("streamId", JsonPrimitive(streamId))
@@ -147,12 +161,28 @@ class RemoteStreamMux(
             }
         }
 
+    /**
+     * 发一帧并计数。
+     *
+     * 为什么用扩展函数而不是在调用点各自 `_stats.update`：`open()`（含 `cancel`）是这个类里
+     * 唯一的出站路径，把计数钉在唯一入口上，调试页的「发出 N 帧」就不会因为将来加一个
+     * 上行 `item` 而漏记。
+     */
+    private fun WebSocket.sendCounted(text: String): Boolean {
+        val sent = send(text)
+        // 只有真的写出去了才计数：`send()` 在连接已关闭/队列满时返回 false，此时把
+        // 「发出帧」加一会让调试页的计数与真实链路行为脱节（断线后计数仍在涨）。
+        if (sent) _stats.update { it.copy(framesOut = it.framesOut + 1L) }
+        return sent
+    }
+
     /** 关闭整条 mux 与其上所有流。 */
     suspend fun close() {
         val doomed = mutex.withLock {
             generation++
             val current = socket
             socket = null
+            attempt?.let { it.dead = true }
             attempt?.deferred?.cancel()
             attempt = null
             current
@@ -161,6 +191,55 @@ class RemoteStreamMux(
         val channels = streams.values.toList()
         streams.clear()
         channels.forEach { it.close() }
+        // 主动关闭不是故障：把载波退回 Idle，并清掉上次的故障记忆与连续失败计数。
+        // 不清 `consecutiveFailures` 的话，下次断线会从前一轮的计数继续往上加
+        //（「第 5 次失败」而实际上刚才是第 1 次）。
+        _stats.update { it.copy(carrier = CarrierState.Idle, lastFailure = null, consecutiveFailures = 0L) }
+    }
+
+    /**
+     * 由持有重试计划的一方（`HomeViewModel` / `ChatViewModel` 的 `retryWhen`）汇报
+     * 「我打算在 [delayMillis] 之后重试，原因是什么」。
+     *
+     * 为什么由调用方汇报而不是 mux 自己重试：mux 是**被动**的（`open()` 是冷流，
+     * 收完就结束），重试语义属于订阅方。把重试计划投影回载波状态，既保证状态条与真实
+     * 行为一致，又不需要把 `Flow` 的生命周期塞进协议层。
+     *
+     * **本方法不改 `consecutiveFailures`**（R006 P2-6）：连续失败次数由 [recordFailure]
+     * 维护（每次真实故障 +1，建连成功归零），这里是纯投影。早前这里也做 +1，于是
+     * 「一次故障」会因为 `failCarrier` 的 recordFailure 与订阅方的 noteRetry 各算一次而
+     * 变成 2，同一逻辑故障被重订阅两次报成「第 4 次失败」。改成纯投影后天然幂等。
+     */
+    fun noteRetry(reason: String, delayMillis: Long, unpaired: Boolean = false) {
+        val now = System.currentTimeMillis()
+        _stats.update { current ->
+            val attempt = current.consecutiveFailures.coerceAtLeast(1L)
+            current.copy(
+                carrier = if (unpaired) {
+                    CarrierState.Unpaired(reason)
+                } else {
+                    CarrierState.Reconnecting(attempt = attempt, retryAtMillis = now + delayMillis, reason = reason)
+                },
+                lastFailure = reason,
+            )
+        }
+    }
+
+    /** 记录一次故障（同时进计数与环形缓冲）。 */
+    private fun recordFailure(code: String, summary: String) {
+        val now = System.currentTimeMillis()
+        _stats.update {
+            it.copy(
+                failures = it.failures + 1L,
+                consecutiveFailures = it.consecutiveFailures + 1L,
+                lastFailure = summary,
+                carrier = when (it.carrier) {
+                    is CarrierState.Connected -> CarrierState.Connecting
+                    else -> if (it.carrier is CarrierState.Unpaired) it.carrier else CarrierState.Connecting
+                },
+            )
+        }
+        _errors.update { previous -> (listOf(MuxError(now, summary, code)) + previous).take(ERROR_RING_SIZE) }
     }
 
     /**
@@ -181,7 +260,7 @@ class RemoteStreamMux(
             val (mine, ws) = mutex.withLock {
                 socket?.let { return it }
                 val gen = generation
-                val live = attempt?.takeIf { it.generation == gen }
+                val live = attempt?.takeIf { it.generation == gen && !it.dead }
                 if (live != null) {
                     false to live
                 } else {
@@ -193,19 +272,42 @@ class RemoteStreamMux(
             @Suppress("UNCHECKED_CAST")
             val live = ws as Attempt
             if (mine) {
+                // 首次连接期间状态条要显示「连接中…」而不是「未连接」：早前只有
+                // `recordFailure` 会写 `Connecting`，于是**成功**的首次握手全程显示「未连接」
+                //（R006 P2-7）。载波是全局唯一事实，这里如实投影。
+                _stats.update {
+                    if (it.carrier is CarrierState.Connected) it else it.copy(carrier = CarrierState.Connecting)
+                }
                 startConnection(live)
             }
             try {
                 withTimeout(HANDSHAKE_TIMEOUT_MS) { live.deferred.await() }
             } catch (cause: TimeoutCancellationException) {
-                // 只有负责建连的一方作废这次尝试，其余等待者会因 deferred 被取消而重新排队。
-                mutex.withLock {
+                // 作废这次尝试：置 `dead` 让被抛弃的 socket 的后续回调全部失效，同时递增
+                // `generation`，使「旧 socket 回调 `failCarrier`」不可能拆掉重试后已经建好的
+                // 健康连接（R006 P1-1）。这里必须动 `generation` 而不只是 `attempt`：回调线程
+                // 只按 `live.generation != generation` 判活。
+                val mineTimedOut = mutex.withLock {
                     if (attempt === live) attempt = null
-                    if (live.generation == generation) {
-                        live.socket?.cancel()
-                        live.socket = null
-                    }
+                    val mineNow = live.generation == generation
+                    if (mineNow) generation++
+                    live.dead = true
+                    live.socket?.cancel()
+                    live.socket = null
+                    mineNow
                 }
+                // 握手超时以前从不 `recordFailure`，于是隧道挂死这条**唯一**的失败路径下
+                // `stats.failures` 不增、错误环里什么都没有（R006 P2-5）。抛异常前先记一笔，
+                // 并且只记一次（`firstReport`），与 `failCarrier` 的去重规则一致。
+                val firstReport = !live.reported
+                live.reported = true
+                if (firstReport) {
+                    recordFailure(
+                        TypertException.CODE_TRANSPORT,
+                        "WebSocket 握手超时（${HANDSHAKE_TIMEOUT_MS / 1000}s）",
+                    )
+                }
+                if (!mineTimedOut) continue
                 throw TypertException(
                     TypertException.CODE_TRANSPORT,
                     "WebSocket 握手超时（${HANDSHAKE_TIMEOUT_MS / 1000}s）：${cause.message ?: "无响应"}",
@@ -230,6 +332,28 @@ class RemoteStreamMux(
         /** 回调线程写入、`close()` 读取，故需 `@Volatile`。 */
         @Volatile
         var socket: WebSocket? = null
+
+        /**
+         * 这次尝试是否已经记过一次故障。
+         *
+         * 一次逻辑故障会触发**多个**回调：非法帧会先 `failCarrier(4002 帧)`，紧接着
+         * `onClosed` 又会带着关闭码回调一次。若不做去重，调试页会把同一次断线显示成
+         * 「失败 2 次」，重连退避的「第 N 次失败」也会被夸大 —— 诊断数据必须与
+         * 用户感知的一次故障一一对应。
+         */
+        @Volatile
+        var reported: Boolean = false
+
+        /**
+         * 这次尝试是否已被作废（握手超时 / 整条 mux 关闭）。
+         *
+         * 与 [reported] 分开：`reported` 只挡**计数**，`dead` 挡**全部副作用**。被作废的
+         * 尝试上仍然活着的 socket 之后一定会回调 `onClosed`，那时它已经不代表当前连接了；
+         * 只挡计数的话，`failCarrier` 里的 `socket = null` 与 `streams.clear()` 会把重试后
+         * 建好的健康连接和新开的流一并拆掉（连接泄漏 + 同一故障记两次）。
+         */
+        @Volatile
+        var dead: Boolean = false
     }
 
     /** 服务端帧的规范化形状。 */
@@ -297,22 +421,37 @@ class RemoteStreamMux(
     private inner class MuxListener(private val live: Attempt) : WebSocketListener() {
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            if (live.generation != generation) {
+            // 两道门：generation 变了说明整条 mux 已被 close() 作废；dead 说明这次 attempt
+            // 已被握手超时或已结束的故障作废。迟到的 socket 在这里就关掉，绝不让它覆盖
+            // 后继连接（R006 P1-1 / P2-2）。两道门合起来保证了「同代际的旧 socket 覆盖新
+            // socket」不可达：作废一定会递增 generation 或置 dead。
+            if (live.generation != generation || live.dead) {
                 webSocket.close(1000, "stale generation")
                 return
             }
             socket = webSocket
             if (attempt === live) attempt = null
             live.deferred.complete(webSocket)
+            // 连上了：故障计数归零。不清 [_errors]——调试页需要看到「曾经失败过几次」。
+            _stats.update {
+                it.copy(
+                    opens = it.opens + 1L,
+                    carrier = CarrierState.Connected(System.currentTimeMillis()),
+                    lastFailure = null,
+                    consecutiveFailures = 0L,
+                )
+            }
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
-            if (live.generation != generation) return
+            if (live.generation != generation || live.dead) return
+            _stats.update { it.copy(framesIn = it.framesIn + 1L) }
 
             // 1) 先严格校验帧形状 —— 与 `client.js:585` 完全同序：parseRemoteStreamServerMessage
             //    先抛错，之后才做 streamId 查表。非法帧（含未知 type）必须 4002 关闭整条连接，
             //    即使它的 streamId 本机并不认识。
             val frame = validate(text) ?: run {
+                _stats.update { it.copy(invalidFrames = it.invalidFrames + 1L) }
                 failCarrier(
                     live,
                     TypertException(TypertException.CODE_INVALID_STREAM_FRAME, INVALID_FRAME_REASON),
@@ -322,12 +461,33 @@ class RemoteStreamMux(
             }
 
             // 2) 再查表；未知 streamId 静默忽略（`client.js:586-587`）。
-            val channel = streams[frame.streamId] ?: return
+            val channel = streams[frame.streamId] ?: run {
+                _stats.update { it.copy(orphanFrames = it.orphanFrames + 1L) }
+                return
+            }
             when (frame) {
                 is ServerFrame.Item -> channel.trySend(MuxEvent.Item(frame.value))
                 is ServerFrame.End -> channel.trySend(MuxEvent.End)
                 is ServerFrame.Error -> channel.trySend(MuxEvent.Error(frame.code, frame.message, frame.details))
             }
+        }
+
+        /**
+         * 二进制帧。
+         *
+         * 协议只发文本帧（`src/remote-api.ts` 的转发路径全部走文本）。既然「任何认不出的帧
+         * 都必须以 4002 关闭整条连接」（`client.js:590-595`），二进制帧就属于认不出的帧：
+         * 早前没有这个覆写，OkHttp 的默认实现是**静默忽略**，于是一个代理/中间设备插入的
+         * 二进制帧会被无声吞掉，连接状态仍显示健康（R006 P2-7）。
+         */
+        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            if (live.generation != generation || live.dead) return
+            _stats.update { it.copy(framesIn = it.framesIn + 1L, invalidFrames = it.invalidFrames + 1L) }
+            failCarrier(
+                live,
+                TypertException(TypertException.CODE_INVALID_STREAM_FRAME, INVALID_FRAME_REASON),
+            )
+            webSocket.close(MuxFrame.CLOSE_INVALID_FRAME, INVALID_FRAME_REASON)
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -376,11 +536,29 @@ class RemoteStreamMux(
         }
     }
 
-    /** socket 失效：唤醒等待者、让所有流以异常结束。 */
+    /**
+     * socket 失效：唤醒等待者、让所有流以异常结束。
+     *
+     * **副作用必须幂等**（R006 P1-1 / P2-1）：一次逻辑故障会触发多个回调 —— 非法帧会先
+     * `failCarrier` 再 `close(4002)`，随后 `onClosed` 又进来一次；握手超时作废 attempt 后，
+     * 被抛弃的旧 socket 稍后也会回调 `onClosed`。早前只有**计数**被 `reported` 挡住，
+     * `socket = null` 与 `streams.clear()` 却是无条件的：一个已经作废、本该被忽略的迟到回调
+     * 会把重试后刚建好的健康连接和新开的流一起拆掉（旧 socket 引用丢失、永不 close =
+     * 连接泄漏），并把同一次故障记成第二次 failures。
+     *
+     * 因此顺序是：先按 `generation` / `dead` 判活并**提前返回**；然后只在
+     * `socket === live.socket` 时才清 mux 级引用（不能把后来者的 socket 清掉）。
+     */
     private fun failCarrier(live: Attempt, cause: Throwable) {
-        if (live.generation != generation) return
-        socket = null
+        if (live.generation != generation || live.dead) return
+        live.dead = true
+        // 同一次断线会有多个回调（非法帧 → onClosed、onFailure → onClosed），只记第一条。
+        val firstReport = !live.reported
+        live.reported = true
+        if (socket === live.socket) socket = null
         if (attempt === live) attempt = null
+        val code = (cause as? TypertException)?.code ?: TypertException.CODE_TRANSPORT
+        if (firstReport) recordFailure(code, cause.message ?: cause.javaClass.simpleName)
         live.deferred.completeExceptionally(cause)
         val channels = streams.values.toList()
         streams.clear()
@@ -389,6 +567,14 @@ class RemoteStreamMux(
 
     private companion object {
         const val INVALID_FRAME_REASON: String = "invalid Remote stream frame"
+
+        /**
+         * 调试页保留的故障条数。
+         *
+         * 取 20：够看出「是偶发抖动还是每次都挂在同一个地方」，又不至于让内存里的字符串
+         * 随会话无限增长（每次失败都会带上 message，含超时时的异常文本）。
+         */
+        const val ERROR_RING_SIZE = 20
 
         /**
          * WS 升级（握手）超时。

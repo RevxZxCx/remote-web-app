@@ -5,6 +5,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
 }
 
 android {
@@ -75,6 +76,11 @@ dependencies {
 
     // 代码高亮（决策 D13：轻量高亮库，不用桌面端的 Shiki）。
     implementation(libs.highlights)
+
+    // 离线缓存（决策 D04）：工作区 / 会话列表 / 最近消息。Room 用 KSP 生成实现。
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    ksp(libs.androidx.room.compiler)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

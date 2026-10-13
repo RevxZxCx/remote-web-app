@@ -37,18 +37,11 @@ class WorkspaceRepository(
      *
      * 因此种子取 `null` 并在之后 [filterNotNull]，让「第一个快照」严格等于「服务端第一帧」。
      * 首帧空快照的展示职责交给 `HomeUiState.snapshot` 的默认值（只在首次组合时生效）。
-     *
-     * @param onRawFrame 可选的调试钩子：每一帧原始 JSON 都会回调一次（M4 调试页用）。
      */
-    fun snapshotFlow(
-        onRawFrame: ((String) -> Unit)? = null,
-    ): Flow<WorkspaceSnapshot> =
+    fun snapshotFlow(): Flow<WorkspaceSnapshot> =
         connection.mux
             .open(ENDPOINT, JsonObject(emptyMap()))
-            .map { element ->
-                onRawFrame?.invoke(element.toString())
-                parser.parse(element)
-            }
+            .map { element -> parser.parse(element) }
             // 解析不了的帧（未知形状）直接丢弃，否则下面 scan 的 lambda 参数会是可空类型。
             .filterNotNull()
             // 种子必须是 null（而不是空快照），见上方 KDoc。

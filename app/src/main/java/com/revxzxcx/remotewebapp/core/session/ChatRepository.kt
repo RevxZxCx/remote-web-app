@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
 import java.util.UUID
 
 /**
@@ -51,7 +52,7 @@ class ChatRepository(
             ChatArgs.page(sessionId, throughSeq, beforeSeq, maxMessages),
         )
         val (items, hasMore) = frames.parsePage(raw)
-        PageResult(items = items, hasMore = hasMore)
+        PageResult(items = items, hasMore = hasMore, envelopes = frames.recordEnvelopes(raw))
     }
 
     /**
@@ -85,5 +86,13 @@ class ChatRepository(
     data class PageResult(
         val items: List<ChatItem>,
         val hasMore: Boolean,
+        /**
+         * 本次翻页取回的**原始事件信封**，供离线缓存落盘（需求 FR-4.3）。
+         *
+         * 与 [items] 是同一批事件的两个视图：前者给 reducer，后者给缓存。分开返回而不是
+         * 让缓存层从 [items] 反推，是为了让「缓存里存的永远是服务端原文」这条规则
+         * 在类型上就成立。
+         */
+        val envelopes: List<JsonObject> = emptyList(),
     )
 }

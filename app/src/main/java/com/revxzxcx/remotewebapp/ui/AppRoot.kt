@@ -23,6 +23,8 @@ import com.revxzxcx.remotewebapp.core.AppState
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.ui.chat.ChatScreen
 import com.revxzxcx.remotewebapp.ui.chat.ChatViewModel
+import com.revxzxcx.remotewebapp.ui.debug.DebugScreen
+import com.revxzxcx.remotewebapp.ui.debug.DebugViewModel
 import com.revxzxcx.remotewebapp.ui.files.FileTarget
 import com.revxzxcx.remotewebapp.ui.files.FileViewerScreen
 import com.revxzxcx.remotewebapp.ui.files.FileViewerViewModel
@@ -54,6 +56,9 @@ fun AppRoot(container: AppContainer) {
     /** 当前查看的文件；null 表示不在文件查看页。 */
     var openFile by remember { mutableStateOf<FileTarget?>(null) }
 
+    /** 是否停在调试页（需求 FR-4.4 / 可观测）。 */
+    var openDebug by remember { mutableStateOf(false) }
+
     LaunchedEffect(Unit) {
         // 幂等：重复调用只是重读一次凭证。
         container.bootstrap()
@@ -76,6 +81,7 @@ fun AppRoot(container: AppContainer) {
                 LaunchedEffect(Unit) {
                     openSession = null
                     openFile = null
+                    openDebug = false
                 }
                 val vm: PairViewModel = viewModel(
                     key = "pair",
@@ -93,10 +99,27 @@ fun AppRoot(container: AppContainer) {
                     val session = openSession
                     val file = openFile
                     when {
+                        openDebug -> {
+                            val vm: DebugViewModel = viewModel(
+                                key = "debug",
+                                factory = DebugViewModel.factory(
+                                    connection = connection,
+                                    cache = container.cache,
+                                    ownerId = container.ownerId,
+                                ),
+                            )
+                            BackHandler(enabled = true) { openDebug = false }
+                            DebugScreen(viewModel = vm, onBack = { openDebug = false })
+                        }
+
                         session == null -> {
                             val vm: HomeViewModel = viewModel(
                                 key = "home-${current.credential.deviceId}",
-                                factory = HomeViewModel.factory(connection),
+                                factory = HomeViewModel.factory(
+                                    connection = connection,
+                                    cache = container.cache,
+                                    ownerId = container.ownerId,
+                                ),
                             )
                             HomeScreen(
                                 viewModel = vm,
@@ -105,6 +128,7 @@ fun AppRoot(container: AppContainer) {
                                     openSession = summary
                                     openFile = null
                                 },
+                                onOpenDebug = { openDebug = true },
                             )
                         }
 
@@ -129,7 +153,12 @@ fun AppRoot(container: AppContainer) {
                             // key 带上 sessionId：切换会话时拿到的是新 ViewModel（新流、新状态）。
                             val vm: ChatViewModel = viewModel(
                                 key = "chat-${session.sessionId}",
-                                factory = ChatViewModel.factory(connection, session.sessionId),
+                                factory = ChatViewModel.factory(
+                                    connection = connection,
+                                    sessionId = session.sessionId,
+                                    cache = container.cache,
+                                    ownerId = container.ownerId,
+                                ),
                             )
                             // 系统返回键与标题栏「返回」等效：不然两层下钻后按返回会直接退出 App。
                             BackHandler(enabled = true) { openSession = null }
@@ -138,6 +167,7 @@ fun AppRoot(container: AppContainer) {
                                 title = session.displayName,
                                 onBack = { openSession = null },
                                 onOpenFile = { target -> openFile = target },
+                                onUnpair = { scope.launch { container.unpair() } },
                             )
                         }
                     }

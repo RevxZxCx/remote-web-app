@@ -55,6 +55,23 @@ sealed interface ChatFrame {
          * [ChatUiState.generating] 在快照路径上的权威来源（R004 P2-1）。
          */
         val tailTurnOpen: Boolean = false,
+        /**
+         * 窗口里所有可解析事件的**原始信封**，供离线缓存落盘（需求 FR-4.3）。
+         *
+         * 与 [items] 是同一批事件的两种视图：`items` 只含能渲染成卡片的（`turn/start` 这类
+         * 噪声不占行，却是生成状态的权威来源），缓存要存的是**全部**事件——不然重连回放时
+         * 生成状态就丢了。
+         */
+        val envelopes: List<JsonObject> = emptyList(),
+        /**
+         * 窗口内**全部可解析记录**（含不占行的事件）的最小 `seq`。
+         *
+         * 必须与 [items] 的最小 seq 区分开：`turn/start`、`step/end` 这类事件解析不出卡片，
+         * 但同样在快照覆盖范围内。重连合并时若用 [items] 的最小 seq 当窗口下界，这些事件
+         * 的 seq 会被当成「窗口之外」而保留旧条目，`distinctBy` 又保留先到的旧内容
+         * （R006 P3-1）。
+         */
+        val windowMinSeq: Long? = null,
     ) : ChatFrame
 
     /**
@@ -75,6 +92,14 @@ sealed interface ChatFrame {
         val turn: Long? = null,
         /** 事件载荷自带的步骤；`turn/start` / `turn/end` 没有，故可空。 */
         val step: Long? = null,
+        /**
+         * 原始事件信封 `{type,seq,time,data}`，供离线缓存落盘（需求 FR-4.3）。
+         *
+         * 为什么要把原文带出来而不是让调用方从 [item] 反推：缓存要存的是**服务端原样**
+         * 下发的东西（见 `CachedMessage` 的 KDoc）。从 [item] 反推需要把「解析」这套规则
+         * 再写一遍反向版本，两份实现必然漂移。这里只是把已经拿到的对象多带一程。
+         */
+        val envelope: JsonObject? = null,
     ) : ChatFrame
 
     /** 瞬时流式帧。 */
@@ -159,6 +184,21 @@ class ChatFrameParser(
     }
 
     /**
+     * 从 `[{type:'event',event}]` 里取出**原始事件信封**，供离线缓存落盘。
+     *
+     * 只保留能解析出 `{type,seq,time,data}` 的对象：缓存里的每一行都要能被
+     * [SessionEventParser] 原样读回来，塞进无法解析的东西只会在读取时被丢掉。
+     */
+    fun recordEnvelopes(element: JsonElement?): List<JsonObject> {
+        val array = element as? JsonArray ?: return emptyList()
+        return array.mapNotNull { entry ->
+            val wrapper = entry as? JsonObject ?: return@mapNotNull null
+            val event = wrapper["event"] as? JsonObject ?: return@mapNotNull null
+            event.takeIf { events.parseEvent(it) != null }
+        }
+    }
+
+    /**
      * 解析一条 `event` 帧。
      *
      * 信封解析不出 `type`/`seq` 时返回 `null`（整帧丢弃）；能解析出信封但载荷不可渲染时
@@ -176,6 +216,7 @@ class ChatFrameParser(
             // 或只含 tool-call 块而解析不出卡片，但预览清理依赖这对坐标。
             turn = event.data.longOrNull("turn"),
             step = event.data.longOrNull("step"),
+            envelope = obj,
         )
     }
 
@@ -184,6 +225,7 @@ class ChatFrameParser(
         val values = obj.objectOrNull("projections")?.objectOrNull("values")
         val activeAttempt = obj.objectOrNull("assistantStream")?.objectOrNull("activeAttempt")
         val rawRecords = obj["records"]
+        val envelopes = recordEnvelopes(rawRecords)
         return ChatFrame.Snapshot(
             items = records(rawRecords),
             cursor = obj.longOrNull("cursor") ?: -1L,
@@ -199,6 +241,12 @@ class ChatFrameParser(
                 .coerceAtLeast(0L)
                 .toInt(),
             tailTurnOpen = tailTurnOpen(rawRecords),
+            envelopes = envelopes,
+            // 窗口下界取**全部可解析事件**的 seq，而不是能渲染成卡片的 items：
+            // 噪声事件的 seq 同属窗口覆盖范围（R006 P3-1）。
+            windowMinSeq = envelopes
+                .mapNotNull { events.parseEvent(it)?.seq }
+                .minOrNull(),
         )
     }
 

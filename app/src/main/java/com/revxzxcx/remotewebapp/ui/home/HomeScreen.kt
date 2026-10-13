@@ -38,7 +38,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -52,7 +51,8 @@ import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.workspace.Workspace
-import kotlinx.coroutines.delay
+import com.revxzxcx.remotewebapp.ui.common.CacheNotice
+import com.revxzxcx.remotewebapp.ui.common.ConnectionBanner
 import kotlinx.coroutines.launch
 
 /**
@@ -70,8 +70,10 @@ fun HomeScreen(
     viewModel: HomeViewModel,
     onUnpair: () -> Unit,
     onOpenSession: ((SessionSummary, Workspace?) -> Unit)? = null,
+    onOpenDebug: (() -> Unit)? = null,
 ) {
     val state by viewModel.state.collectAsState()
+    val carrier by viewModel.carrier.collectAsState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
@@ -104,6 +106,9 @@ fun HomeScreen(
                         openSession(session, workspace)
                     },
                     onRefreshSessions = viewModel::refreshSessions,
+                    // 复用 HomeScreen 那一个时钟：抽屉自己再起一个定时器是多余的
+                    // （R006 P3-3），而且两边的 `now` 还不完全同步。
+                    now = now,
                 )
             }
         },
@@ -119,6 +124,9 @@ fun HomeScreen(
                     },
                     actions = {
                         TextButton(onClick = viewModel::retry) { Text("刷新") }
+                        if (onOpenDebug != null) {
+                            TextButton(onClick = onOpenDebug) { Text("诊断") }
+                        }
                         TextButton(onClick = onUnpair) { Text("退出") }
                     },
                 )
@@ -130,7 +138,18 @@ fun HomeScreen(
                     .fillMaxSize()
                     .padding(padding),
             ) {
-                ConnectionBar(text = state.connection, ok = state.error == null)
+                // 全局状态条（FR-4.4）取代了早前的本地文案条：文案来自唯一的载波，
+                // 因此不会与聊天页顶端的同一条打架。
+                ConnectionBanner(
+                    carrier = carrier,
+                    nowMillis = now,
+                    onRepair = onUnpair,
+                    onRetry = viewModel::retry,
+                )
+
+                if (state.fromCache) {
+                    CacheNotice("正在同步：当前显示的是上次的缓存内容。")
+                }
 
                 state.error?.let { error ->
                     Surface(color = Color(0xFF3A1E22), modifier = Modifier.fillMaxWidth()) {
@@ -171,7 +190,12 @@ fun HomeScreen(
                 }
 
                 when {
-                    state.loading -> Box(
+                    // 只有「还没有任何可显示的内容」时才整屏转圈。`warmStart` 刻意不复位
+                    // `loading`（缓存不是权威数据），若这里只看 `loading`，缓存铺好之后屏幕
+                    // 上仍然是转圈——FR-4.3「先出缓存再对齐」等于没实现，而顶部的
+                    // 「当前显示的是上次的缓存内容」横幅还在，画面与文案自相矛盾
+                    //（R006 P1-2；与 `ChatScreen` 的同类条件保持同形）。
+                    state.loading && state.snapshot.isEmpty && state.groups.isEmpty() -> Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -185,7 +209,9 @@ fun HomeScreen(
                         }
                     }
 
-                    state.snapshot.isEmpty -> Box(
+                    // 只有「真的拿到了权威数据」才说没有工作区。`fromCache` 为真时列表来自
+                    // 上一次的缓存，空缓存不能断言「桌面端没有工作区」。
+                    state.snapshot.isEmpty && state.groups.isEmpty() && !state.fromCache -> Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -215,33 +241,6 @@ fun HomeScreen(
                     }
                 }
             }
-        }
-    }
-}
-
-/**
- * 顶部连接状态条。 */
-@Composable
-private fun ConnectionBar(text: String, ok: Boolean) {
-    Surface(
-        color = if (ok) Color(0xFF12301F) else Color(0xFF33280F),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Surface(
-                color = if (ok) Color(0xFF4ADE80) else Color(0xFFFBBF24),
-                shape = RoundedCornerShape(50),
-                modifier = Modifier.size(7.dp),
-            ) {}
-            Spacer(Modifier.size(8.dp))
-            Text(
-                text = text,
-                style = MaterialTheme.typography.labelSmall,
-                color = if (ok) Color(0xFF9BE7B8) else Color(0xFFF3D08A),
-            )
         }
     }
 }
@@ -428,13 +427,15 @@ private fun SessionDrawer(
     state: HomeUiState,
     onOpenSession: (SessionSummary, Workspace?) -> Unit,
     onRefreshSessions: () -> Unit,
+    // 由调用方传入（R006 P3-3）：这里自己也调一次 `rememberNow()` 会起第二个定时器，
+    // 而 HomeScreen 的那个每 30 秒跳一次就足以让整个抽屉重组。一个时钟够了。
+    now: Long,
 ) {
     // 派生列表现在是 HomeUiState 的构造属性（不再是 get() 派生），在 LazyColumn 的
     // content lambda 里读也一定是当前值。这里取成局部变量只是少写几次 state.。
     val pinned = state.pinned
     val recent = state.recent
     val groups = state.groups
-    val now = rememberNow()
 
     Column(modifier = Modifier.fillMaxSize()) {
         Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth()) {
@@ -512,8 +513,11 @@ private fun SessionDrawer(
             }
 
             item(key = "hdr-ws") { DrawerHeader("按工作区") }
-            groups.forEachIndexed { index, group ->
-                item(key = "ws-$index-${group.workspace.workspaceId}") {                    Text(
+            groups.forEach { group ->
+                // key 里**不能带下标**（R006 P3-2）：工作区顺序由 `order` 帧决定，插入/重排会
+                // 让所有下标位移，于是全部 key 变化、LazyColumn 无法复用项，滚动位置直接丢失。
+                // workspaceId 已是稳定唯一标识。
+                item(key = "ws-${group.workspace.workspaceId}") {                    Text(
                         text = "${group.workspace.displayName} · ${group.activeCount}",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Medium,
