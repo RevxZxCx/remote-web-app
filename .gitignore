@@ -1,0 +1,44 @@
+# ---------- Gradle / Android ----------
+.gradle/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+release/
+output.json
+
+# 本机 SDK 路径，绝不提交
+local.properties
+
+# ---------- IDE ----------
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.DS_Store
+
+# ---------- Kotlin / Java ----------
+*.hprof
+kotlin-daemon.*
+hs_err_pid*.log
+
+# ---------- 密钥与凭证 ----------
+*.jks
+*.keystore
+keystore.properties
+secrets.properties
+
+# ---------- 临时 ----------
+*.log
+*.tmp
+.tmp/
+_*.js
+_*.txt
+_*.html

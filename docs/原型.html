@@ -1,0 +1,1099 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DSH Android 原生客户端 · 交互原型 v0.1</title>
+<style>
+  :root{
+    --bg:#0b0f14; --bg2:#111823; --card:#151d2a; --card2:#1b2534;
+    --line:#243044; --txt:#e6edf6; --dim:#8b9bb4; --dim2:#5d6b82;
+    --accent:#4c8dff; --accent2:#2fd4a7; --warn:#ffb020; --danger:#ff5d5d;
+    --radius:14px;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:
+    radial-gradient(1200px 600px at 15% -10%, #16243a 0%, transparent 60%),
+    radial-gradient(900px 500px at 110% 10%, #14303a 0%, transparent 55%),
+    var(--bg);
+    color:var(--txt);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .page{max-width:1180px;margin:0 auto;padding:28px 22px 70px}
+
+  /* ---------- header ---------- */
+  header.top{display:flex;align-items:flex-start;gap:18px;flex-wrap:wrap;margin-bottom:6px}
+  .logo{width:46px;height:46px;border-radius:13px;flex:0 0 auto;
+    background:linear-gradient(140deg,var(--accent),var(--accent2));
+    display:flex;align-items:center;justify-content:center;font-size:24px;
+    box-shadow:0 8px 26px rgba(76,141,255,.32)}
+  h1{font-size:21px;margin:0 0 5px;letter-spacing:.2px}
+  .sub{color:var(--dim);font-size:13.5px;line-height:1.65;max-width:760px}
+  .badge{display:inline-block;padding:3px 9px;border:1px solid var(--line);border-radius:999px;
+    font-size:11.5px;color:var(--dim);margin:6px 6px 0 0;background:#101827}
+  .badge.ok{color:var(--accent2);border-color:#1f4c44}
+  .badge.warn{color:var(--warn);border-color:#4a3a15}
+
+  /* ---------- layout ---------- */
+  .stage{display:grid;grid-template-columns:390px minmax(0,1fr);gap:30px;margin-top:26px;align-items:start}
+  @media(max-width:900px){.stage{grid-template-columns:1fr}}
+
+  /* ---------- phone ---------- */
+  .phone-wrap{position:sticky;top:24px}
+  .phone{width:390px;height:800px;border-radius:42px;padding:11px;
+    background:linear-gradient(160deg,#2a3648,#141b26 55%,#0d131c);
+    box-shadow:0 30px 70px rgba(0,0,0,.6), 0 0 0 1px #2c3a4e inset;position:relative}
+  .screen{width:100%;height:100%;border-radius:32px;overflow:hidden;background:var(--bg2);
+    display:flex;flex-direction:column;position:relative}
+  .notch{position:absolute;top:9px;left:50%;transform:translateX(-50%);width:104px;height:24px;
+    background:#05080c;border-radius:999px;z-index:60}
+
+  /* status bar */
+  .statusbar{height:30px;flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;
+    padding:0 18px;font-size:11.5px;color:var(--dim);background:transparent;z-index:50}
+  .statusbar .right{display:flex;gap:5px;align-items:center}
+
+  /* app bar */
+  .appbar{flex:0 0 auto;padding:2px 14px 10px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line)}
+  .iconbtn{width:36px;height:36px;border-radius:10px;border:1px solid transparent;background:transparent;
+    color:var(--txt);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:17px;flex:0 0 auto}
+  .iconbtn:hover{background:#1a2434;border-color:var(--line)}
+  .appbar .title{font-size:16px;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .appbar .title small{display:block;font-size:11px;color:var(--dim);font-weight:400;margin-top:1px}
+
+  /* connection strip */
+  .conn{flex:0 0 auto;font-size:11.5px;padding:6px 14px;display:flex;align-items:center;gap:7px;border-bottom:1px solid var(--line)}
+  .conn .dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+  .conn.live{color:var(--accent2);background:#0e1c1a}
+  .conn.live .dot{background:var(--accent2);box-shadow:0 0 0 3px rgba(47,212,167,.15)}
+  .conn.slow{color:var(--warn);background:#1c1710}
+  .conn.slow .dot{background:var(--warn);animation:pulse 1.1s infinite}
+  .conn.dead{color:var(--danger);background:#1e1113}
+  .conn.dead .dot{background:var(--danger)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+  /* body */
+  .body{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin}
+  .body::-webkit-scrollbar{width:5px}
+  .body::-webkit-scrollbar-thumb{background:#2a3648;border-radius:9px}
+
+  /* ---------- pairing ---------- */
+  .pair{padding:26px 22px;display:flex;flex-direction:column;gap:16px;height:100%}
+  .pair .hero{text-align:center;margin-top:14px}
+  .pair .hero .ring{width:104px;height:104px;margin:0 auto 16px;border-radius:28px;
+    background:linear-gradient(140deg,rgba(76,141,255,.22),rgba(47,212,167,.18));
+    border:1px solid #26364d;display:flex;align-items:center;justify-content:center;font-size:44px}
+  .pair h2{font-size:19px;margin:0 0 7px}
+  .pair p{color:var(--dim);font-size:13px;line-height:1.7;margin:0}
+  .field{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:11px 13px}
+  .field label{display:block;font-size:11px;color:var(--dim2);margin-bottom:5px;letter-spacing:.4px}
+  .field input{width:100%;background:transparent;border:0;outline:0;color:var(--txt);font-size:13.5px;font-family:var(--mono)}
+  .field .hint{font-size:10.5px;color:var(--dim2);margin-top:5px;font-family:var(--mono)}
+  .btn{width:100%;border:0;border-radius:12px;padding:13px;font-size:14.5px;font-weight:600;cursor:pointer;
+    background:linear-gradient(135deg,var(--accent),#3f7bea);color:#fff;transition:.15s}
+  .btn:hover{filter:brightness(1.08)}
+  .btn.ghost{background:#18202e;color:var(--txt);border:1px solid var(--line)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .steps{font-size:11.5px;color:var(--dim2);line-height:1.9;border-top:1px dashed var(--line);padding-top:12px}
+  .steps b{color:var(--dim);font-weight:600}
+  .code{font-family:var(--mono);font-size:11px;background:#0d131c;border:1px solid var(--line);
+    border-radius:8px;padding:8px 10px;color:#9fd8c8;word-break:break-all;line-height:1.6}
+
+  /* ---------- list rows ---------- */
+  .section-label{font-size:11px;color:var(--dim2);letter-spacing:1.1px;padding:14px 16px 7px;text-transform:uppercase}
+  .ws{border-bottom:1px solid #1a2432}
+  .ws-head{display:flex;align-items:center;gap:11px;padding:13px 15px;cursor:pointer;transition:.12s}
+  .ws-head:hover{background:#151e2c}
+  .ws-head .folder{width:34px;height:34px;border-radius:10px;background:#1b2738;border:1px solid var(--line);
+    display:flex;align-items:center;justify-content:center;font-size:15px;flex:0 0 auto}
+  .ws-head .meta{flex:1;min-width:0}
+  .ws-head .name{font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ws-head .path{font-size:10.5px;color:var(--dim2);font-family:var(--mono);margin-top:2px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
+  .ws-head .chev{color:var(--dim2);font-size:12px;transition:.2s;flex:0 0 auto}
+  .ws.open .ws-head .chev{transform:rotate(90deg)}
+  .ws-body{display:none;background:#0e141d}
+  .ws.open .ws-body{display:block}
+  .sess{display:flex;align-items:center;gap:10px;padding:11px 15px 11px 26px;cursor:pointer;border-top:1px solid #151d29}
+  .sess:hover{background:#141c28}
+  .sess.active{background:#152238;box-shadow:inset 3px 0 0 var(--accent)}
+  .sess .st{width:7px;height:7px;border-radius:50%;background:#3b4a63;flex:0 0 auto}
+  .sess .st.run{background:var(--accent2);animation:pulse 1.2s infinite}
+  .sess .st.warn{background:var(--warn)}
+  .sess .txt{flex:1;min-width:0}
+  .sess .t{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sess .m{font-size:10.5px;color:var(--dim2);margin-top:2px;display:flex;gap:8px}
+  .sess .m .pill{padding:0 6px;border-radius:5px;background:#1a2432;border:1px solid var(--line);color:var(--dim)}
+  .sess .badge2{font-size:10px;padding:2px 6px;border-radius:6px;background:#12332b;color:var(--accent2);border:1px solid #1f4c44}
+  .empty{padding:40px 20px;text-align:center;color:var(--dim2);font-size:12.5px;line-height:1.8}
+
+  /* ---------- markdown in bubbles ---------- */
+  .msg .md{white-space:normal}
+  .msg .md p{margin:0 0 7px}
+  .msg .md p:last-child{margin-bottom:0}
+  .msg .md h1,.msg .md h2,.msg .md h3{font-size:14px;margin:10px 0 5px;font-weight:650}
+  .msg .md h1:first-child,.msg .md h2:first-child,.msg .md h3:first-child{margin-top:0}
+  .msg .md ul,.msg .md ol{margin:0 0 7px;padding-left:19px}
+  .msg .md li{margin:2px 0}
+  .msg .md blockquote{margin:0 0 7px;padding:2px 0 2px 9px;border-left:2px solid #2c4058;color:var(--dim)}
+  .msg .md table{border-collapse:collapse;margin:0 0 8px;font-size:12px;width:100%}
+  .msg .md th,.msg .md td{border:1px solid var(--line);padding:4px 7px;text-align:left}
+  .msg .md th{background:#131c29;color:var(--dim);font-weight:600}
+  .msg .md a{color:#5c9dff;text-decoration:none;border-bottom:1px dotted #3a5c8a}
+  .msg .md hr{border:0;border-top:1px solid var(--line);margin:9px 0}
+  .msg .md strong{color:#fff}
+  .msg .md .flink{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:11.5px;
+    background:#101a27;border:1px solid #26405f;border-radius:5px;padding:1px 6px;color:#7fb2ff;cursor:pointer}
+  .msg .md .flink:hover{background:#16273b;border-color:#356089}
+  .codeblock{margin:0 0 8px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#0b1017}
+  .codeblock .cb-h{padding:5px 9px;font-size:10.5px;font-family:var(--mono);color:var(--dim2);
+    background:#101823;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}
+  .codeblock pre{margin:0;padding:8px 10px;overflow:auto;max-height:230px}
+  .codeblock code{font-family:var(--mono);font-size:11.5px;line-height:1.65;background:none;border:0;padding:0;color:#a9c4e0}
+  .codeblock .k{color:#c792ea}.codeblock .s{color:#c3e88d}.codeblock .c{color:#5b7089}.codeblock .n{color:#f78c6c}
+
+  /* ---------- changed-files card ---------- */
+  .chg{align-self:flex-start;width:92%;border:1px solid var(--line);border-radius:12px;background:#0f1620;overflow:hidden}
+  .chg .ch{padding:9px 12px;display:flex;align-items:center;gap:9px;font-size:12px;color:var(--txt)}
+  .chg .ch .ci{width:26px;height:26px;border-radius:7px;background:#152233;display:flex;align-items:center;justify-content:center;font-size:13px}
+  .chg .ch .cm{flex:1;min-width:0}
+  .chg .ch .cm b{font-weight:600}
+  .chg .ch .cm small{display:block;color:var(--dim2);font-size:10.5px;margin-top:1px}
+  .chg .fr{display:flex;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid #18212e;cursor:pointer;font-size:12px}
+  .chg .fr:hover{background:#141d2a}
+  .chg .fr .fp{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#cfe0f2}
+  .chg .fr .fd{font-family:var(--mono);font-size:11px;color:var(--dim2);flex:0 0 auto}
+  .chg .fr .fd i{font-style:normal;color:#4ec97a}
+  .chg .fr .fd b{font-weight:400;color:#e06666}
+  .chg .fr.more{justify-content:center;color:var(--dim2);font-size:11px}
+  .tool .fr{display:flex;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid #18212e;cursor:pointer;font-size:11.5px}
+  .tool .fr:hover{background:#141d2a}
+  .tool .fr .fp{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    font-family:var(--mono);color:#7fb2ff}
+  .tool .fr .fd{font-family:var(--mono);font-size:10.5px;color:var(--dim2);flex:0 0 auto}
+
+  /* ---------- file viewer ---------- */
+  .ftabs{display:flex;gap:6px;padding:8px 11px;border-bottom:1px solid var(--line);background:#0d141d}
+  .ftab{font-size:11.5px;padding:5px 11px;border-radius:8px;border:1px solid var(--line);background:#131c29;
+    color:var(--dim);cursor:pointer}
+  .ftab.on{background:#1b2c44;border-color:#2f5a86;color:#dce9f7}
+  .fmeta{padding:7px 12px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:10.5px;
+    color:var(--dim2);display:flex;gap:10px;flex-wrap:wrap;background:#0b1119}
+  .fmeta .p{color:#7fb2ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+  .fbody{flex:1;min-height:0;overflow:auto;padding:0}
+  .diff{font-family:var(--mono);font-size:11px;line-height:1.62;min-width:100%}
+  .diff .h{background:#101c2b;color:#6f8bab;padding:3px 10px;border-top:1px solid #17222f;border-bottom:1px solid #17222f}
+  .diff .l{padding:0 10px;white-space:pre;display:block}
+  .diff .l.add{background:#0e2418;color:#8fe0a8}
+  .diff .l.del{background:#2a1315;color:#f0a3a3}
+  .diff .l.ctx{color:#7f93a8}
+  .filetext{font-family:var(--mono);font-size:11px;line-height:1.62;padding:9px 11px;white-space:pre-wrap;
+    word-break:break-word;color:#a9c4e0}
+  .filetext.md{font-family:inherit;font-size:13px;white-space:normal;color:var(--txt);line-height:1.7}
+  .filetext.md h1{font-size:16px}.filetext.md h2{font-size:14.5px}.filetext.md h3{font-size:13.5px}
+  .filetext.md table{border-collapse:collapse;font-size:12px}
+  .filetext.md th,.filetext.md td{border:1px solid var(--line);padding:4px 8px}
+  .filetext.md code{font-family:var(--mono);font-size:11.5px;background:#0c1219;border:1px solid var(--line);border-radius:4px;padding:1px 4px}
+
+  /* ---------- drawer ---------- */
+  .scrim{position:absolute;inset:0;background:rgba(4,7,11,.62);opacity:0;pointer-events:none;transition:.22s;z-index:70}
+  .scrim.on{opacity:1;pointer-events:auto}
+  .drawer{position:absolute;top:0;left:0;bottom:0;width:292px;background:#0e1520;border-right:1px solid var(--line);
+    transform:translateX(-100%);transition:transform .24s cubic-bezier(.3,.8,.3,1);z-index:80;display:flex;flex-direction:column}
+  .drawer.on{transform:translateX(0)}
+  .drawer .dh{padding:14px 15px 12px;border-bottom:1px solid var(--line)}
+  .drawer .dh .u{display:flex;align-items:center;gap:10px}
+  .drawer .dh .av{width:34px;height:34px;border-radius:10px;background:linear-gradient(140deg,var(--accent),var(--accent2));
+    display:flex;align-items:center;justify-content:center;font-size:16px}
+  .drawer .dh .n{font-size:13.5px;font-weight:600}
+  .drawer .dh .d{font-size:10.5px;color:var(--dim2);font-family:var(--mono);margin-top:1px}
+  .drawer .dlist{flex:1;overflow-y:auto;padding:6px 0}
+  .drawer .ditem{padding:11px 15px;font-size:13px;display:flex;align-items:center;gap:10px;cursor:pointer;color:var(--dim)}
+  .drawer .ditem:hover{background:#151e2c;color:var(--txt)}
+  .drawer .ditem.on{color:var(--accent);background:#131c2b}
+  .drawer .df{padding:12px 15px;border-top:1px solid var(--line);font-size:11px;color:var(--dim2);font-family:var(--mono);line-height:1.7}
+
+  /* ---------- chat ---------- */
+  .chat{flex:1;min-height:0;display:flex;flex-direction:column}
+  .msgs{flex:1;min-height:0;overflow-y:auto;padding:14px 13px 6px;display:flex;flex-direction:column;gap:12px}
+  .msgs::-webkit-scrollbar{width:5px}
+  .msgs::-webkit-scrollbar-thumb{background:#2a3648;border-radius:9px}
+  .dayalign{text-align:center;font-size:10.5px;color:var(--dim2);margin:2px 0 4px}
+  .msg{max-width:88%;font-size:13.5px;line-height:1.72;border-radius:14px;padding:10px 13px;white-space:pre-wrap;word-break:break-word}
+  .msg.user{align-self:flex-end;background:linear-gradient(135deg,#2b5fd0,#2f6ee6);color:#fff;border-bottom-right-radius:5px}
+  .msg.bot{align-self:flex-start;background:var(--card);border:1px solid var(--line);border-bottom-left-radius:5px}
+  .msg .who{font-size:10.5px;color:var(--dim2);margin-bottom:4px;letter-spacing:.3px}
+  .msg code{font-family:var(--mono);font-size:12px;background:#0c1219;border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+  .tool{align-self:flex-start;max-width:92%;border:1px solid var(--line);background:#0f1620;border-radius:12px;overflow:hidden}
+  .tool .th{padding:9px 12px;font-size:12px;color:var(--dim);display:flex;align-items:center;gap:8px;cursor:pointer}
+  .tool .th .ic{color:var(--accent2)}
+  .tool .tb{display:none;padding:0 12px 11px;font-family:var(--mono);font-size:11px;color:#8fa8c6;line-height:1.7;
+    border-top:1px solid #18212e;white-space:pre-wrap;max-height:150px;overflow:auto}
+  .tool.open .tb{display:block}
+  .caret{display:inline-block;width:7px;height:14px;background:var(--accent2);vertical-align:-2px;
+    animation:blink .9s steps(2,start) infinite;border-radius:1px}
+  @keyframes blink{50%{opacity:0}}
+  .thinking{display:flex;gap:4px;align-items:center;padding:2px 0}
+  .thinking i{width:6px;height:6px;border-radius:50%;background:var(--dim2);animation:bounce 1.1s infinite}
+  .thinking i:nth-child(2){animation-delay:.15s}
+  .thinking i:nth-child(3){animation-delay:.3s}
+  @keyframes bounce{0%,60%,100%{transform:translateY(0);opacity:.45}30%{transform:translateY(-5px);opacity:1}}
+
+  .composer{flex:0 0 auto;border-top:1px solid var(--line);padding:9px 10px 12px;background:#0d141d}
+  .qbar{display:flex;gap:7px;margin-bottom:7px;flex-wrap:wrap}
+  .qchip{font-size:10.5px;padding:3px 8px;border-radius:7px;background:#182130;border:1px solid var(--line);color:var(--dim)}
+  .crow{display:flex;align-items:flex-end;gap:8px}
+  .cbox{flex:1;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:9px 13px;min-height:40px;
+    display:flex;align-items:center}
+  .cbox textarea{width:100%;background:transparent;border:0;outline:0;resize:none;color:var(--txt);font-size:13.5px;
+    font-family:inherit;max-height:84px;line-height:1.5}
+  .cbox textarea::placeholder{color:var(--dim2)}
+  .send{width:40px;height:40px;border-radius:50%;border:0;cursor:pointer;flex:0 0 auto;
+    background:linear-gradient(135deg,var(--accent),#3f7bea);color:#fff;font-size:16px;display:flex;align-items:center;justify-content:center}
+  .send.stop{background:linear-gradient(135deg,#e04a4a,#c53b3b)}
+  .send:disabled{opacity:.4;cursor:not-allowed}
+
+  /* ---------- settings ---------- */
+  .set{padding:8px 0}
+  .row{display:flex;align-items:center;gap:12px;padding:13px 16px;border-bottom:1px solid #1a2432}
+  .row .k{flex:1;min-width:0}
+  .row .k .a{font-size:13.5px}
+  .row .k .b{font-size:11px;color:var(--dim2);margin-top:3px;font-family:var(--mono);word-break:break-all;line-height:1.55}
+  .row .v{font-size:12px;color:var(--dim);font-family:var(--mono);flex:0 0 auto}
+  .sw{width:42px;height:24px;border-radius:999px;background:#2a3648;position:relative;cursor:pointer;transition:.2s;flex:0 0 auto}
+  .sw::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#8b9bb4;transition:.2s}
+  .sw.on{background:#1d4a3f}
+  .sw.on::after{left:21px;background:var(--accent2)}
+  .tagline{font-size:10.5px;color:var(--dim2);padding:14px 16px 20px;line-height:1.8}
+
+  /* ---------- side notes ---------- */
+  .notes{display:flex;flex-direction:column;gap:16px}
+  .panel{background:rgba(21,29,42,.72);border:1px solid var(--line);border-radius:var(--radius);padding:17px 18px}
+  .panel h3{margin:0 0 11px;font-size:14px;display:flex;align-items:center;gap:8px}
+  .panel h3 .n{width:20px;height:20px;border-radius:6px;background:#1d2a3d;color:var(--accent);
+    font-size:11px;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+  .panel p{margin:0 0 10px;font-size:12.5px;color:var(--dim);line-height:1.75}
+  .panel ul{margin:0;padding-left:17px;font-size:12.5px;color:var(--dim);line-height:1.85}
+  .panel li{margin-bottom:3px}
+  .panel li b{color:var(--txt);font-weight:600}
+  .tbl{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:4px}
+  .tbl th,.tbl td{text-align:left;padding:6px 8px;border-bottom:1px solid #1c2534;vertical-align:top}
+  .tbl th{color:var(--dim2);font-weight:600;font-size:10.5px;letter-spacing:.5px}
+  .tbl td{color:var(--dim)}
+  .tbl td b{color:var(--txt)}
+  .tbl td.ok{color:#6fd39a;white-space:nowrap}
+  .tbl td.warn{color:#e0b95f}
+  .tbl td.bad{color:#e0736f;white-space:nowrap}
+  .mono{font-family:var(--mono);font-size:11px;color:#9fd8c8}
+  .flow{font-family:var(--mono);font-size:10.5px;line-height:1.85;color:#8fa8c6;white-space:pre;overflow-x:auto;
+    background:#0c1219;border:1px solid var(--line);border-radius:10px;padding:12px}
+  .ctrl{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .ctrl button{background:#18202e;border:1px solid var(--line);color:var(--txt);font-size:11.5px;
+    padding:6px 11px;border-radius:9px;cursor:pointer}
+  .ctrl button:hover{border-color:#39506f;background:#1c2634}
+  footer{margin-top:34px;color:var(--dim2);font-size:11.5px;line-height:1.8;border-top:1px solid var(--line);padding-top:16px}
+  .kbd{font-family:var(--mono);font-size:11px;background:#0d131c;border:1px solid var(--line);border-radius:5px;padding:1px 5px;color:#9fd8c8}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="top">
+    <div class="logo">🐳</div>
+    <div style="flex:1;min-width:260px">
+      <h1>DSH Android 原生客户端 · 交互原型 <span style="font-size:12px;color:var(--dim2)">v0.1 待审批</span></h1>
+      <div class="sub">
+        左侧是可点的真机原型（点工作区展开会话、点会话进聊天、发消息看流式 Markdown 回复、点「已编辑 N 个文件」里的行打开文件查看页、左上角打开会话抽屉）。
+        右侧是这一屏对应的真实接口、状态与验收点。本原型描述 <b>工作区列表 + 会话 + 聊天 + 富文本/文件查看</b> 这条主链路，
+        与 <a href="需求文档.md" style="color:var(--accent)">需求文档.md</a> 一一对应。
+      </div>
+      <div>
+        <span class="badge ok">Typert RPC · 已核实</span>
+        <span class="badge">/remote 通道 + 设备头</span>
+        <span class="badge">一条 WS 多路复用</span>
+        <span class="badge warn">当前未配对 · 需重新配对</span>
+        <span class="badge">Kotlin + Compose</span>
+        <span class="badge ok">Markdown + 改动文件可点开</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="stage">
+
+    <!-- ============ PHONE ============ -->
+    <div class="phone-wrap">
+      <div class="phone">
+        <div class="notch"></div>
+        <div class="screen">
+
+          <div class="statusbar">
+            <span>11:24</span>
+            <span class="right"><span>▮▮▮</span><span>◍</span><span id="batt">86%</span></span>
+          </div>
+
+          <!-- ---- SCREEN: PAIRING ---- -->
+          <div id="screenPair" style="flex:1;min-height:0;display:flex;flex-direction:column">
+            <div class="body">
+              <div class="pair">
+                <div class="hero">
+                  <div class="ring">🔗</div>
+                  <h2>连接到你的 DSH</h2>
+                  <p>一次性配对。配对成功后凭证保存在本机，<br>以后打开 App 直接进入，不再加载插件。</p>
+                </div>
+
+                <div class="field">
+                  <label>服务地址</label>
+                  <input id="inpBase" value="https://5b4551427f0ab7aa.dsh-market.com" spellcheck="false" />
+                  <div class="hint" id="probe">● 探测中…</div>
+                </div>
+
+                <div class="field">
+                  <label>配对令牌 / 配对链接</label>
+                  <input id="inpToken" placeholder="扫描二维码，或粘贴 /pair-accept?pair=…" spellcheck="false" />
+                  <div class="hint">token 为 32 位十六进制，一次性有效</div>
+                </div>
+
+                <button class="btn" id="btnPair">📷 扫描二维码配对</button>
+                <button class="btn ghost" id="btnPairManual">使用令牌配对</button>
+
+                <div class="steps">
+                  <b>如何获取令牌</b><br>
+                  1. 桌面端打开 DSH 远程设置卡片<br>
+                  2. 点「生成配对二维码」<br>
+                  3. 用本 App 扫描该二维码<br>
+                  <span style="color:var(--dim2)">※ 配对入口为 loopback-only，只能在桌面端发起</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ---- SCREEN: HOME ---- -->
+          <div id="screenHome" style="flex:1;min-height:0;display:none;flex-direction:column">
+            <div class="appbar">
+              <div class="iconbtn" id="btnDrawer">☰</div>
+              <div class="title">工作区 <small id="homeSub">3 个工作区 · 8 个会话</small></div>
+              <div class="iconbtn" title="刷新" id="btnRefresh">⟳</div>
+              <div class="iconbtn" title="设置" id="btnSettings">⚙</div>
+            </div>
+            <div class="conn live" id="connStrip"><span class="dot"></span><span id="connText">已连接 · 实时同步</span></div>
+            <div class="body" id="homeBody"></div>
+          </div>
+
+          <!-- ---- SCREEN: CHAT ---- -->
+          <div id="screenChat" style="flex:1;min-height:0;display:none;flex-direction:column">
+            <div class="appbar">
+              <div class="iconbtn" id="btnBack">‹</div>
+              <div class="title" id="chatTitle">会话<small id="chatSub">session · 运行中</small></div>
+              <div class="iconbtn" title="中止" id="btnCancel">■</div>
+            </div>
+            <div class="conn live" id="chatConn"><span class="dot"></span><span>已连接 · 流式接收中</span></div>
+            <div class="chat">
+              <div class="msgs" id="msgs"></div>
+              <div class="composer">
+                <div class="qbar" id="qbar" style="display:none">
+                  <span class="qchip">队列 1 条待发送</span>
+                </div>
+                <div class="crow">
+                  <div class="cbox"><textarea id="ta" rows="1" placeholder="给 DSH 发消息…"></textarea></div>
+                  <button class="send" id="btnSend">➤</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ---- SCREEN: FILE VIEWER ---- -->
+          <div id="screenFile" style="flex:1;min-height:0;display:none;flex-direction:column">
+            <div class="appbar">
+              <div class="iconbtn" id="btnBack3">‹</div>
+              <div class="title" id="fileTitle">文件<small id="fileSub">diff · 第 1 轮</small></div>
+              <div class="iconbtn" title="复制路径" id="btnCopyPath">⧉</div>
+            </div>
+            <div class="ftabs">
+              <div class="ftab on" id="tabDiff">改动 diff</div>
+              <div class="ftab" id="tabFull">当前全文</div>
+              <div class="ftab" id="tabMd">Markdown 预览</div>
+            </div>
+            <div class="fmeta">
+              <span class="p" id="filePath">docs/android-client/需求文档.md</span>
+              <span id="fileVer">version 8f2a…</span>
+              <span id="fileStat">+445 −0</span>
+            </div>
+            <div class="fbody" id="fileBody"></div>
+            <div class="composer" style="padding:8px 10px 11px">
+              <div class="qbar" style="margin:0">
+                <span class="qchip" id="fileNote">数据来源：GET /remote/api/changes.diff?sessionId=…&amp;seq=…&amp;index=…</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- ---- SCREEN: SETTINGS ---- -->
+          <div id="screenSet" style="flex:1;min-height:0;display:none;flex-direction:column">
+            <div class="appbar">
+              <div class="iconbtn" id="btnBack2">‹</div>
+              <div class="title">设置</div>
+            </div>
+            <div class="body">
+              <div class="set">
+                <div class="section-label">连接</div>
+                <div class="row"><div class="k"><div class="a">服务地址</div><div class="b">https://5b4551427f0ab7aa.dsh-market.com</div></div></div>
+                <div class="row"><div class="k"><div class="a">配对状态</div><div class="b">deviceId · 7f3a…c91d（已加密存储）</div></div><span class="badge ok" style="margin:0">已配对</span></div>
+                <div class="row"><div class="k"><div class="a">网络类型</div><div class="b">公网隧道（外出可用）</div></div><span class="v">自动</span></div>
+                <div class="row"><div class="k"><div class="a">局域网优先</div><div class="b">同网段时自动切换直连，降低延迟</div></div><div class="sw on" data-sw></div></div>
+
+                <div class="section-label">同步</div>
+                <div class="row"><div class="k"><div class="a">离线缓存</div><div class="b">缓存工作区 / 会话 / 消息，冷启动秒开</div></div><div class="sw on" data-sw></div></div>
+                <div class="row"><div class="k"><div class="a">后台通知</div><div class="b">会话完成或需要你回答时提醒</div></div><div class="sw" data-sw></div></div>
+                <div class="row"><div class="k"><div class="a">流式逐字显示</div><div class="b">关闭则等整段回复完成后一次上屏</div></div><div class="sw on" data-sw></div></div>
+
+                <div class="section-label">富文本与文件</div>
+                <div class="row"><div class="k"><div class="a">Markdown 渲染</div><div class="b">标题 / 列表 / 表格 / 代码块 / 链接</div></div><div class="sw on" data-sw></div></div>
+                <div class="row"><div class="k"><div class="a">流式 Markdown 增量解析</div><div class="b">未闭合代码围栏也正确显示</div></div><div class="sw on" data-sw></div></div>
+                <div class="row"><div class="k"><div class="a">代码高亮</div><div class="b">桌面端用 Shiki；本机用轻量高亮库</div></div><div class="sw on" data-sw></div></div>
+                <div class="row"><div class="k"><div class="a">改动文件卡片</div><div class="b">轮次结束时显示已编辑文件与行数</div></div><div class="sw on" data-sw></div></div>
+                <div class="row"><div class="k"><div class="a">长文件分页</div><div class="b">workspaceFiles/read 每次 5000 行，滚到底续读</div></div><div class="sw on" data-sw></div></div>
+                <div class="row"><div class="k"><div class="a">摘要失效降级</div><div class="b">Host 重启后 changes.summary 返回 404，改用工具调用推断的文件行</div></div><div class="sw on" data-sw></div></div>
+
+                <div class="section-label">外观</div>
+                <div class="row"><div class="k"><div class="a">主题</div></div><span class="v">跟随系统</span></div>
+                <div class="row"><div class="k"><div class="a">消息字号</div></div><span class="v">13.5sp</span></div>
+
+                <div class="section-label">协议调试</div>
+                <div class="row"><div class="k"><div class="a">mux 连接</div><div class="b">wss://…/remote/api/remote.mux?device=7f3a…c91d</div></div><span class="badge ok" style="margin:0">OPEN</span></div>
+                <div class="row"><div class="k"><div class="a">活跃流</div><div class="b">workspace/follow · session/control · session/follow</div></div><span class="v">3</span></div>
+                <div class="row"><div class="k"><div class="a">最近错误</div><div class="b">无</div></div></div>
+
+                <div class="section-label">危险操作</div>
+                <div class="row"><div class="k"><div class="a" style="color:var(--danger)">解除配对</div><div class="b">清除本机凭证，需重新扫码</div></div></div>
+              </div>
+              <div class="tagline">DSH Android 客户端 v0.1 · 协议 Typert RPC · 依据 dsh-remote-web-ui 0.4.6</div>
+            </div>
+          </div>
+
+          <!-- drawer -->
+          <div class="scrim" id="scrim"></div>
+          <div class="drawer" id="drawer">
+            <div class="dh">
+              <div class="u">
+                <div class="av">🐳</div>
+                <div><div class="n">DSH 助手</div><div class="d">5b4551427f0ab7aa</div></div>
+              </div>
+            </div>
+            <div class="dlist">
+              <div class="ditem on">▦ 工作区</div>
+              <div class="ditem">🕘 最近会话</div>
+              <div class="ditem">★ 已置顶</div>
+              <div class="ditem">🗄 已归档</div>
+              <div class="ditem" id="dSet">⚙ 设置</div>
+            </div>
+            <div class="df">
+              mux OPEN · 3 streams<br>
+              RTT 42ms · 已收 1,284 帧
+            </div>
+          </div>
+
+        </div>
+      </div>
+      <div class="ctrl">
+        <button data-go="pair">① 配对</button>
+        <button data-go="home">② 工作区/会话</button>
+        <button data-go="chat">③ 聊天（流式）</button>
+        <button data-go="set">④ 设置</button>
+      </div>
+    </div>
+
+    <!-- ============ NOTES ============ -->
+    <div class="notes">
+
+      <div class="panel">
+        <h3><span class="n">1</span>这一屏解决什么</h3>
+        <p>把「手机浏览器跑桌面 Web UI」换成「原生 App 直接说 Typert RPC」。对照你的原话：</p>
+        <table class="tbl">
+          <tr><th>你的痛点</th><th>本原型的做法</th></tr>
+          <tr><td>重开网页＝重启</td><td><b>凭证落盘</b>（Keystore），冷启动不重新配对、不加载任何插件</td></tr>
+          <tr><td>加载时间很长</td><td>不再下载/执行桌面 SPA 与插件 bundle，<b>只取 JSON + WS</b></td></tr>
+          <tr><td>还要渲染 UI</td><td><b>原生 Compose UI</b>，一次渲染，不做桌面 UI 的二次改写</td></tr>
+          <tr><td>交互性差</td><td>原生抽屉做<b>会话侧栏</b>（现状被 mobile-adapt 压成 0 宽，手机上根本没有）</td></tr>
+        </table>
+      </div>
+
+      <div class="panel">
+        <h3><span class="n">2</span>每屏对应的真实接口</h3>
+        <table class="tbl">
+          <tr><th>界面</th><th>调用</th><th>通道</th></tr>
+          <tr><td>配对页</td><td><span class="mono">POST {base}/api/pair/accept</span> <span class="mono">{token}</span></td><td>直连（不走 /remote）</td></tr>
+          <tr><td>工作区列表</td><td><span class="mono">workspace/follow</span> 流</td><td>mux</td></tr>
+          <tr><td>会话列表/状态</td><td><span class="mono">session/control</span> 流</td><td>mux</td></tr>
+          <tr><td>聊天历史</td><td><span class="mono">session/follow</span> 流 → <span class="mono">snapshot</span></td><td>mux</td></tr>
+          <tr><td>翻更早</td><td><span class="mono">session/page</span> <span class="mono">{beforeSeq}</span></td><td>HTTP</td></tr>
+          <tr><td>发送消息</td><td><span class="mono">session/prompt</span> <span class="mono">{mode:'queue'}</span></td><td>HTTP</td></tr>
+          <tr><td>中止</td><td><span class="mono">session/cancel</span></td><td>HTTP</td></tr>
+          <tr><td>改动文件卡片</td><td><span class="mono">GET /remote/api/changes.summary?sessionId=&amp;seq=</span></td><td>HTTP（非 RPC）</td></tr>
+          <tr><td>某轮 diff</td><td><span class="mono">GET /remote/api/changes.diff?sessionId=&amp;seq=&amp;index=</span></td><td>HTTP（非 RPC）</td></tr>
+          <tr><td>文件查看页</td><td><span class="mono">workspaceFiles/read</span> · <span class="mono">readBytes</span> · <span class="mono">stat</span></td><td>HTTP</td></tr>
+        </table>
+        <p style="margin-top:11px">单次调用固定为：<br>
+          <span class="mono">POST {base}/remote/api/&lt;ns&gt;/&lt;method&gt;</span><br>
+          头部 <span class="mono">x-dsh-remote-device: &lt;deviceId&gt;</span>，body
+          <span class="mono">{"type":"client-request","rpcId":uuid,"method":"ns/method","payload":{"args":{…}}}</span>。
+        </p>
+      </div>
+
+      <div class="panel">
+        <h3><span class="n">3</span>界面结构</h3>
+        <ul>
+          <li><b>配对页</b> — 扫码 / 粘令牌 / 手填地址；地址栏下方实时探测可达性</li>
+          <li><b>工作区列表</b> — 工作区可展开显示其会话；运行中会话带脉冲点；支持下拉刷新</li>
+          <li><b>会话抽屉</b> — 工作区 / 最近会话 / 已置顶 / 已归档，底部显示 mux 状态与帧计数</li>
+          <li><b>聊天页</b> — 顶部标题与运行状态；消息区分「你 / DSH」；<b>助手回复按 Markdown 渲染</b>；工具调用折叠；轮次末尾一张「已编辑 N 个文件」卡片；底部输入框</li>
+          <li><b>文件查看页</b> — 三页签（改动 diff / 当前全文 / Markdown 预览），顶部显示路径、版本与增删行数</li>
+          <li><b>连接状态条</b> — 已连接（绿）/ 重连中（黄闪）/ 已断开（红），断线不清空界面</li>
+          <li><b>设置页</b> — 连接、同步、外观、协议调试、解除配对</li>
+        </ul>
+      </div>
+
+      <div class="panel">
+        <h3><span class="n">4</span>交互细节（可在左侧试用）</h3>
+        <ul>
+          <li>点 <span class="kbd">扫描二维码配对</span> → 模拟配对成功，进入工作区列表</li>
+          <li>点工作区标题 → 展开/收起该工作区的会话</li>
+          <li>点任意会话 → 进入聊天，历史消息逐条出现，最后一条是<b>流式 Markdown</b>（标题/列表/表格/代码块）</li>
+          <li>点回复下方「已编辑 N 个文件」卡片里的任意一行 → 打开<b>文件查看页</b>（改动 diff）</li>
+          <li>文件查看页可切换 <span class="kbd">改动 diff</span> / <span class="kbd">当前全文</span> / <span class="kbd">Markdown 预览</span> 三个页签</li>
+          <li>点回复正文里的行内文件链接（如 <span class="mono">需求文档.md</span>）同样可打开文件查看页</li>
+          <li>在输入框输入并发送 → 先出现你的气泡，再出现「思考中…」→ 流式 Markdown 回复</li>
+          <li>回复生成中，右下角按钮变为<b>中止</b>（对应 <span class="mono">session/cancel</span>）</li>
+          <li>左上 <span class="kbd">☰</span> 打开会话抽屉（现状 Web 端缺失的功能）</li>
+        </ul>
+      </div>
+
+      <div class="panel">
+        <h3><span class="n">5</span>关键流程</h3>
+        <div class="flow">App                      桌面 DSH + 插件
+ │  扫码得到 token
+ │── POST {base}/api/pair/accept {token} ──▶
+ │◀──────── 200 {ok:true, deviceId} ───────
+ │  加密落盘 deviceId
+ │── POST /remote/api/workspace/follow ───▶
+ │── WS  /remote/api/remote.mux?device=… ─▶
+ │◀── item{baseline} 工作区列表 ───────────
+ │◀── item{baseline} 会话投影 ─────────────
+ │◀── item{snapshot} 聊天历史 ─────────────
+ │◀── item{event}    流式增量 ─────────────
+ │── POST /remote/api/session/prompt ─────▶
+ │◀── 403 unpaired ⇒ 引导重新配对 ─────────</div>
+      </div>
+
+      <div class="panel">
+        <h3><span class="n">6</span>富文本与文件查看（回答你的问题）</h3>
+        <p>你问的三件事——<b>能不能显示 markdown</b>、<b>能不能看到编辑的文件</b>、<b>能不能点开看</b>——<b>都能做</b>，而且全部走已核实的真实接口。去聊天屏看：最后一条回复就是 Markdown 渲染结果（标题/列表/表格/引用/代码块/行内代码），下面那张卡片就是「已编辑 N 个文件」。</p>
+        <table class="tbl">
+          <tr><th>能力</th><th>真实接口</th><th>可行性</th></tr>
+          <tr><td>Markdown 渲染</td><td>助手正文是 <span class="mono">ContentBlock[]</span> 里的 <span class="mono">{type:'text',text}</span>，本身就是文本</td><td class="ok">✅ 纯客户端决定</td></tr>
+          <tr><td>流式 Markdown</td><td><span class="mono">session/follow</span> + <span class="mono">assistantStream:true</span> → <span class="mono">AssistantStreamRecord{type:'text-chunks',texts[]}</span></td><td class="ok">✅ 增量解析尾部</td></tr>
+          <tr><td>代码块高亮</td><td>围栏语言标记（如 ```kotlin）</td><td class="warn">⚠️ 桌面用 Shiki（JS），Android 需换库</td></tr>
+          <tr><td>看到编辑的文件</td><td><span class="mono">tool/call.name ∈ {write, edit, str_replace_editor}</span> + <span class="mono">arguments</span>（JSON 字符串）</td><td class="ok">✅ 实时推断</td></tr>
+          <tr><td>权威改动清单</td><td><span class="mono">GET /remote/api/changes.summary?sessionId=&amp;seq=</span></td><td class="ok">✅ 带行数统计</td></tr>
+          <tr><td>看某轮 diff</td><td><span class="mono">GET /remote/api/changes.diff?sessionId=&amp;seq=&amp;index=</span></td><td class="ok">✅ hunk 已算好</td></tr>
+          <tr><td>点开看当前全文</td><td><span class="mono">workspaceFiles/read</span>（分页文本）/ <span class="mono">readBytes</span>（二进制）</td><td class="ok">✅ 只读、真实存在</td></tr>
+          <tr><td>文件变了自动刷新</td><td><span class="mono">workspaceFiles/changes</span> 流 + <span class="mono">stat.version</span></td><td class="ok">✅</td></tr>
+          <tr><td><b>编辑文件</b></td><td>—— 服务端<b>没有任何写接口</b>，<span class="mono">workspaceFiles</span> 是只读服务</td><td class="bad">❌ 本期不做</td></tr>
+        </table>
+        <p style="margin-top:11px"><b>两条必须知道的限制</b>（不是 bug）：</p>
+        <ul>
+          <li><b>Host 重启后，旧轮次没有改动卡片和 diff</b> —— <span class="mono">changes.summary</span> 返回 404。此时降级为「工具调用推断出的文件行 + 当前全文查看」。</li>
+          <li><b>非 git 仓库里，纯 shell 命令改的文件不会进卡片</b> —— 只统计 <span class="mono">write</span>/<span class="mono">edit</span>/<span class="mono">str_replace_editor</span> 的改动。</li>
+        </ul>
+        <p style="margin-top:10px;color:var(--dim2)">左侧 <span class="kbd">#file</span> 可直接打开文件查看页（三页签：改动 diff / 当前全文 / Markdown 预览）。</p>
+      </div>
+
+      <div class="panel">
+        <h3><span class="n">7</span>本原型未覆盖（请确认是否要）</h3>
+        <ul>
+          <li>终端 / SSH（<span class="mono">/remote/sidebar/ws/*</span> 通道）</li>
+          <li>插件管理、自更新 —— 服务端硬性拒绝，<b>做不了</b></li>
+          <li>文件<b>编辑</b>（只读服务，无写接口）</li>
+          <li>模型切换、图片附件、待办与目标面板、向用户提问面板</li>
+          <li>多套连接配置管理、多设备</li>
+        </ul>
+        <p style="margin-top:10px;color:var(--warn)">以上取舍对应需求文档第 10 节的 Q1–Q14，请一并给意见。</p>
+      </div>
+
+    </div>
+  </div>
+
+  <footer>
+    原型仅用于评审界面结构与交互，不含真实数据。所有接口名、参数与路径均取自真实源码并已在
+    <a href="需求文档.md" style="color:var(--accent)">需求文档.md</a> 附录 A 标注文件与行号。
+  </footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  const $ = (s)=>document.querySelector(s);
+  const el = (t,c,h)=>{const e=document.createElement(t); if(c)e.className=c; if(h!==undefined)e.innerHTML=h; return e;};
+  /* ---------- 轻量 Markdown 渲染（原型用；真机用完整 GFM + 增量流式） ---------- */
+  function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  function hl(code){
+    return esc(code)
+      .replace(/(\/\/[^\n]*|#[^\n]*)/g,'<span class="c">$1</span>')
+      .replace(/('[^'\n]*'|"[^"\n]*")/g,'<span class="s">$1</span>')
+      .replace(/\b(const|let|var|function|return|import|export|if|else|for|async|await|class|new|val|fun|suspend)\b/g,'<span class="k">$1</span>')
+      .replace(/\b(\d+)\b/g,'<span class="n">$1</span>');
+  }
+  /* 行内代码命中唯一文件路径 → 可点链接（规则同桌面端） */
+  const KNOWN_FILES = ['docs/android-client/原型.html','docs/android-client/需求文档.md',
+    'dsh-api-workspace-files/lib/types/index.js','dsh-workspace-changes/lib/types/recorder.js'];
+  function inlineCode(tok){
+    if(KNOWN_FILES.indexOf(tok)>=0 || /\.(md|html|ts|js|json|kt)$/.test(tok)){
+      return '<span class="flink" data-file="'+esc(tok)+'">📄 '+esc(tok)+'</span>';
+    }
+    return '<code>'+esc(tok)+'</code>';
+  }
+  function mdInline(s){
+    let t = esc(s);
+    t = t.replace(/`([^`]+)`/g,(m,a)=>inlineCode(a.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&')));
+    t = t.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+    t = t.replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2">$1</a>');
+    return t;
+  }
+  function mdToHtml(src){
+    const lines = String(src).split('\n');
+    let out='', i=0;
+    while(i<lines.length){
+      const ln = lines[i];
+      // 代码围栏
+      const fence = ln.match(/^\s*```\s*([\w+-]*)\s*$/);
+      if(fence){
+        const lang = fence[1]||'text'; const buf=[]; i++;
+        while(i<lines.length && !/^\s*```\s*$/.test(lines[i])){ buf.push(lines[i]); i++; }
+        i++; // 跳过闭合围栏（未闭合时 i 越界，循环自然结束）
+        out += '<div class="codeblock"><div class="cb-h"><span>'+esc(lang)+'</span><span>复制</span></div><pre><code>'+hl(buf.join('\n'))+'</code></pre></div>';
+        continue;
+      }
+      // 表格
+      if(/^\s*\|/.test(ln) && i+1<lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i+1])){
+        const head = ln.trim().replace(/^\||\|$/g,'').split('|').map(c=>c.trim());
+        i+=2; const rows=[];
+        while(i<lines.length && /^\s*\|/.test(lines[i])){
+          rows.push(lines[i].trim().replace(/^\||\|$/g,'').split('|').map(c=>c.trim())); i++;
+        }
+        out += '<table><thead><tr>'+head.map(h=>'<th>'+mdInline(h)+'</th>').join('')+'</tr></thead><tbody>'
+             + rows.map(r=>'<tr>'+r.map(c=>'<td>'+mdInline(c)+'</td>').join('')+'</tr>').join('')+'</tbody></table>';
+        continue;
+      }
+      // 标题
+      const h = ln.match(/^(#{1,6})\s+(.*)$/);
+      if(h){ const lv=Math.min(h[1].length,3); out+='<h'+lv+'>'+mdInline(h[2])+'</h'+lv+'>'; i++; continue; }
+      // 引用
+      if(/^\s*>\s?/.test(ln)){ out+='<blockquote>'+mdInline(ln.replace(/^\s*>\s?/,''))+'</blockquote>'; i++; continue; }
+      // 分隔线
+      if(/^\s*(-{3,}|\*{3,})\s*$/.test(ln)){ out+='<hr>'; i++; continue; }
+      // 无序列表
+      if(/^\s*[-*]\s+/.test(ln)){
+        const items=[];
+        while(i<lines.length && /^\s*[-*]\s+/.test(lines[i])){ items.push(lines[i].replace(/^\s*[-*]\s+/,'')); i++; }
+        out += '<ul>'+items.map(t=>'<li>'+mdInline(t)+'</li>').join('')+'</ul>'; continue;
+      }
+      // 有序列表
+      if(/^\s*\d+\.\s+/.test(ln)){
+        const items=[];
+        while(i<lines.length && /^\s*\d+\.\s+/.test(lines[i])){ items.push(lines[i].replace(/^\s*\d+\.\s+/,'')); i++; }
+        out += '<ol>'+items.map(t=>'<li>'+mdInline(t)+'</li>').join('')+'</ol>'; continue;
+      }
+      // 空行
+      if(!ln.trim()){ i++; continue; }
+      // 段落（合并连续非空行）
+      const para=[];
+      while(i<lines.length && lines[i].trim() && !/^\s*([-*]|\d+\.|>|#{1,6}\s|```|\|)/.test(lines[i])){ para.push(lines[i]); i++; }
+      if(para.length) out += '<p>'+mdInline(para.join(' '))+'</p>'; else i++;
+    }
+    return out;
+  }
+
+  /* ---------- 改动文件卡片（changes.summary） ---------- */
+  const TURN_CHANGES = [
+    { path:'docs/android-client/需求文档.md', display:'docs/android-client/需求文档.md', added:445, deleted:0 },
+    { path:'docs/android-client/原型.html',   display:'docs/android-client/原型.html',   added:722, deleted:0 }
+  ];
+  function changesCard(list, turn){
+    const card = el('div','chg');
+    const totalAdd = list.reduce((a,f)=>a+f.added,0), totalDel = list.reduce((a,f)=>a+f.deleted,0);
+    const head = el('div','ch');
+    head.appendChild(el('div','ci','📄'));
+    const cm = el('div','cm');
+    cm.appendChild(el('b','', '已编辑 '+list.length+' 个文件'));
+    cm.appendChild(el('small','', '第 '+turn+' 轮 · changes.summary 权威统计 · 点行查看 diff'));
+    head.appendChild(cm);
+    card.appendChild(head);
+    list.slice(0,4).forEach((f,idx)=>{
+      const row = el('div','fr');
+      row.appendChild(el('div','fp','', f.display));
+      const d = el('div','fd');
+      d.innerHTML = '<i>+'+f.added+'</i> <b>−'+f.deleted+'</b>';
+      row.appendChild(d);
+      row.addEventListener('click',()=>openFile(f, idx, turn));
+      card.appendChild(row);
+    });
+    if(list.length>4) card.appendChild(el('div','fr more','还有 '+(list.length-4)+' 个文件…'));
+    return card;
+  }
+
+  /* ---------- 文件查看页 ---------- */
+  const FILE_TEXT = {
+    'docs/android-client/需求文档.md': { md:true, text:
+`# DSH Android 原生客户端 · 需求文档
+
+## 3.7 改动文件（"已编辑 N 个文件"卡片的数据来源）
+
+桌面端那张卡片不是从回复正文里猜出来的，它来自 Host 插件 \`workspaceChanges\`：
+
+- 每个有 \`cwd\` 且非 subagent 来源的会话，在 \`turn/start\` 打 git 工作树快照，\`turn/end\` 再打一次并 diff
+- 结果以**只带 \`{turn}\` 的 \`workspace/changes\` 会话事件**写进日志——**摘要本身不在日志里**
+- 由三个已鉴权的普通 HTTP 路由暴露：
+
+| 路由 | 用途 |
+| --- | --- |
+| \`GET /api/changes.summary\` | 摘要（每文件 +added/-deleted） |
+| \`GET /api/changes.diff\` | 单文件 turn 前后对比 |
+| \`POST /api/changes.open\` | 在桌面端打开 |
+
+**限制**：摘要只活在同一 Host 进程内的会话生命周期里，Host 重启后旧轮次返回 404。` }
+  };
+  const DIFF_SAMPLE = [
+    { h:'@@ -233,7 +233,12 @@' },
+    { l:'ctx', t:' - `workspaceFiles/read` — args `{workspaceFileScopeId, path, range:{offset?,limit?}}`' },
+    { l:'add', t:'+- `workspaceFiles/read` — args `{workspaceFileScopeId, path, range:{offset?,limit?}}` → `{offset, text, lines, eof, absolutePath, version}`' },
+    { l:'add', t:'+- `workspaceFiles/readBytes` — 二进制路径，返回 `Uint8Array`（multipart 附件机制）' },
+    { l:'add', t:'+- `workspaceFiles/stat` — `{absolutePath, version, bytes?}`' },
+    { l:'ctx', t:' ' },
+    { l:'add', t:'+### 3.7 改动文件（"已编辑 N 个文件"卡片的数据来源）' },
+    { l:'add', t:'+' },
+    { l:'add', t:'+Host 插件 `@deepseek-ai/dsh-workspace-changes`，服务名 `workspaceChanges`。' },
+    { l:'ctx', t:' ' },
+    { l:'ctx', t:' - 不做文件浏览器 / 终端 / SSH' },
+    { l:'del', t:'-- 不做文件**编辑**（`workspaceFiles` 是只读服务，服务端无写接口）' },
+    { l:'add', t:'+- 不做终端 / SSH（本期不接 `/remote/sidebar/ws/terminal`）' }
+  ];
+  let curFile = null;
+  function renderFile(mode){
+    const body = $('#fileBody');
+    body.innerHTML='';
+    document.querySelectorAll('.ftab').forEach(t=>t.classList.remove('on'));
+    if(mode==='diff'){
+      $('#tabDiff').classList.add('on');
+      $('#fileNote').textContent = 'GET /remote/api/changes.diff?sessionId=…&seq=…&index=…';
+      const d = el('div','diff');
+      DIFF_SAMPLE.forEach(x=>{
+        if(x.h!==undefined) d.appendChild(el('div','h', x.h));
+        else d.appendChild(el('div','l '+x.l, esc(x.t)));
+      });
+      body.appendChild(d);
+    } else if(mode==='full'){
+      $('#tabFull').classList.add('on');
+      $('#fileNote').textContent = 'GET /remote/api/changes.summary + workspaceFiles/read（分页，limit=5000）';
+      const rec = FILE_TEXT[curFile && curFile.display];
+      if(rec && rec.md){
+        const t = el('div','filetext md', mdToHtml(rec.text));
+        body.appendChild(t);
+      } else {
+        body.appendChild(el('div','filetext','// 二进制或未知类型：workspaceFiles/readBytes → Uint8Array\n// 图片/PDF 直接交给解码器渲染'));
+      }
+    } else {
+      $('#tabMd').classList.add('on');
+      $('#fileNote').textContent = 'workspaceFiles/read 返回纯文本 → 客户端按 .md 扩展名选择 Markdown 渲染器';
+      const rec = FILE_TEXT[curFile && curFile.display];
+      body.appendChild(el('div','filetext md', mdToHtml((rec&&rec.text)||'# 非 Markdown 文件\n\n此页仅在 .md 时启用。')));
+    }
+  }
+  function openFile(f, idx, turn){
+    curFile = f;
+    go('file');
+    $('#fileTitle').innerHTML = f.display.split('/').pop() + '<small id="fileSub">第 '+turn+' 轮 · index '+idx+'</small>';
+    $('#filePath').textContent = f.display;
+    $('#fileStat').textContent = '+'+f.added+' −'+f.deleted;
+    renderFile('diff');
+  }
+
+
+  /* ---------- screen switching ---------- */
+  const screens = {pair:$('#screenPair'),home:$('#screenHome'),chat:$('#screenChat'),set:$('#screenSet'),file:$('#screenFile')};
+  function go(name){
+    Object.keys(screens).forEach(k=>{ screens[k].style.display = (k===name)?'flex':'none'; });
+    $('#drawer').classList.remove('on'); $('#scrim').classList.remove('on');
+  }
+  document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>go(b.dataset.go)));
+
+  /* ---------- mock data (mirrors real shapes) ---------- */
+  const WORKSPACES = [
+    { workspaceId:'ws_1', title:'bot', path:'F:\\bot', sessions:[
+      { sessionId:'s_101', title:'DSH Android 客户端 · 需求与原型', running:true,  agentPreset:'移动应用开发工程师', when:'刚刚' },
+      { sessionId:'s_102', title:'asar 解包偏移修复',                running:false, agentPreset:'默认',               when:'2 小时前' },
+      { sessionId:'s_103', title:'手机端会话侧栏缺失排查',            running:false, agentPreset:'默认',               when:'昨天' }
+    ]},
+    { workspaceId:'ws_2', title:'dsh-web', path:'F:\\DSH\\web', sessions:[
+      { sessionId:'s_201', title:'前端 bundle 体积优化',   running:false, agentPreset:'默认', when:'3 天前' }
+    ]},
+    { workspaceId:'ws_3', title:'sandbox', path:'F:\\sandbox\\exp', sessions:[
+      { sessionId:'s_301', title:'Typert RPC 抓包实验',     running:false, agentPreset:'默认', when:'上周' },
+      { sessionId:'s_302', title:'隧道稳定性测试',          running:false, agentPreset:'默认', when:'上周' }
+    ]}
+  ];
+  const open = { ws_1:true };
+
+  function renderHome(){
+    const body = $('#homeBody'); body.innerHTML='';
+    const label = el('div','section-label','工作区');
+    body.appendChild(label);
+    WORKSPACES.forEach(w=>{
+      const wrap = el('div','ws'+(open[w.workspaceId]?' open':''));
+      const head = el('div','ws-head');
+      head.appendChild(el('div','folder','📁'));
+      const meta = el('div','meta');
+      meta.appendChild(el('div','name', w.title));
+      meta.appendChild(el('div','path', w.path));
+      head.appendChild(meta);
+      head.appendChild(el('div','chev','›'));
+      head.addEventListener('click',()=>{ open[w.workspaceId]=!open[w.workspaceId]; renderHome(); });
+      wrap.appendChild(head);
+      const wb = el('div','ws-body');
+      w.sessions.forEach(s=>{
+        const row = el('div','sess');
+        row.appendChild(el('div','st '+(s.running?'run':'')));
+        const txt = el('div','txt');
+        txt.appendChild(el('div','t', s.title));
+        const m = el('div','m');
+        m.appendChild(el('span','', s.agentPreset));
+        m.appendChild(el('span','', s.when));
+        if(s.running) m.appendChild(el('span','badge2','运行中'));
+        txt.appendChild(m);
+        row.appendChild(txt);
+        row.addEventListener('click',()=>openChat(s));
+        wb.appendChild(row);
+      });
+      wrap.appendChild(wb);
+      body.appendChild(wrap);
+    });
+    const total = WORKSPACES.reduce((a,w)=>a+w.sessions.length,0);
+    $('#homeSub').textContent = WORKSPACES.length+' 个工作区 · '+total+' 个会话';
+  }
+
+  /* ---------- chat ---------- */
+  let streaming = false, timer = null;
+  const MD_SAMPLE =
+`## 结论
+
+改动已经落到两个文件，接口全部来自真实源码：
+
+1. \`workspaceFiles/read\` 是**分页文本**读取（默认 5000 行）
+2. \`workspaceFiles/readBytes\` 返回 \`Uint8Array\`，走 multipart 附件
+
+| 方法 | 用途 |
+| --- | --- |
+| read | 文本分页 |
+| stat | 版本 / 大小 |
+| changes | 变更流 |
+
+> 注意：Host 重启后旧轮次的摘要会 404。
+
+\`\`\`kotlin
+suspend fun readFile(sessionId: String, path: String, offset: Int = 1) =
+    rpc.call("workspaceFiles/read", ReadArgs(sessionId, path, Range(offset, 5000)))
+\`\`\`
+
+详见 docs/android-client/需求文档.md 的 3.6 / 3.7 两节。`;
+
+  const HISTORY = [
+    { who:'user', text:'现在手机上看 DSH 每次重开都要重新加载一遍插件，太慢了。' },
+    { who:'bot',  text:'我确认了原因：当前手机端跑的是官方桌面 SPA，插件在它上面注入 CSS 补丁。凭证存在 `sessionStorage`，关页即丢，所以每次打开都等于冷启动。' },
+    { who:'tool', name:'读取 src/client/mobile-adapt.ts', detail:'1254 行\nL104-112  isMobilePortrait() 判定\nL143      [class$="_frame"][data-sidebar-collapsed]{grid-template-columns:0 minmax(0,1fr) 0 !important}\n→ 这条规则把会话侧栏压成 0 宽' },
+    { who:'tool', name:'write · docs/android-client/需求文档.md', file:'docs/android-client/需求文档.md', detail:'tool/call\n  name: "write"\n  arguments: "{\\"file_path\\":\\"docs/android-client/需求文档.md\\",\\"content\\":\\"…\\"}"\n\n→ arguments 是 JSON 字符串，解析出 file_path 即可渲染成可点行\ntool/result\n  message.role: "tool"  isError: false' },
+    { who:'bot',  text:'结论：不要修补 Web UI，改成原生 App 直连 Typert RPC。协议已经全部核实，接口名与参数都能落到源码行号。' },
+    { who:'bot',  text: MD_SAMPLE }
+  ];
+
+  function bubble(m){
+    if(m.who==='tool'){
+      const t = el('div','tool');
+      const th = el('div','th','<span class="ic">⚙</span><span>'+m.name+'</span><span style="margin-left:auto;color:var(--dim2)">展开</span>');
+      const tb = el('div','tb', m.detail);
+      th.addEventListener('click',()=>{ t.classList.toggle('open'); th.querySelector('span:last-child').textContent = t.classList.contains('open')?'收起':'展开'; });
+      t.appendChild(th); t.appendChild(tb);
+      if(m.file){   // ← 工具调用里的文件路径渲染成可点行（不依赖 Host 进程状态）
+        const fr = el('div','fr');
+        fr.appendChild(el('div','fp','','📄 '+m.file));
+        fr.appendChild(el('div','fd','','点击查看'));
+        fr.addEventListener('click',()=>{
+          const hit = TURN_CHANGES.find(f=>f.display===m.file);
+          openFile(hit || { display:m.file, added:0, deleted:0, path:m.file }, 0, 1);
+        });
+        t.appendChild(fr);
+      }
+      return t;
+    }
+    const d = el('div','msg '+m.who);
+    if(m.who==='bot'){
+      d.appendChild(el('div','who','DSH'));
+      d.appendChild(el('div','md', mdToHtml(m.text)));   // ← Markdown 渲染
+    } else {
+      d.appendChild(el('span','', m.text));
+    }
+    return d;
+  }
+
+  /* 消息里的可点文件链接 → 打开文件查看页 */
+  document.addEventListener('click', e=>{
+    const fl = e.target.closest && e.target.closest('.flink');
+    if(!fl) return;
+    const path = fl.dataset.file;
+    const hit = TURN_CHANGES.find(f=>f.display===path || f.display.endsWith('/'+path) || path.endsWith(f.display));
+    openFile(hit || { display:path, added:0, deleted:0, path }, 0, 1);
+  });
+
+  function openChat(s){
+    go('chat');
+    $('#chatTitle').innerHTML = s.title + '<small id="chatSub">'+s.sessionId+' · '+(s.running?'运行中':'空闲')+'</small>';
+    const box = $('#msgs'); box.innerHTML='';
+    box.appendChild(el('div','dayalign','今天'));
+    HISTORY.forEach(m=>box.appendChild(bubble(m)));
+    box.appendChild(changesCard(TURN_CHANGES, 1));   // ← "已编辑 N 个文件" 卡片
+    $('#qbar').style.display='none';
+    $('#ta').value=''; autoGrow();
+    setStreaming(false);
+    requestAnimationFrame(()=>{ box.scrollTop = box.scrollHeight; });
+  }
+
+  const REPLIES = [
+    '收到。这条会作为一次 `session/prompt` 发出去（`mode=queue`），回复通过同一条 mux 上的 `session/follow` 流增量回来。',
+    '在真实实现里，这里会显示**工具调用**、命令输出和助手文本；工具块默认折叠，点一下展开。改动过的文件会在轮次结束时汇总成上方那张卡片。',
+    '断线时顶部状态条会变黄并自动重连，重连后先用 `session/page` 补齐缺失的消息，界面不会清空。'
+  ];
+  let replyIdx = 0;
+
+  /* 流式 Markdown：每个分片重新解析尾部，未闭合围栏也能正确显示 */
+  function streamText(box, text, cb){
+    const d = el('div','msg bot'); d.appendChild(el('div','who','DSH'));
+    const md = el('div','md'); const caret = el('span','caret');
+    d.appendChild(md); d.appendChild(caret);
+    box.appendChild(d);
+    let i=0; streaming=true; setStreaming(true);
+    timer = setInterval(()=>{
+      i += 2 + Math.floor(Math.random()*3);
+      md.innerHTML = mdToHtml(text.slice(0,i));
+      box.scrollTop = box.scrollHeight;
+      if(i>=text.length){
+        clearInterval(timer); timer=null;
+        md.innerHTML = mdToHtml(text); caret.remove();
+        streaming=false; setStreaming(false);
+        if(cb) cb();
+      }
+    }, 26);
+  }
+
+  function setStreaming(on){
+    const b = $('#btnSend');
+    b.classList.toggle('stop', on);
+    b.textContent = on ? '■' : '➤';
+    b.disabled = false;
+  }
+
+  function autoGrow(){
+    const ta = $('#ta'); ta.style.height='auto';
+    ta.style.height = Math.min(ta.scrollHeight, 84)+'px';
+  }
+  $('#ta').addEventListener('input', autoGrow);
+  $('#ta').addEventListener('keydown', e=>{
+    if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+  });
+  $('#btnSend').addEventListener('click', send);
+
+  function send(){
+    const box = $('#msgs'); const ta = $('#ta');
+    if(streaming){ // 中止 = session/cancel
+      if(timer){ clearInterval(timer); timer=null; }
+      const last = box.querySelector('.msg.bot:last-of-type');
+      if(last){ const c = last.querySelector('.caret'); if(c) c.remove(); }
+      streaming=false; setStreaming(false);
+      const n = el('div','msg bot'); n.appendChild(el('div','who','DSH'));
+      n.appendChild(el('span','', '（已中止 · session/cancel → {accepted:true}）'));
+      box.appendChild(n); box.scrollTop = box.scrollHeight;
+      return;
+    }
+    const v = ta.value.trim(); if(!v) return;
+    box.appendChild(bubble({who:'user', text:v}));
+    ta.value=''; autoGrow(); box.scrollTop = box.scrollHeight;
+    const dots = el('div','msg bot'); dots.appendChild(el('div','thinking','<i></i><i></i><i></i>'));
+    box.appendChild(dots); box.scrollTop = box.scrollHeight;
+    setTimeout(()=>{
+      dots.remove();
+      const text = REPLIES[replyIdx % REPLIES.length]; replyIdx++;
+      streamText(box, text, ()=>{ $('#qbar').style.display='none'; });
+    }, 520);
+  }
+
+  /* ---------- nav ---------- */
+  $('#btnDrawer').addEventListener('click',()=>{ $('#drawer').classList.add('on'); $('#scrim').classList.add('on'); });
+  $('#scrim').addEventListener('click',()=>{ $('#drawer').classList.remove('on'); $('#scrim').classList.remove('on'); });
+  $('#dSet').addEventListener('click',()=>go('set'));
+  $('#btnSettings').addEventListener('click',()=>go('set'));
+  $('#btnBack').addEventListener('click',()=>go('home'));
+  $('#btnBack2').addEventListener('click',()=>go('home'));
+  $('#btnBack3').addEventListener('click',()=>go('chat'));
+  $('#tabDiff').addEventListener('click',()=>renderFile('diff'));
+  $('#tabFull').addEventListener('click',()=>renderFile('full'));
+  $('#tabMd').addEventListener('click',()=>renderFile('md'));
+  $('#btnCopyPath').addEventListener('click',()=>{
+    const p = $('#filePath').textContent;
+    if(navigator.clipboard) navigator.clipboard.writeText(p);
+    const b = $('#btnCopyPath'); b.textContent='✓'; setTimeout(()=>{ b.textContent='⧉'; }, 900);
+  });
+  $('#btnCancel').addEventListener('click',()=>{ if(streaming) send(); });
+  $('#btnRefresh').addEventListener('click',()=>{
+    const s = $('#connStrip'); s.className='conn slow'; $('#connText').textContent='重连中… 重建 workspace/follow 基线';
+    setTimeout(()=>{ s.className='conn live'; $('#connText').textContent='已连接 · 实时同步'; }, 900);
+  });
+
+  /* ---------- pairing ---------- */
+  let paired = false;
+  function doPair(){
+    if(paired) return;
+    paired = true;
+    const btn = $('#btnPair');
+    btn.disabled = true; btn.textContent = '配对中…';
+    $('#probe').innerHTML = '<span style="color:var(--warn)">● POST /api/pair/accept {token}</span>';
+    setTimeout(()=>{
+      $('#probe').innerHTML = '<span style="color:var(--accent2)">● 200 {ok:true, deviceId} · 凭证已加密落盘</span>';
+      btn.textContent = '配对成功 ✓';
+      setTimeout(()=>go('home'), 520);
+    }, 700);
+  }
+  $('#btnPair').addEventListener('click', ()=>{ $('#inpToken').value='a3f9c1d47e2b8065f1a9c3d7e5b20486'; doPair(); });
+  $('#btnPairManual').addEventListener('click', doPair);
+  $('#probe').innerHTML = '<span style="color:var(--accent2)">● /api/pair/status 200 · 隧道 running · 当前未配对</span>';
+
+  document.querySelectorAll('[data-sw]').forEach(s=>s.addEventListener('click',()=>s.classList.toggle('on')));
+
+  renderHome();
+
+  /* 支持 #pair / #home / #chat / #set / #file 直达某一屏（便于评审时单屏查看） */
+  const hash = (location.hash||'').replace('#','');
+  if(screens[hash]){
+    if(hash==='chat'){
+      paired = true;
+      go('home'); openChat(WORKSPACES[0].sessions[0]);
+    } else if(hash==='file'){
+      paired = true;
+      go('home'); openFile(TURN_CHANGES[0], 0, 1);
+    } else {
+      if(hash!=='pair') paired = true;
+      go(hash);
+    }
+  } else {
+    go('pair');
+  }
+})();
+</script>
+</body>
+</html>
