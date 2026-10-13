@@ -103,6 +103,7 @@ fun HomeScreen(
                         scope.launch { drawerState.close() }
                         openSession(session, workspace)
                     },
+                    onRefreshSessions = viewModel::refreshSessions,
                 )
             }
         },
@@ -219,24 +220,7 @@ fun HomeScreen(
 }
 
 /**
- * 每分钟跳一次的「当前时间」，用来驱动相对时间的重组。
- *
- * 直接在 Composable 里读 `System.currentTimeMillis()` 只在重组时求值：抽屉打开后静止
- * 半小时，「5 分钟前」不会变成「35 分钟前」，会话的相对顺序也不会随时间推移重排
- * （R003 P3-1）。这里用 `produceState` 每 30 秒推进一次 `now`。
- */
-@Composable
-private fun rememberNow(): Long {
-    val now by produceState(initialValue = System.currentTimeMillis()) {
-        while (true) {
-            delay(30_000L)
-            value = System.currentTimeMillis()
-        }
-    }
-    return now
-}
-
-/** 顶部连接状态条。 */
+ * 顶部连接状态条。 */
 @Composable
 private fun ConnectionBar(text: String, ok: Boolean) {
     Surface(
@@ -443,6 +427,7 @@ private fun SessionRowItem(
 private fun SessionDrawer(
     state: HomeUiState,
     onOpenSession: (SessionSummary, Workspace?) -> Unit,
+    onRefreshSessions: () -> Unit,
 ) {
     // 派生列表现在是 HomeUiState 的构造属性（不再是 get() 派生），在 LazyColumn 的
     // content lambda 里读也一定是当前值。这里取成局部变量只是少写几次 state.。
@@ -469,19 +454,33 @@ private fun SessionDrawer(
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.08f))
 
-        // 真机踩到的坑：抽屉先打开、会话列表后到，此时列表首项是「按工作区」；等 13 条
-        // 「最近」会话插到它前面时，LazyColumn 会按「当前可见首项的 key」保持锚点，
-        // 把整段「最近」顶到可视区之上——看起来像整段没渲染（截图证据见测试记录 T009）。
+        // 真机踩到的坑（M2 T009 首次出现，M3 复验时仍能复现）：抽屉先打开、会话列表后到，
+        // 此时列表首项是「按工作区」；等 13 条「最近」会话插到它前面时，LazyColumn 会按
+        // 「当前可见首项的 key」保持锚点，把整段「最近」顶到可视区之上——看起来像整段
+        // 没渲染（截图证据见测试记录 T009）。
         //
-        // 只在**会话数据首次到达**时回到顶部，不能写成「分段数量变化就回顶」：每次
+        // ⚠️ 触发条件**不能**写成「会话列表非空」：`session/list`（unary）与
+        // `workspace/follow`（流）是两条独立的通道，先后顺序不保证。真机实测到过
+        // `session/list` 先返回、此时 `snapshot.items` 还是空、于是 `recent` 也是空
+        // （抽屉标题显示「共 51 条 · 顶层 0」）——一次性标志在这一刻就被消耗掉，等
+        // 工作区快照到达、`recent` 真正填满 13 条时再也不会回顶，「最近」整段就留在
+        // 可视区之上。所以必须挂在**抽屉自己的行数据**上。
+        //
+        // ⚠️ 而且必须用 `requestScrollToItem` 而不是 `scrollToItem`：后者是挂起函数，
+        // 在 item provider 更新前就执行完了，紧接着 LazyColumn 的锚点恢复会把滚动位置
+        // 按 key 拉回原位（M3 真机实测：只滚一次无效）。`requestScrollToItem` 把滚动
+        // 请求登记到**下一次测量**，恰好与锚点恢复在同一趟里生效。
+        //
+        // 只在**首次**出现行数据时回到顶部，不能写成「分段数量变化就回顶」：每次
         // refreshSessions() / 重连补拉都会改变 recent.size，会把正在浏览「按工作区」段
         // 的用户强制弹回顶部（R003 P2-1）。
+        val hasDrawerRows = recent.isNotEmpty() || pinned.isNotEmpty()
         val listState = rememberLazyListState()
         var restoredForSessions by remember { mutableStateOf(false) }
-        LaunchedEffect(state.sessions.isEmpty) {
-            if (state.sessions.items.isNotEmpty() && !restoredForSessions) {
+        LaunchedEffect(hasDrawerRows) {
+            if (hasDrawerRows && !restoredForSessions) {
                 restoredForSessions = true
-                listState.scrollToItem(0)
+                listState.requestScrollToItem(0)
             }
         }
 
@@ -542,14 +541,29 @@ private fun SessionDrawer(
                 }
             }
 
+            // 空态必须能区分「读取失败」与「确实没有会话」。旧实现只写「没有读到会话。
+            // 下拉主区刷新，或检查连接。」——而 `sessionsError` 的黄条只挂在主区，
+            // 抽屉里根本看不到，于是超时失败与空列表长得一模一样（M3 T009 真机踩到：
+            // 冷启动 `session/list` 要 2.6s，与 mux 建连抢带宽时会超时，用户只看到
+            // 「没有读到会话」，既不知道是失败、也不知道可以点重试）。
             if (state.sessions.isEmpty && state.sessionsLoading.not()) {
                 item(key = "empty") {
-                    Text(
-                        text = "没有读到会话。下拉主区刷新，或检查连接。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
-                        modifier = Modifier.padding(16.dp),
-                    )
+                    val failure = state.sessionsError
+                    Column(
+                        Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = if (failure == null) {
+                                "没有读到会话。下拉主区刷新，或检查连接。"
+                            } else {
+                                "会话列表读取失败：$failure"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
+                        )
+                        TextButton(onClick = onRefreshSessions) { Text("重试") }
+                    }
                 }
             }
         }

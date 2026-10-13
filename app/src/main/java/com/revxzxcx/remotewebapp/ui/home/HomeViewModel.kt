@@ -175,6 +175,16 @@ class HomeViewModel(
                     if (firstSnapshot) {
                         firstSnapshot = false
                         loadSessions()
+                    } else if (_state.value.sessionsError != null) {
+                        // 上次摘要读取失败（冷启动实测 `session/list` 要 2.6s，与 mux 建连
+                        // 抢带宽时可能超时/被取消）→ 每次再来一帧就重试一次，直到成功。
+                        // 旧实现只有一次性 `firstSnapshot` 标志：首拉一失败，会话列表就永久
+                        // 为空，抽屉里只显示「没有读到会话」，用户完全不知道还能重试
+                        // （M3 真机踩到：「共 0 条 · 顶层 27」）。
+                        //
+                        // 判据必须是 `sessionsError != null` 而**不是** `sessions.items.isEmpty()`：
+                        // 后者会让「本来就没有会话」的账号在每一帧都白拉一次。
+                        loadSessions()
                     }
                 }
         }
@@ -214,6 +224,11 @@ class HomeViewModel(
                     )
                     .withDerived(_state.value.snapshot, result)
             } catch (cause: Exception) {
+                // `CancellationException` 是 Exception 的子类，绝不能在这里被吞掉：
+                // 协程被取消时（离开页面 / retry() 取消旧 job）如果写一条
+                // 「会话列表读取失败：JobCancellationException」，用户会看到一条假错误，
+                // 而且 sessionsError 会一直挂在界面上（R003 P1-2 / R004 P3-1 同类）。
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
                 val typert = cause as? TypertException
                 _state.value = _state.value.copy(
                     sessionsLoading = false,

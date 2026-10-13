@@ -1,11 +1,13 @@
 package com.revxzxcx.remotewebapp.core.protocol
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -167,6 +169,12 @@ class RemoteStreamMux(
      * 单飞（single-flight）：同一代际内只有一个调用者负责建连，其余等待同一个
      * [CompletableDeferred]（对应 `client.js:553-580` `waitForSocket` 的 waiters 语义）。
      * 若连接在等待期间因断线作废，循环重试。
+     *
+     * **必须带超时**：`HttpClients.stream()` 的 `readTimeout(0)` 是为了让长连接的读不超时，
+     * 但它同时把 OkHttp 的**握手**等待也变成了无限等待。隧道/中继链路下 WS 升级偶发挂死
+     * （实测：手机侧 t=35.3s 发出 `startConnection` 后 20s 内 `onOpen`/`onFailure`/`onClosed`
+     * 一个都没回调，App 就此永久停在「连接中…」；主机侧同 URL 只需 1.3s）。没有超时就没有
+     * 失败、没有失败就没有 `retryWhen` 重试，UI 卡在「连接中…」而服务端 `onlineCount` 恒 0。
      */
     private suspend fun waitForSocket(): WebSocket {
         while (true) {
@@ -187,7 +195,23 @@ class RemoteStreamMux(
             if (mine) {
                 startConnection(live)
             }
-            live.deferred.await()
+            try {
+                withTimeout(HANDSHAKE_TIMEOUT_MS) { live.deferred.await() }
+            } catch (cause: TimeoutCancellationException) {
+                // 只有负责建连的一方作废这次尝试，其余等待者会因 deferred 被取消而重新排队。
+                mutex.withLock {
+                    if (attempt === live) attempt = null
+                    if (live.generation == generation) {
+                        live.socket?.cancel()
+                        live.socket = null
+                    }
+                }
+                throw TypertException(
+                    TypertException.CODE_TRANSPORT,
+                    "WebSocket 握手超时（${HANDSHAKE_TIMEOUT_MS / 1000}s）：${cause.message ?: "无响应"}",
+                    cause = cause,
+                )
+            }
         }
     }
 
@@ -365,5 +389,15 @@ class RemoteStreamMux(
 
     private companion object {
         const val INVALID_FRAME_REASON: String = "invalid Remote stream frame"
+
+        /**
+         * WS 升级（握手）超时。
+         *
+         * 为什么必须有：`HttpClients.stream()` 为了让长连接的读不超时设了 `readTimeout(0)`，
+         * 这同时让 OkHttp 的**握手**等待变成无限。隧道/中继下升级偶发挂死且**不触发任何回调**，
+         * 于是 `waitForSocket` 永久挂起、`retryWhen` 永不重试、UI 停在「连接中…」。
+         * 取 15 s：公网隧道实测升级约 1.3 s，留足余量又远小于用户可感知的「卡死」。
+         */
+        const val HANDSHAKE_TIMEOUT_MS = 15_000L
     }
 }

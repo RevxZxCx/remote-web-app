@@ -1,5 +1,9 @@
 package com.revxzxcx.remotewebapp.ui.home
 
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.delay
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -41,4 +45,24 @@ internal object TimeText {
             else -> then.format(fullDate)
         }
     }
+}
+
+/**
+ * 每 30 秒跳一次的「当前时间」，用来驱动相对时间的重组。
+ *
+ * 直接在 Composable 里读 `System.currentTimeMillis()` 只在重组时求值：页面静止半小时后
+ * 「5 分钟前」不会变成「35 分钟前」（R003 P3-1）。这里用 `produceState` 定时推进。
+ *
+ * 为什么放在本文件（而不是 `HomeScreen.kt`）：聊天页也要用它显示消息时间，
+ * 放在时间工具旁边更合理；`internal` 可见性让同模块直接调用。
+ */
+@Composable
+internal fun rememberNow(): Long {
+    val now by produceState(initialValue = System.currentTimeMillis()) {
+        while (true) {
+            delay(30_000L)
+            value = System.currentTimeMillis()
+        }
+    }
+    return now
 }

@@ -27,8 +27,7 @@ class SessionRepository(
 
     /** 拉取一次完整会话列表。 */
     suspend fun load(): SessionListResult = withContext(Dispatchers.IO) {
-        val raw = connection.typert.callRaw(DshEndpoints.SESSION_LIST, listArgs())
-        parser.parse(raw)
+        parser.parse(connection.typert.callRaw(DshEndpoints.SESSION_LIST, listArgs()))
     }
 
     companion object {
