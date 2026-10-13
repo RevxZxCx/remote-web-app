@@ -5,9 +5,12 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
+import com.revxzxcx.remotewebapp.core.changes.ChangesRepository
 import com.revxzxcx.remotewebapp.core.connection.DshConnection
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
 import com.revxzxcx.remotewebapp.core.session.ChatArgs
+import com.revxzxcx.remotewebapp.core.session.ChatItem
 import com.revxzxcx.remotewebapp.core.session.ChatReducer
 import com.revxzxcx.remotewebapp.core.session.ChatRepository
 import com.revxzxcx.remotewebapp.core.session.ChatUiState
@@ -38,6 +41,7 @@ class ChatViewModel(
 ) : ViewModel() {
 
     private val repository = ChatRepository(connection)
+    private val changesRepository = ChangesRepository(connection)
 
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
@@ -49,9 +53,11 @@ class ChatViewModel(
     private var streamJob: Job? = null
     private var pageJob: Job? = null
     private var sendJob: Job? = null
+    private var changesJob: Job? = null
 
     init {
         start()
+        watchChanges()
     }
 
     /** 更新输入框。 */
@@ -131,6 +137,10 @@ class ChatViewModel(
                     hasMore = page.hasMore,
                     error = null,
                 )
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                // 取消不是失败：`retry()` 会取消在途的翻页，此时不该在界面上留下错误条
+                //（`CancellationException` 是 `Exception` 的子类，不单独拦会走到下面的分支）。
+                throw cause
             } catch (cause: Exception) {
                 _state.value = _state.value.copy(error = describe(cause))
             } finally {
@@ -159,6 +169,9 @@ class ChatViewModel(
                     }
                 }
                 .catch { cause ->
+                    // `catch` 也会捕获取消（`retry()` 取消旧流）：那不是「连接断了」，
+                    // 不该写成错误横幅，否则新流建立后这条误导文案会一直留着。
+                    if (cause is kotlinx.coroutines.CancellationException) throw cause
                     _state.value = _state.value.copy(
                         loading = false,
                         error = describe(cause),
@@ -167,6 +180,91 @@ class ChatViewModel(
                 .collect { frame ->
                     _state.value = ChatReducer.reduce(_state.value, frame)
                 }
+        }
+    }
+
+    /**
+     * 观察 [ChatUiState.items] 里还没拿到摘要的 [ChatItem.Changes] 占位卡片，去拉该轮摘要。
+     *
+     * 为什么用「观察状态」而不是在 `start()` 的 collect 里顺带处理：摘要是**异步且可以失败**
+     * 的（Host 重启后返回 404），把它写在流的主路径上会让一次失败的摘要请求和会话流
+     * 的生命周期纠缠在一起——而它们完全无关。单独一个协程也便于在 `onCleared` 里一起取消。
+     *
+     * **待办集合完全从状态推导**（R005 P1-1 / P2-2）：条件只有「这个 seq 既没有结果、
+     * 也不在加载中」。早前版本另存一份 `requestedChanges` 台账，它与 [ChatReducer] 在快照
+     * 替换时对 [ChatUiState.changes] 的裁剪不同步——重连后卡片被裁掉、台账却还留着 seq，
+     * 于是卡片滚回窗口时永远不会重新拉取，永久显示「记录已不可用」。改由状态自身表达
+     * 「有没有结果」之后，两者天然同步，也不会自激（发起前先把 seq 写进 [ChatUiState.changesLoading]）。
+     *
+     * ⚠️ `changes.summary` 是一条**普通鉴权 HTTP 路由**（不是 Typert RPC），返回裸 JSON，
+     * 由 [ChangesRepository] 封装。
+     */
+    private fun watchChanges() {
+        changesJob = viewModelScope.launch {
+            _state.collect { current ->
+                val pending = pendingChangeSeqs(current)
+                pending.forEach { seq -> loadChanges(seq) }
+            }
+        }
+    }
+
+    /**
+     * 需要现在去拉摘要的 seq：窗口内、还没结果、也不在加载中。
+     *
+     * `seq < 0` 直接跳过：那不是真实的 `workspace/changes` 事件（解析兜底），既拉不到
+     * 也不该在卡片上永远转圈——卡片会按「没有结果」渲染成不可用。
+     */
+    private fun pendingChangeSeqs(current: ChatUiState): List<Long> = current.items
+        .asSequence()
+        .filterIsInstance<ChatItem.Changes>()
+        .map { it.seq }
+        .filter { it >= 0L && it !in current.changes && it !in current.changesLoading }
+        .distinct()
+        .toList()
+
+    /**
+     * 重新拉某一轮的摘要（卡片上的「重试」）。
+     *
+     * 只对**读取失败**的结果有意义：404（[ChangesEntry.Unavailable]）是终态，
+     * 记录确实随 Host 进程一起没了，再点多少次都是 404，所以直接忽略。
+     */
+    fun retryChanges(seq: Long) {
+        if (_state.value.changes[seq] !is ChangesEntry.Failed) return
+        _state.value = _state.value.copy(changes = _state.value.changes - seq)
+    }
+
+    /**
+     * 拉取某个 `workspace/changes` seq 的摘要，结果写进 [ChatUiState.changes]。
+     *
+     * 三态分开处理（R005 P1-2）：404 → [ChangesEntry.Unavailable]（终态）；
+     * 其它异常（超时、403、解析失败）→ [ChangesEntry.Failed]（**可重试**，卡片给按钮）。
+     * 把两者混成同一个「取不到」会让一次网络抖动被说成「桌面端重启后记录丢了」，
+     * 而且错误归因完全是错的。
+     */
+    private fun loadChanges(seq: Long) {
+        if (seq in _state.value.changesLoading) return
+        _state.value = _state.value.copy(changesLoading = _state.value.changesLoading + seq)
+        viewModelScope.launch {
+            val entry = try {
+                changesRepository.summary(sessionId, seq)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                // 取消不算失败：把 loading 标记收回来，否则转圈会永久留在卡片上。
+                _state.value = _state.value.copy(
+                    changesLoading = _state.value.changesLoading - seq,
+                )
+                throw cause
+            } catch (cause: Exception) {
+                ChangesEntry.Failed(describe(cause))
+            }
+            // 代数校验（R005 P3-10）：快照替换会把窗口外的 seq 从 `changes`/`changesLoading`
+            // 一起裁掉。若这次请求在裁剪之后才回来，直接丢弃——否则会把一个已经不在窗口里的
+            // seq 重新写回 `changes`，一直留到下个快照。丢弃是安全的：卡片真回到窗口时，
+            // 「没有结果也不在加载中」的条件会重新成立，自然会再拉一次。
+            if (seq !in _state.value.changesLoading) return@launch
+            _state.value = _state.value.copy(
+                changes = _state.value.changes + (seq to entry),
+                changesLoading = _state.value.changesLoading - seq,
+            )
         }
     }
 
@@ -187,6 +285,7 @@ class ChatViewModel(
         streamJob?.cancel()
         pageJob?.cancel()
         sendJob?.cancel()
+        changesJob?.cancel()
         super.onCleared()
     }
 

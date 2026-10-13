@@ -41,19 +41,23 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
 import com.revxzxcx.remotewebapp.core.session.ChatItem
 import com.revxzxcx.remotewebapp.core.session.ContentBlock
 import com.revxzxcx.remotewebapp.core.session.LiveAttempt
+import com.revxzxcx.remotewebapp.core.session.ToolFilePaths
 import com.revxzxcx.remotewebapp.core.session.visibleAssistantBlocks
+import com.revxzxcx.remotewebapp.ui.files.FileTarget
 import com.revxzxcx.remotewebapp.ui.home.TimeText
 import com.revxzxcx.remotewebapp.ui.home.rememberNow
+import com.revxzxcx.remotewebapp.ui.markdown.MdBlocks
+import com.revxzxcx.remotewebapp.ui.markdown.MdStream
 
 /**
  * 聊天页。
  *
- * M3 只做**纯文本**渲染（markdown / 代码高亮 / 工具卡片折叠 / 改动文件卡片留到 M3.5，
- * 见 `需求文档.md` §9 里程碑）。工具调用与结果以等宽文本折叠展示，保证「能看到做了什么」
- * 这个基本诉求在 M3 就成立。
+ * M3.5 起正文按 Markdown 渲染（[MdBlocks]，自绘，决策 D12），代码块用轻量高亮库
+ * （决策 D13）；工具调用与工具结果折叠成卡片，改动文件卡片可点开文件查看页。
  *
  * 自动滚动策略：只有用户已经贴在底部时才跟随新内容，否则不打断他向上翻阅历史
  * （与桌面端一致）。
@@ -64,6 +68,7 @@ fun ChatScreen(
     viewModel: ChatViewModel,
     title: String,
     onBack: () -> Unit,
+    onOpenFile: (FileTarget) -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
     val draft by viewModel.draft.collectAsState()
@@ -189,7 +194,14 @@ fun ChatScreen(
                         }
                     }
                     items(state.items, key = { it.seq }) { item ->
-                        ChatItemRow(item, now)
+                        ChatItemRow(
+                            item = item,
+                            now = now,
+                            changes = state.changes[item.seq],
+                            changesLoading = item.seq in state.changesLoading,
+                            onOpenFile = onOpenFile,
+                            onRetryChanges = viewModel::retryChanges,
+                        )
                     }
                     state.live?.let { live ->
                         item(key = "live") { LiveRow(live) }
@@ -237,7 +249,14 @@ private fun Composer(
 
 /** 一条持久化条目。 */
 @Composable
-private fun ChatItemRow(item: ChatItem, now: Long) {
+private fun ChatItemRow(
+    item: ChatItem,
+    now: Long,
+    changes: ChangesEntry?,
+    changesLoading: Boolean,
+    onOpenFile: (FileTarget) -> Unit,
+    onRetryChanges: (Long) -> Unit,
+) {
     when (item) {
         is ChatItem.User -> Bubble(
             alignEnd = true,
@@ -245,7 +264,13 @@ private fun ChatItemRow(item: ChatItem, now: Long) {
             time = item.time,
             now = now,
         ) {
-            Text(item.text, style = MaterialTheme.typography.bodyMedium)
+            // 用户消息里通常有粘贴的路径/命令，用 Markdown 渲染能保留行内代码与折行。
+            MdBlocks(
+                blocks = rememberMarkdown(item.text),
+                onLinkClick = {},
+                onFilePathClick = {},
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
 
         is ChatItem.Assistant -> {
@@ -260,9 +285,11 @@ private fun ChatItemRow(item: ChatItem, now: Long) {
                 time = item.time,
                 now = now,
                 footer = if (item.interrupted) "（已中止）" else null,
+                // 助手正文常有代码块与表格，320dp 太窄。
+                wide = true,
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    visible.forEach { block -> BlockView(block) }
+                    visible.forEach { block -> BlockView(block, onOpenFile) }
                 }
             }
         }
@@ -273,21 +300,7 @@ private fun ChatItemRow(item: ChatItem, now: Long) {
             time = item.time,
             now = now,
         ) {
-            Column {
-                Text(
-                    text = "工具 · ${item.name}",
-                    style = MaterialTheme.typography.labelMedium,
-                )
-                // `arguments` 是 JSON 字符串；M3 直接原样展示，M3.5 会解析出可点文件行。
-                if (item.arguments.isNotBlank()) {
-                    Text(
-                        text = item.arguments.take(600),
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+            ToolCallCard(item, onOpenFile = { path -> onOpenFile(FileTarget(path)) })
         }
 
         is ChatItem.ToolResult -> Bubble(
@@ -296,13 +309,30 @@ private fun ChatItemRow(item: ChatItem, now: Long) {
             time = item.time,
             now = now,
         ) {
-            Text(
-                text = item.text.ifBlank { "（无输出）" }.take(1200),
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = if (item.isError) Color(0xFFFFB4AB) else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            ToolResultCard(item)
         }
+
+        is ChatItem.Changes -> ChangesCard(
+            turn = item.turn,
+            loading = changesLoading,
+            entry = changes,
+            // 一行改动文件要同时带出三样东西：**真实路径**（`display` 是桌面端裁短过的
+            // 展示串，拿去请求文件会 not-found）、`display`（标题栏照原样显示）、
+            // 以及它在 summary.files 里的**下标**（文件查看页靠它取本轮 diff）。
+            // 早前版本只回传 `display` 再 `indexOfFirst { it.path == display }` 反查，
+            // `display != path` 时恒为 -1，diff 标签页与「在电脑上打开」会一起消失（R005 P1-1）。
+            onOpenFile = { path, display, index ->
+                onOpenFile(
+                    FileTarget(
+                        path = path,
+                        display = display,
+                        seq = item.seq,
+                        index = index,
+                    ),
+                )
+            },
+            onRetry = { onRetryChanges(item.seq) },
+        )
 
         is ChatItem.Notice -> Row(
             modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -322,9 +352,14 @@ private fun ChatItemRow(item: ChatItem, now: Long) {
 
 /** 渲染一个内容块。 */
 @Composable
-private fun BlockView(block: ContentBlock) {
+private fun BlockView(block: ContentBlock, onOpenFile: (FileTarget) -> Unit) {
     when (block) {
-        is ContentBlock.Text -> Text(block.text, style = MaterialTheme.typography.bodyMedium)
+        is ContentBlock.Text -> MdBlocks(
+            blocks = rememberMarkdown(block.text),
+            onLinkClick = {},
+            onFilePathClick = { path -> onOpenFile(FileTarget(path)) },
+            modifier = Modifier.fillMaxWidth(),
+        )
 
         is ContentBlock.Reasoning -> Text(
             text = block.text,
@@ -345,14 +380,23 @@ private fun BlockView(block: ContentBlock) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
+        // 正常路径下这里到不了（visibleAssistantBlocks 已过滤掉），只有被中止的消息
+        // 会保留 tool-call 块。用同一张卡片渲染，保持观感一致。
         is ContentBlock.ToolCall -> Column {
             Text("工具 · ${block.name}", style = MaterialTheme.typography.labelMedium)
-            Text(
-                text = block.arguments.take(600),
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            val path = ToolFilePaths.extract(block.name, block.arguments)
+            if (path != null) {
+                TextButton(onClick = { onOpenFile(FileTarget(path)) }) {
+                    Text(path, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                }
+            } else {
+                Text(
+                    text = block.arguments.take(600),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
 
         is ContentBlock.Unknown -> Text(
@@ -363,6 +407,19 @@ private fun BlockView(block: ContentBlock) {
     }
 }
 
+/**
+ * 把一段 Markdown 文本解析成块，并按文本记忆。
+ *
+ * 用 [MdStream] 而不是每次直接 `MdParser.parse`：流式生成时文本每几十毫秒就变一次，
+ * 整段重解析是 O(n²)（桌面端同样只在尾部重解析）。`remember` 的键是**文本本身**，
+ * 所以块被复用、列表滚动回来时不会重新解析。
+ */
+@Composable
+private fun rememberMarkdown(text: String): List<com.revxzxcx.remotewebapp.ui.markdown.MdBlock> {
+    val stream = remember { MdStream() }
+    return remember(text) { stream.update(text) }
+}
+
 /** 正在流式生成的预览气泡。 */
 @Composable
 private fun LiveRow(live: LiveAttempt) {
@@ -371,6 +428,7 @@ private fun LiveRow(live: LiveAttempt) {
         background = MaterialTheme.colorScheme.surfaceVariant,
         time = 0L,
         now = 0L,
+        wide = true,
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             if (live.reasoning.isNotEmpty()) {
@@ -382,7 +440,14 @@ private fun LiveRow(live: LiveAttempt) {
                 )
             }
             if (live.text.isNotEmpty()) {
-                Text(live.text, style = MaterialTheme.typography.bodyMedium)
+                // 流式正文同样走 Markdown，且用同一个增量解析器：未闭合的围栏会被
+                // 当成「还在输出的代码块」正常显示，不会退化成一段乱码。
+                MdBlocks(
+                    blocks = rememberMarkdown(live.text),
+                    onLinkClick = {},
+                    onFilePathClick = {},
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
             live.toolArgs.forEach { (id, args) ->
                 Text(
@@ -411,6 +476,8 @@ private fun Bubble(
     time: Long,
     now: Long,
     footer: String? = null,
+    /** 助手气泡里有代码块/表格时需要更宽，否则 320dp 会把它们挤成一条条。 */
+    wide: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     Row(
@@ -420,7 +487,11 @@ private fun Bubble(
         Surface(
             color = background,
             shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.widthIn(max = 320.dp),
+            modifier = if (wide) {
+                Modifier.fillMaxWidth(0.95f)
+            } else {
+                Modifier.widthIn(max = 320.dp)
+            },
         ) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 content()

@@ -1,5 +1,7 @@
 package com.revxzxcx.remotewebapp.core.session
 
+import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
+
 /**
  * 聊天页的状态。
  *
@@ -43,6 +45,20 @@ data class ChatUiState(
      * 落盘事件可能因为畸形而解析不出卡片，此时只有这个 seq 能兜底，否则预览会永久残留。
      */
     val committedSeq: Long = -1L,
+    /**
+     * 「这一轮改了哪些文件」的读取结果，按 [ChatItem.Changes] 的 `seq` 索引（需求 FR-5.4）。
+     *
+     * 值是 [ChangesEntry] 三态：拿到摘要 / 记录已失效（404，终态）/ 读取失败（可重试）。
+     * **key 不存在**才是「还没拉」，与 [ChangesEntry.Unavailable]（拉过，确定没了）不同，
+     * 也与 `total == 0`（拉了，这轮确实没改文件）不同。
+     *
+     * 这个 map 与 [changesLoading] 必须一起被裁剪（见 [onSnapshot]）：只要「有没有结果」
+     * 完全由状态自身表达，就不需要另存一份「请求过哪些 seq」的台账——那份台账与这里
+     * 的裁剪不同步时，卡片回到窗口后会永远显示「记录已不可用」（R005 P1-1 / P2-2）。
+     */
+    val changes: Map<Long, ChangesEntry> = emptyMap(),
+    /** 正在拉取摘要的 seq 集合（UI 显示转圈）。 */
+    val changesLoading: Set<Long> = emptySet(),
 )
 
 /**
@@ -74,11 +90,15 @@ object ChatReducer {
      * 从同一游标往前推的连续区间（`history.js:395-426` `paginate`）。
      */
     private fun onSnapshot(state: ChatUiState, frame: ChatFrame.Snapshot): ChatUiState {
+        val items = frame.items.distinctBy { it.seq }.sortedBy { it.seq }
+        // 快照替换窗口后，窗口外的摘要就该丢掉：否则长时间挂着会随会话越长越吃内存。
+        // 仍在窗口内的必须保留——同一轮次的摘要没有必要重新拉一遍（每次都是一次网络往返）。
+        val liveSeqs = items.asSequence().filterIsInstance<ChatItem.Changes>().map { it.seq }.toSet()
         val next = state.copy(
             // `distinctBy` 不只是洁癖：`ChatScreen` 用 `key = { it.seq }` 渲染
             // `LazyColumn`，重复 key 会直接抛 `IllegalArgumentException`。服务端窗口
             // 理论上不会重复，但这一行是零成本的保险（R003 P1-1 同类问题）。
-            items = frame.items.distinctBy { it.seq }.sortedBy { it.seq },
+            items = items,
             loading = false,
             ready = true,
             hasMore = frame.hasMore,
@@ -88,6 +108,8 @@ object ChatReducer {
             error = null,
             // 快照是权威窗口，之前挂起的 committed 预览在这里一并作废。
             committedSeq = -1L,
+            changes = state.changes.filterKeys { it in liveSeqs },
+            changesLoading = state.changesLoading.filterTo(mutableSetOf()) { it in liveSeqs },
         )
         if (frame.baseline.isNotEmpty()) {
             // 重连基线：把断开期间已生成但未落盘的增量回放成一个预览气泡。

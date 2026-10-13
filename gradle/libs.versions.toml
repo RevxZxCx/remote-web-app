@@ -12,6 +12,7 @@ junit = "4.13.2"
 androidxJunit = "1.3.0"
 zxing = "4.3.0"
 mockwebserver = "5.4.0"
+highlights = "1.1.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -32,6 +33,7 @@ junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxJunit" }
 zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxing" }
 mockwebserver3 = { group = "com.squareup.okhttp3", name = "mockwebserver3", version.ref = "mockwebserver" }
+highlights = { group = "dev.snipme", name = "highlights", version.ref = "highlights" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

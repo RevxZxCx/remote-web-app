@@ -73,6 +73,9 @@ dependencies {
     // 扫码配对：只用它的 DecoratedBarcodeView 嵌进 Compose，不用它的 CaptureActivity。
     implementation(libs.zxing.android.embedded)
 
+    // 代码高亮（决策 D13：轻量高亮库，不用桌面端的 Shiki）。
+    implementation(libs.highlights)
+
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.mockwebserver3)

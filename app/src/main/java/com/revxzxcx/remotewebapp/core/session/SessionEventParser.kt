@@ -63,6 +63,7 @@ class SessionEventParser {
         "tool/call" -> toolCallItem(event)
         "tool/result" -> toolResultItem(event)
         "turn/end" -> turnEndNotice(event)
+        "workspace/changes" -> changesCard(event)
         "session/title" -> titleNotice(event)
         "compaction/summary" -> ChatItem.Notice(
             event.seq,
@@ -72,6 +73,21 @@ class SessionEventParser {
         )
         else -> null
     }
+
+    /**
+     * `workspace/changes` —— 一轮结束时桌面端插件追加的「改动摘要就绪」标记。
+     *
+     * ⚠️ 它的 `data` **只有 `{turn}`**（实测），文件清单不在事件里：摘要留在 Host 内存，
+     * 必须拿这条事件的 `seq` 去查 `changes.summary` 路由。所以我们只产出一张
+     * **占位卡片**，真实的文件列表由 ViewModel 异步填入
+     * [com.revxzxcx.remotewebapp.core.session.ChatUiState.changes]。
+     */
+    private fun changesCard(event: SessionEvent): ChatItem =
+        ChatItem.Changes(
+            seq = event.seq,
+            time = event.time,
+            turn = event.data.long("turn") ?: 0L,
+        )
 
     private fun userItem(event: SessionEvent): ChatItem? {
         // `user/message` 的 data 就是 UserMessage 本身（不是 {message: ...} 包裹）。

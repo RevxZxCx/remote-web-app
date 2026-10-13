@@ -69,6 +69,77 @@ class TypertClient(
         Unit
     }
 
+    /**
+     * 同 [callRaw]，但把成功的响应体当作**原始字节流**返回，并携带响应的 `content-type`。
+     *
+     * 用于 `workspaceFiles/readBytes` —— 它的成功响应不是 JSON 信封，而是
+     * `multipart/form-data`（实测 `Content-Type: multipart/form-data; boundary=----formdata-undici-…`，
+     * 单个 part：`Content-Disposition: form-data; name="bytes-0"; filename="blob"` +
+     * `Content-Type: application/octet-stream`）。失败时仍然是普通 JSON 信封（例如
+     * `workspace-file/not-found`），所以这里对非 2xx 与「2xx 但其实是错误信封」都要处理。
+     */
+    suspend fun callBinary(endpoint: String, args: JsonObject): BinaryResponse = withContext(Dispatchers.IO) {
+        val rpcId = UUID.randomUUID().toString()
+        val envelope = ClientRequestEnvelope(
+            rpcId = rpcId,
+            method = endpoint,
+            payload = JsonObject(mapOf(ARGS to args)),
+        )
+        val body = json.encodeToString(ClientRequestEnvelope.serializer(), envelope)
+            .toRequestBody(JSON_MEDIA_TYPE)
+        val request = Request.Builder()
+            .url(urlFor(endpoint))
+            .header(DEVICE_HEADER, deviceId)
+            .post(body)
+            .build()
+
+        val response = try {
+            http.newCall(request).execute()
+        } catch (e: IOException) {
+            throw TypertException(TypertException.CODE_TRANSPORT, "网络请求失败：${e.message}", cause = e)
+        }
+
+        response.use { resp ->
+            val contentType = resp.header("content-type").orEmpty()
+            val bytes = try {
+                resp.body?.bytes() ?: ByteArray(0)
+            } catch (e: IOException) {
+                throw TypertException(TypertException.CODE_TRANSPORT, "读取响应失败：${e.message}", cause = e)
+            }
+            if (!resp.isSuccessful) {
+                throw httpFailure(resp.code, String(bytes, Charsets.UTF_8))
+            }
+            // 2xx 也可能是错误信封：readBytes 失败时服务端回 200 + 正常信封（ok:false）。
+            if (contentType.contains("json", ignoreCase = true)) {
+                throw decodeResultError(String(bytes, Charsets.UTF_8), rpcId)
+            }
+            BinaryResponse(contentType, bytes)
+        }
+    }
+
+    /** 解析一个「本该是成功响应、实际是错误信封」的 JSON 文本，返回应抛出的异常。 */
+    private fun decodeResultError(text: String, rpcId: String): TypertException {
+        val parsed = runCatching {
+            json.decodeFromString(ServerResponseEnvelope.serializer(), text)
+        }.getOrNull()
+            ?: return TypertException(
+                TypertException.CODE_BAD_ENVELOPE,
+                "响应不是合法的 server-response 信封：${text.take(200)}",
+            )
+        if (parsed.rpcId.isNotEmpty() && parsed.rpcId != rpcId) {
+            return TypertException(
+                TypertException.CODE_RPC_ID_MISMATCH,
+                "rpcId 不匹配：发送 $rpcId，收到 ${parsed.rpcId}",
+            )
+        }
+        val error = parsed.result?.error
+        return TypertException(
+            code = error?.code ?: TypertException.CODE_BAD_ENVELOPE,
+            message = error?.message ?: "响应缺少 result 字段",
+            details = error?.details?.let { json.encodeToString(JsonElement.serializer(), it) },
+        )
+    }
+
     /** 同 [call]，但返回原始 `JsonElement`，用于结构松散、按需解析的返回值。 */
     suspend fun callRaw(endpoint: String, args: JsonObject): JsonElement = withContext(Dispatchers.IO) {
         val rpcId = UUID.randomUUID().toString()
@@ -137,24 +208,8 @@ class TypertClient(
      * 围栏拒绝时 body 是**纯文本**（`dsh-client-connection/lib/index.js:586-594`
      * 写 `unauthorized` / `forbidden`），不是 JSON 信封，所以这里做兼容解析。
      */
-    private fun httpFailure(status: Int, body: String): TypertException {
-        val trimmed = body.trim()
-        val code = when {
-            trimmed == "unauthorized" -> TypertException.CODE_FORBIDDEN_UNAUTH
-            trimmed == "forbidden" -> "forbidden"
-            else -> "http-$status"
-        }
-        // 403 也可能是插件返回的 unpaired 信封（`src/remote-api.ts:88-94`）。
-        val envelope = runCatching {
-            json.decodeFromString(ServerResponseEnvelope.serializer(), trimmed)
-        }.getOrNull()
-        val rpcError = envelope?.result?.error
-        return if (rpcError != null) {
-            TypertException(rpcError.code, rpcError.message, details = rpcError.details?.toString())
-        } else {
-            TypertException(code, "HTTP $status：${trimmed.take(200)}")
-        }
-    }
+    private fun httpFailure(status: Int, body: String): TypertException =
+        decodeHttpFailure(json, status, body)
 
     /** `{base}/remote/api/{namespace}/{method}` —— 两个端点段都不做 URL 编码（段字符集受限）。 */
     private fun urlFor(endpoint: String): String =
@@ -184,6 +239,23 @@ class TypertClient(
     }
 }
 
+/**
+ * [TypertClient.callBinary] 的成功响应：尚未解析的 `multipart/form-data` 原始字节。
+ *
+ * 之所以不在协议层解析 multipart：multipart 的边界与 part 数量由服务端决定，
+ * 解析属于「文件内容」的语义，放在 `core/files` 更合适（见 `WorkspaceFileRepository`）。
+ */
+data class BinaryResponse(
+    val contentType: String,
+    val bytes: ByteArray,
+) {
+    // ByteArray 在 data class 里必须自定义 equals/hashCode，否则是引用比较。
+    override fun equals(other: Any?): Boolean =
+        this === other || (other is BinaryResponse && contentType == other.contentType && bytes.contentEquals(other.bytes))
+
+    override fun hashCode(): Int = 31 * contentType.hashCode() + bytes.contentHashCode()
+}
+
 /** 便于从 `JsonElement` 安全取字段。 */
 internal fun JsonElement?.objOrNull(): JsonObject? = (this as? JsonObject)
 
@@ -199,3 +271,37 @@ internal fun JsonObject.boolOrNull(key: String): Boolean? =
 /** `projections` 这类松散结构统一按 `JsonObject` 承接，避免服务端加字段就崩。 */
 internal fun JsonElement?.asLooseObject(): JsonObject =
     runCatching { this?.jsonObject }.getOrNull() ?: JsonObject(emptyMap())
+
+/**
+ * 把一次非 2xx 的响应体翻成 [TypertException]。
+ *
+ * [TypertClient] 与 [RemoteRoutesClient] 共用，因为**同一台服务端在两条通道上的拒绝长得很像
+ * 但不完全一样**：
+ *  - 围栏拒绝是纯文本 `unauthorized` / `forbidden`（`dsh-client-connection/lib/index.js:586-594`）；
+ *  - 插件自己的拒绝是 JSON 信封（`src/remote-api.ts:88-94` 的 `unpaired`）；
+ *  - 普通路由还有自己的纯文本错误（404 `Change summary unavailable.`）。
+ *
+ * 只认纯文本会让**缺 device header 的普通路由请求得到 `http-403`**，而不是 `unpaired`，
+ * 于是 [TypertException.isUnpaired] 为 false，退避重试永远不会停、UI 也不会引导重新配对
+ * （R005 数据层审查 P2）。
+ */
+internal fun decodeHttpFailure(json: Json, status: Int, body: String): TypertException {
+    val trimmed = body.trim()
+    // 先试 JSON 信封：`unpaired` 这类码必须原样透出，不能被 `http-403` 盖掉。
+    val envelope = runCatching {
+        json.decodeFromString(ServerResponseEnvelope.serializer(), trimmed)
+    }.getOrNull()
+    envelope?.result?.error?.let { rpcError ->
+        return TypertException(
+            code = rpcError.code,
+            message = rpcError.message,
+            details = rpcError.details?.let { json.encodeToString(JsonElement.serializer(), it) },
+        )
+    }
+    val code = when (trimmed) {
+        "unauthorized" -> TypertException.CODE_FORBIDDEN_UNAUTH
+        "forbidden" -> "forbidden"
+        else -> "http-$status"
+    }
+    return TypertException(code, "HTTP $status：${trimmed.take(200)}")
+}

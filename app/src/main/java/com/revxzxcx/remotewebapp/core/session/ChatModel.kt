@@ -148,6 +148,24 @@ sealed interface ChatItem {
         val text: String,
         val eventType: String = "",
     ) : ChatItem
+
+    /**
+     * 「这一轮改了哪些文件」的**占位卡片**（需求 FR-5.4）。
+     *
+     * ⚠️ 这条事件（`workspace/changes`）的 `data` **只有 `{turn}`**，文件清单并不在事件里：
+     * 摘要由桌面端 Host 插件留在内存中，必须拿这条事件的 **`seq`** 去调
+     * `GET /remote/api/changes.summary?sessionId=&seq=` 才能取到（形态见
+     * [com.revxzxcx.remotewebapp.core.changes.ChangesSummary]）。
+     *
+     * 所以这里只承载「卡片该出现在哪个位置」，真正的数据由
+     * [com.revxzxcx.remotewebapp.ui.chat.ChatViewModel] 异步填进
+     * `changesBySeq[seq]`。这样会话日志的解析保持纯函数，不需要网络。
+     */
+    data class Changes(
+        override val seq: Long,
+        override val time: Long,
+        override val turn: Long,
+    ) : ChatItem
 }
 
 /**
