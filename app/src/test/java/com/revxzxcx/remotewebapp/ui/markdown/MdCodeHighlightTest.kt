@@ -352,6 +352,31 @@ class MdCodeHighlightTest {
         assertEquals(20_000, MdCodeHighlight.MAX_HIGHLIGHT_CHARS)
     }
 
+    /**
+     * 哨兵不能与任何合法颜色相撞（R005 P3 补遗）。
+     *
+     * 库给的是 `0xRRGGBB`，本实现统一 `or 0xFF000000`。若哨兵取 `-1`，纯白
+     * `0xFFFFFF or OPAQUE` 恰好也等于 `-1`，会被误判成「这个字符没打过分」而
+     * 退回基础色 —— 白色 token（暗色主题下很常见）静默消失。
+     */
+    @Test
+    fun `纯白 token 不会被误判成未着色`() {
+        val highlights = listOf(ColorHighlight(PhraseLocation(0, 3), 0xFFFFFF))
+        val runs = MdCodeHighlight.runs(3, highlights)
+
+        assertEquals("应与相邻未着色部分合并成一块", 1, runs.size)
+        assertEquals("纯白是合法颜色，不能是 null", 0xFFFFFFFF.toInt(), runs[0].argb)
+    }
+
+    @Test
+    fun `超过上限的代码块应当整段跳过高亮`() {
+        val long = "x".repeat(MdCodeHighlight.MAX_HIGHLIGHT_CHARS + 1)
+        assertTrue(
+            "超长时 tokenize 必须直接返回空表",
+            MdCodeHighlight.tokenize(long, SyntaxLanguage.KOTLIN, darkMode = true).isEmpty(),
+        )
+    }
+
     // ------------------------------------------------------------ 辅助
 
     private fun assertRunsWithinBounds(runs: List<MdCodeHighlight.Run>, codeLength: Int) {

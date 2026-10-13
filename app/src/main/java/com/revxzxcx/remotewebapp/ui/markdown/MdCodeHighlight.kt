@@ -148,8 +148,15 @@ internal object MdCodeHighlight {
         }
     }
 
-    /** 未被打分的字符。`0` 是合法 ARGB（透明黑），不能拿它当哨兵。 */
-    private const val UNTOUCHED = -1
+    /**
+     * 未被打分的字符。
+     *
+     * 不能用 `0`（合法 ARGB：透明黑），也不能用 `-1`（R005 P3 补遗：库给的是
+     * `0xRRGGBB`，纯白 `0xFFFFFF or OPAQUE` 恰好就是 `-1`，会被误判成「没打过分」
+     * 而退回基础色）。这里取 alpha 为 `0x80` 的值 —— 所有打得上的颜色都经过
+     * `or OPAQUE`，alpha 恒为 `0xFF`，两者永不相等。
+     */
+    private const val UNTOUCHED = Int.MIN_VALUE
 
     /** 库给的是 `0xRRGGBB`，补上不透明 alpha。 */
     private const val OPAQUE = 0xFF000000.toInt()

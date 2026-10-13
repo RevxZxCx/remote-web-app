@@ -223,14 +223,25 @@ class ChatViewModel(
         .toList()
 
     /**
-     * 重新拉某一轮的摘要（卡片上的「重试」）。
+     * 重新拉某一轮的摘要（卡片上的「重试」/「读取改动」）。
      *
-     * 只对**读取失败**的结果有意义：404（[ChangesEntry.Unavailable]）是终态，
-     * 记录确实随 Host 进程一起没了，再点多少次都是 404，所以直接忽略。
+     * 只对**可重试**的情形有意义：404（[ChangesEntry.Unavailable]）是终态，记录确实随
+     * Host 进程一起没了，再点多少次都是 404，所以直接忽略。其余两种要动：
+     *  - [ChangesEntry.Failed]：把结果删掉，回到「没有结果」；
+     *  - `null`（还没读到、也没在加载）：没有可删的，直接发起。
+     *
+     * 注意不能只依赖 `_state` 的重新发射：`StateFlow` 只在值真的变化时发射，而
+     * 「entry 为 null 且不在加载中」点重试时值本来就没变，不会被 [watchChanges] 拾起。
      */
     fun retryChanges(seq: Long) {
-        if (_state.value.changes[seq] !is ChangesEntry.Failed) return
-        _state.value = _state.value.copy(changes = _state.value.changes - seq)
+        when (_state.value.changes[seq]) {
+            is ChangesEntry.Failed -> _state.value = _state.value.copy(
+                changes = _state.value.changes - seq,
+            )
+            // 已经拉到结果（Loaded / Unavailable）就没什么可重试的。
+            null -> loadChanges(seq)
+            else -> Unit
+        }
     }
 
     /**

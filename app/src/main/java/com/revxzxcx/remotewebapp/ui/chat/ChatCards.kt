@@ -192,9 +192,13 @@ internal fun ChangesCard(
                 text = when {
                     summary != null && summary.total == 0 -> "第 ${turn + 1} 轮：没有改动文件"
                     summary != null -> "第 ${turn + 1} 轮：改动 ${summary.total} 个文件"
-                    loading || entry == null -> "正在读取本轮改动…"
                     entry is ChangesEntry.Failed -> "本轮改动读取失败"
-                    else -> "本轮改动的记录已不可用"
+                    entry is ChangesEntry.Unavailable -> "本轮改动的记录已不可用"
+                    // entry == null 且 loading == false：既没有摘要、也没有在飞行的请求。
+                    // 快照裁剪后（重连、或卡片离开了窗口）会短暂落到这里，若还说「正在
+                    // 读取…」就是永不结束的加载（R005 P3 补遗）——如实说「还没取到」并给重试。
+                    loading -> "正在读取本轮改动…"
+                    else -> "本轮改动尚未读取"
                 },
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
@@ -255,6 +259,14 @@ internal fun ChangesCard(
                 )
                 TextButton(onClick = onRetry) {
                     Text("重试", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
+            // entry == null 且已经没有在飞行的请求：不能就这么停在「正在读取…」，
+            // 给一个明确的重试入口（R005 P3 补遗）。
+            null -> if (!loading) {
+                TextButton(onClick = onRetry) {
+                    Text("读取改动", style = MaterialTheme.typography.labelSmall)
                 }
             }
 

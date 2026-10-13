@@ -477,6 +477,46 @@ class MdParserTest {
         assertEquals("snake_case_name", (MdParser.parse("snake_case_name\n")[0].firstInline() as MdInline.Text).text)
     }
 
+    // ------------------------------------------------------------ 嵌套深度上限
+
+    /**
+     * 深层 `>` 嵌套必须有上限（R005 P3 补遗）。
+     *
+     * 没有上限时，一段带几千个 `>` 的文本会让解析与渲染（`MdView` 的
+     * `MdBlock.Quote` 分支）双双递归到 `StackOverflowError`，而渲染递归在**组合期**
+     * 执行 —— 那不是崩某一行，是整个进程。这里断言：不崩，且内容不丢。
+     */
+    @Test
+    fun `深层引用嵌套不会栈溢出且内容不丢`() {
+        val depth = 5_000
+        val text = ">".repeat(depth) + " deep\n"
+        val blocks = MdParser.parse(text)
+
+        // 顶层是引用块；沿 Quote 链向下走，必须在有限层内走到内容。
+        var current: List<MdBlock> = blocks
+        var levels = 0
+        while (levels < depth) {
+            val quote = current.singleOrNull() as? MdBlock.Quote ?: break
+            current = quote.blocks
+            levels++
+        }
+        assertTrue("嵌套层数必须有上限，实际走到了 $levels", levels <= 32)
+        val paragraph = current.singleOrNull() as? MdBlock.Paragraph
+        assertTrue("兜底层应该是段落", paragraph != null)
+        assertTrue("文本要保留", paragraph != null && paragraph.inlines.plainText().contains("deep"))
+    }
+
+    @Test
+    fun `未超上限的引用块仍然正常递归`() {
+        val text = "> a\n> > b\n"
+        val top = MdParser.parse(text)
+        assertEquals(1, top.size)
+        val quote = top[0] as MdBlock.Quote
+        assertEquals("引用里是一个段落加一个内层引用", 2, quote.blocks.size)
+        val inner = (quote.blocks[1] as MdBlock.Quote).blocks.single()
+        assertEquals("b", (inner as MdBlock.Paragraph).inlines.plainText())
+    }
+
     // ------------------------------------------------------------ 辅助
 
     private fun MdBlock.firstInline(): MdInline = when (this) {

@@ -2,7 +2,6 @@ package com.revxzxcx.remotewebapp.ui.markdown
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +21,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -266,13 +266,24 @@ private fun Surface2(content: @Composable () -> Unit) {
  */
 @Composable
 private fun CodeBlockView(block: MdBlock.CodeBlock) {
-    val dark = isSystemInDarkTheme()
     val base = MaterialTheme.colorScheme.onSurface
+    // 深浅色以 **MaterialTheme 实际配色**为准，而不是 `isSystemInDarkTheme()`（R005 P3 补遗）：
+    // 前者一旦被固定或被上层覆盖，后者仍报系统值，代码块就会出现「浅色文字配浅色底」
+    // 而正文一切正常。背景亮度 < 0.5 视为深色。
+    val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val language = MdCodeHighlight.languageOf(block.language)
     // 分词与着色都可能很贵（几千字符），只在代码/语言/主题变化时重算。
+    //
+    // ⚠️ 超长代码块**必须整段跳过**，不能只是让 `tokenize` 返回空表（R005 P3 补遗）：
+    // `runs()` 会按长度分配 `IntArray(n)` + `BooleanArray(n)` 再逐字符扫一遍，于是
+    // >20k 字符的块反而比短块更贵，流式生成时每一帧都按当前长度重来一次。
     val annotated = remember(block.code, language, dark, base) {
-        val tokens = MdCodeHighlight.tokenize(block.code, language, dark)
-        MdCodeHighlight.annotate(block.code, MdCodeHighlight.runs(block.code.length, tokens), base)
+        if (block.code.length > MdCodeHighlight.MAX_HIGHLIGHT_CHARS) {
+            AnnotatedString(block.code)
+        } else {
+            val tokens = MdCodeHighlight.tokenize(block.code, language, dark)
+            MdCodeHighlight.annotate(block.code, MdCodeHighlight.runs(block.code.length, tokens), base)
+        }
     }
     Surface2 {
         Column {

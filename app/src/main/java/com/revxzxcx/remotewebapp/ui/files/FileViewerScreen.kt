@@ -33,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -76,15 +77,24 @@ fun FileViewerScreen(
     val state by viewModel.state.collectAsState()
     val listState = rememberLazyListState()
 
+    // 离开文件页就把整块字节还回去（R005 P2 补遗）：VM 挂在整个 Activity 的
+    // ViewModelStore 上，`openFile = null` 只切换组合、不会 clear，图片字节可达 32 MiB。
+    DisposableEffect(viewModel) {
+        onDispose { viewModel.releaseMedia() }
+    }
+
     // 滚到底部自动取下一页（FR-5.7）。只有分页文本形态才需要。
     //
-    // `state.lines.size` 与 `state.loadingMore` 也必须是快照的输入（R005 P2）：
-    // `canScrollForward` **只在变化时发射**，而「页短于视口」时它恒为 false —— 追加
-    // 一页之后它不发射，自动翻页就此停摆。带上行数，每追加一页都会重新求值。
-    LaunchedEffect(listState, state.eof, state.tab) {
-        snapshotFlow { Triple(listState.canScrollForward, state.lines.size, state.loadingMore) }
-            .collect { (canScrollForward, _, loadingMore) ->
-                if (!canScrollForward && !loadingMore && !state.eof && state.tab == FileTab.CONTENT) {
+    // 行数与 loadingMore 必须放进 **LaunchedEffect 的 key**，不能只放进 `snapshotFlow`
+    // 的 lambda（R005 P2 补遗）：`state` 是 `collectAsState()` 出来的普通值，不是 `State`，
+    // 而 `viewModel.state.value` 也不是 Compose 快照状态 —— 在 lambda 里读它们**不产生
+    // 依赖**，flow 不会因此重新发射。而 `canScrollForward` 只在**变化时**发射，页短于
+    // 视口时它恒为 false，追加一页也不翻转 → 自动翻页停摆。把行数作 key 让 effect 在
+    // 每次追加后重启，重新求值一次 `canScrollForward`。
+    LaunchedEffect(listState, state.eof, state.tab, state.lines.size, state.loadingMore) {
+        snapshotFlow { listState.canScrollForward }
+            .collect { canScrollForward ->
+                if (!canScrollForward && !state.loadingMore && !state.eof && state.tab == FileTab.CONTENT) {
                     viewModel.loadMore()
                 }
             }
@@ -159,7 +169,19 @@ fun FileViewerScreen(
                     contentAlignment = Alignment.Center,
                 ) { CircularProgressIndicator() }
 
-                state.error != null -> ErrorPane(state.error.orEmpty(), onRetry = viewModel::retry)
+                // 全屏错误只在「一行都还没读到」时用（R005 P2 补遗）：追加下一页失败时
+                // 把已经渲染好的几千行换成一块错误页，等于让一次网络抖动抹掉全部阅读
+                // 进度，而「重试」还会从第 1 页重来。那种情况交给 [FileFooter]。
+                state.error != null && state.lines.isEmpty() -> ErrorPane(
+                    message = state.error.orEmpty(),
+                    onRetry = viewModel::retry,
+                )
+
+                // PDF 按 **kind** 判定，不能靠 `media != null`（R005 P1）：PDF 走
+                // `loadPdfStat()` 只取 stat、不下载字节，`media` 恒为 null，于是早前落到
+                // `lines.isEmpty()` 分支显示成「（空文件）」 —— 明明是「有内容但 App 不能
+                // 预览」，却说成文件是空的，MediaPane 里的 PDF 文案也成了死代码。
+                state.kind == FileKind.PDF -> MediaPane(state)
 
                 state.media != null -> MediaPane(state)
 
@@ -184,9 +206,11 @@ private fun DiffPane(state: FileViewerState, onRetry: () -> Unit) {
             contentAlignment = Alignment.Center,
         ) { CircularProgressIndicator() }
 
-        state.diffMissing -> ErrorPane(
-            message = "这一轮的改动记录已经不可用了。\n\n${ChangesLimitations.HOST_RESTART}",
-            onRetry = onRetry,
+        // 404 是**终态**：记录只存在桌面端 Host 的内存里，重启后就没了，再点多少次
+        // 也是 404。所以这里用**不带重试按钮**的说明页（R005 P3 补遗），避免把用户
+        // 引向一个永远失败的动作。
+        state.diffMissing -> CenterNote(
+            "这一轮的改动记录已经不可用了。\n\n${ChangesLimitations.HOST_RESTART}",
         )
 
         // 失败与 404 必须分开：把一次网络抖动说成「桌面端重启后记录丢了」是错误归因，
@@ -407,21 +431,42 @@ private fun MediaPane(state: FileViewerState) {
         // 解码必须在组合线程之外（R005 P2）：整块字节最大能到 32 MiB，主线程同步
         // `decodeByteArray` 会卡帧甚至 ANR，而 `runCatching` 还会把 OOM 吞成「解码失败」。
         // 同时按目标宽度**下采样**：直接全尺寸解码一张 4000×3000 的照片就是 48 MB 位图。
-        val bitmap by produceState<Bitmap?>(initialValue = null, bytes) {
+        //
+        // 用三态而不是「null 既表示解码中、又表示失败」（R005 P2 补遗）：畸形图片与
+        // OOM 都会被 `runCatching` 折成 null，界面就永远停在「正在解码图片…」，没有
+        // 失败态、没有重试，用户看到的是一个永不结束的加载。
+        val decoded by produceState<ImageDecode>(ImageDecode.Decoding, bytes) {
             value = withContext(Dispatchers.Default) {
-                runCatching { decodeScaled(bytes) }.getOrNull()
+                runCatching { decodeScaled(bytes) }
+                    .fold(
+                        onSuccess = { bitmap ->
+                            if (bitmap != null) ImageDecode.Ready(bitmap)
+                            else ImageDecode.Failed("这个文件不像图片（找不到图片尺寸头）")
+                        },
+                        onFailure = { cause ->
+                            ImageDecode.Failed(cause::class.java.simpleName)
+                        },
+                    )
             }
         }
-        when {
-            bitmap == null -> CenterNote("正在解码图片…（${bytes.size} 字节）")
-            else -> Image(
-                bitmap = bitmap!!.asImageBitmap(),
+        when (val result = decoded) {
+            ImageDecode.Decoding -> CenterNote("正在解码图片…（${bytes.size} 字节）")
+            is ImageDecode.Failed -> CenterNote("图片解码失败：${result.reason}")
+            is ImageDecode.Ready -> Image(
+                bitmap = result.bitmap.asImageBitmap(),
                 contentDescription = state.target.display,
                 modifier = Modifier.fillMaxWidth(),
                 contentScale = ContentScale.Fit,
             )
         }
     }
+}
+
+/** 图片解码的三态：解码中 / 成功 / 失败（失败要如实说，不能一直转圈）。 */
+private sealed interface ImageDecode {
+    data object Decoding : ImageDecode
+    data class Ready(val bitmap: Bitmap) : ImageDecode
+    data class Failed(val reason: String) : ImageDecode
 }
 
 /**
@@ -441,17 +486,29 @@ private fun decodeScaled(bytes: ByteArray, maxWidth: Int = 1440): Bitmap? {
     return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
 }
 
-/** 列表底部：加载更多的转圈、或「已到文件末尾」。 */
+/** 列表底部：加载更多的转圈、「已到文件末尾」、或**追加失败**的续读入口。 */
 @Composable
 private fun FileFooter(state: FileViewerState, viewModel: FileViewerViewModel) {
     Box(modifier = Modifier.fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
         when {
             state.loadingMore -> CircularProgressIndicator()
+            // 已读到内容、但追加下一页失败：错误留在这里，已读的行**保持原样**，
+            // 「重试」从当前进度续读而不是回到第 1 页（R005 P2 补遗）。
+            state.error != null -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = "加载下一页失败：${state.error}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                TextButton(onClick = viewModel::loadMore) { Text("重试") }
+            }
+
             state.eof -> Text(
                 text = "已到文件末尾（共 ${state.startLine + state.lines.size - 1} 行）",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
             else -> TextButton(onClick = viewModel::loadMore) { Text("加载更多") }
         }
     }

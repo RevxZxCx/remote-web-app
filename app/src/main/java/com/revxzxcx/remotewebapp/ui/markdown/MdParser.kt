@@ -18,6 +18,16 @@ package com.revxzxcx.remotewebapp.ui.markdown
 object MdParser {
 
     /**
+     * 引用块递归解析的嵌套上限（R005 P3 补遗）。
+     *
+     * 每层 `>` 只剥一个前缀，所以嵌套深度直接等于 `>` 的个数。没有上限时，一段带
+     * 几千个 `>` 的文本会让解析（这里）与渲染（`MdView` 的 `MdBlock.Quote` 分支）
+     * 双双递归到 `StackOverflowError`，而渲染递归发生在组合期 —— 直接崩进程。
+     * 16 层已远超任何真实文档的需要。
+     */
+    private const val MAX_NESTING_DEPTH = 16
+
+    /**
      * 解析整段 Markdown。
      *
      * @param text 已把 `\r\n` 归一化的文本。
@@ -33,7 +43,7 @@ object MdParser {
      * [base] 是这段文本在**外部原始文本**里的偏移，用于把区间换算回外部坐标
      * （引用块内部递归解析时要用）。
      */
-    private fun parseBlocks(text: String, base: Int): List<MdBlock> {
+    private fun parseBlocks(text: String, base: Int, depth: Int = 0): List<MdBlock> {
         val lines = LineIndex(text)
         val blocks = ArrayList<MdBlock>()
         var i = 0
@@ -99,6 +109,20 @@ object MdParser {
 
             // 引用块：连续的 `>` 行合起来递归解析。
             if (line.trimStart().startsWith(">")) {
+                // 嵌套深度上限（R005 P3 补遗）：每层只剥一个 `>`，一段有成千上万个
+                // `>` 前缀的文本会让解析与渲染一起递归到 StackOverflowError，而渲染
+                // 递归发生在**组合期** —— 那不是崩溃某一行，是整个进程。
+                // 超过上限就按普通段落渲染（内容照旧可见，只是不当作引用）。
+                if (depth >= MAX_NESTING_DEPTH) {
+                    val end = lines.endOf(i) + base
+                    blocks += MdBlock.Paragraph(
+                        inlines = MdInlineParser.parse(line.trimStart()),
+                        startOffset = lines.startOf(i) + base,
+                        endOffset = end,
+                    )
+                    i++
+                    continue
+                }
                 val quoteLines = ArrayList<String>()
                 val quoteStarts = ArrayList<Int>()
                 var j = i
@@ -112,7 +136,7 @@ object MdParser {
                 }
                 val innerText = quoteLines.joinToString("\n")
                 blocks += MdBlock.Quote(
-                    blocks = parseBlocks(innerText, lines.startOf(i) + base),
+                    blocks = parseBlocks(innerText, lines.startOf(i) + base, depth + 1),
                     startOffset = lines.startOf(i) + base,
                     endOffset = lines.endOf(j - 1) + base,
                 )

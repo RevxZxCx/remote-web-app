@@ -119,6 +119,14 @@ class FileViewerViewModel(
     private var diffJob: Job? = null
 
     /**
+     * [releaseMedia] 是否已经把字节放掉（R005 P2 补遗）。
+     *
+     * 让 [open] 的幂等守卫知道「目标虽然没变、但内容已经不在内存里了」，需要重新加载。
+     * 只看 `target` 相同就提前返回会让「退回聊天再点同一个文件」永远看不到图。
+     */
+    private var mediaReleased = false
+
+    /**
      * 请求代数（R005 P1）。用于识别「已经不作数的旧请求」。
      *
      * 为什么必须有：`loadPage` 先 `bodyJob?.cancel()` 再同步起新 job，而
@@ -136,15 +144,18 @@ class FileViewerViewModel(
     /**
      * 打开一个文件（R005 P1）。换文件时把状态整体重置，并重新起加载。
      *
-     * 幂等：目标相同时不做任何事，避免重组把已翻的页、已选的标签页冲掉。
+     * 幂等：目标相同时不做任何事，避免重组把已翻的页、已选的标签页冲掉。**例外**是
+     * 字节已被 [releaseMedia] 放掉（离开过文件页又回到同一个文件）——那时虽然 target
+     * 没变也必须重新加载，否则图片永远停在空白。
      */
     fun open(target: FileTarget) {
-        if (_state.value.target == target) return
+        if (_state.value.target == target && !mediaReleased) return
         // 旧目标的所有在途请求全部作废。
         bodyGeneration++
         diffGeneration++
         bodyJob?.cancel()
         diffJob?.cancel()
+        mediaReleased = false
         _state.value = FileViewerState(
             target = target,
             kind = FileKind.of(target.path),
@@ -207,6 +218,19 @@ class FileViewerViewModel(
     /** 清掉一次性提示（Snackbar 用完就丢）。 */
     fun consumeMessage() {
         _state.value = _state.value.copy(message = null)
+    }
+
+    /**
+     * 放下整块字节（R005 P2 补遗）。
+     *
+     * 每个会话只有一个实例、且它挂在 Activity 的 ViewModelStore 上，`openFile = null`
+     * 只切换组合、**不会** clear —— 于是看完一张大图退回聊天后，那块 `media`（可达
+     * 32 MiB）会一直留到 Activity 销毁。文件查看页离开组合时调它，把字节还回去。
+     */
+    fun releaseMedia() {
+        if (_state.value.media == null) return
+        mediaReleased = true
+        _state.value = _state.value.copy(media = null)
     }
 
     // ---------------------------------------------------------------- 加载
