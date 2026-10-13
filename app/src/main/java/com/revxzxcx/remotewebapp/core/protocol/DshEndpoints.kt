@@ -79,7 +79,9 @@ object DshEndpoints {
     /**
      * `session/list` 专用——它是**唯一**用下划线前缀的方法。
      *
-     * 漏掉这一点会让会话列表永远报 `missing "_request"`。
+     * 漏掉这一点会让会话列表永远报 `missing "_request"`。M2 探针已用「故意传错参数」的方式
+     * 反证过：传 `{request:{}}` 得到
+     * `gateway/arguments-invalid: args fields do not match the descriptor: missing "_request"; unexpected "request"`。
      */
     const val ARG_REQUEST_UNDERSCORE = "_request"
 
