@@ -4,6 +4,7 @@ import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -19,9 +20,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.revxzxcx.remotewebapp.ImeInsets
 import com.revxzxcx.remotewebapp.core.AppContainer
 import com.revxzxcx.remotewebapp.core.AppState
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
@@ -108,8 +111,22 @@ fun AppRoot(container: AppContainer) {
         container.bootstrap()
     }
 
+    // `imePadding()` 是**必需的**（用户 m21177 附加反馈）：MainActivity 调了
+    // `enableEdgeToEdge()`（= `WindowCompat.setDecorFitsSystemWindows(window, false)`），
+    // 窗口不再为输入法收缩，于是 manifest 里的 `android:windowSoftInputMode="adjustResize"`
+    // 形同虚设——不消费 IME inset 的话，输入法弹起时整个底部（输入框 + 排队队列）被
+    // 压在键盘下面，用户看不到自己打的字。
+    //
+    // 放在最外层 `Surface` 上而不是 ChatScreen 的 Scaffold：配对页也有手输框，
+    // 同一个问题在那里一样存在。
+    // 输入法适配（用户 m21177 附加反馈）。`imePadding()` 在 MuMu + 搜狗输入法上实测
+    // 拿不到 inset（`WindowInsets.ime` 恒 0），所以改用 MainActivity 从 DecorView 桥进来的
+    // 原生 ime 高度，见 `ImeInsets` 的 KDoc。放在最外层 `Surface` 上而不是 ChatScreen 的
+    // Scaffold：配对页也有手输框，同一个问题在那里一样存在。
+    val imeBottomPx by ImeInsets.bottomPx.collectAsState()
+    val imeBottomDp = with(LocalDensity.current) { imeBottomPx.toDp() }
     Surface(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize().padding(bottom = imeBottomDp),
         color = MaterialTheme.colorScheme.background,
     ) {
         when (val current = state) {

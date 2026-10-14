@@ -97,15 +97,19 @@ class ChatViewModel(
 
     private var pageJob: Job? = null
     private var sendJob: Job? = null
+
+    /** 「编辑/删除/插队」排队消息的协程（`session/updateQueue`）。 */
+    private var queueJob: Job? = null
     private var changesJob: Job? = null
     private var cacheJob: Job? = null
 
     /**
      * 排队回声的本地序号源。
      *
-     * 只用进程内单调递增：回声没有服务端 id（`session/prompt` 只回 `{accepted:true}`），
-     * 这个数字只做 Compose 的 `key` 与「RPC 失败时摘掉哪一条」的身份，重启即失效
-     * ——那时回声本就该消失（服务端队列与本地状态无关）。
+     * 回声在拿到服务端 `itemId` 之前用 `local:<n>` 作 id（只做 Compose 的 `key` 与
+     * 「RPC 失败时摘掉哪一条」的身份）。真正的关联键是 [QueuedMessage.rpcId]——也就是
+     * 下面 `send()` 自己生成并传给 `session/prompt` 的 requestId，服务端会在
+     * `UserMessage.source.rpcId` 里原样带回。
      */
     private var queuedEchoSeq = 0L
 
@@ -212,10 +216,10 @@ class ChatViewModel(
      * 点下去却毫无反应也不报错——用户在设备上看到的就是「按钮坏了」。
      *
      * 排队回声（用户 m20380 的缺口）：`mode:'queue'` 的消息要等当前轮结束才进会话日志，
-     * 而 `session/prompt` 只回 `{accepted:true}`、快照里没有 queue 投影、`updateQueue`
-     * 又要 itemId——**远程客户端拿不到任何服务端确认**。所以这里在发送前就先挂一条
-     * 本地回声（[QueuedMessage]），让用户立刻看到「我的话在排队」；RPC 失败时摘掉它。
-     * 摘除的正式路径在 [ChatReducer.onEvent]（`user/message`，FIFO 摘最老一条）。
+     * 所以发送前先挂一条本地回声，让用户立刻看到「我的话在排队」；RPC 失败时摘掉它。
+     * 回声的 `rpcId` 就是本次的 requestId——服务端会在 `agent/inbox/spliced` 的
+     * `inserted[].source.rpcId` 里原样带回，届时 [ChatReducer] 把它换成带 `itemId`
+     * 的服务端条目，于是编辑/删除/插队三个操作才有对象可指（用户 m21177 第 4 条反馈）。
      *
      * 只在 [ChatUiState.generating] 为真时挂回声：不生成时消息会立刻进会话日志，
      * 真实 `user/message` 一两个往返内就到，此时挂一条「排队中 · 等当前轮结束后发出」
@@ -229,12 +233,14 @@ class ChatViewModel(
         // T5 设备验收：发送是网络调用，期间「发送」按钮必须进入不可点的加载态。
         // 否则用户看到按钮一直亮着，会反复点（每次都白跑一次 RPC）。
         _state.value = _state.value.copy(sending = true)
-        val echoId = ++queuedEchoSeq
+        val echoId = "local:${++queuedEchoSeq}"
+        val requestId = java.util.UUID.randomUUID().toString()
         // 只有真的在排队才需要回声（见 KDoc）。不在生成时也挂的话，每发一条正常消息
         // 都会闪一下「排队中」，而它并不排队。
         val echo = if (_state.value.generating) {
             QueuedMessage(
                 id = echoId,
+                rpcId = requestId,
                 text = text,
                 attachmentCount = attachments.size,
                 enqueuedAt = System.currentTimeMillis(),
@@ -254,6 +260,7 @@ class ChatViewModel(
                     mode = ChatArgs.PromptMode.Queue,
                     attachments = attachments,
                     clientTimeZone = java.util.TimeZone.getDefault().id,
+                    requestId = requestId,
                 )
                 _draft.value = ""
                 _pending.value = emptyList()
@@ -276,6 +283,58 @@ class ChatViewModel(
             }
         }
     }
+
+    // ------------------------------------------------- 排队队列（用户 m21177 第 4 条）
+
+    /**
+     * 对排队里的消息做操作（编辑 / 删除 / 插队）。
+     *
+     * 三者都走 `session/updateQueue`（[ChatRepository.updateQueue]）。**失败时把服务端
+     * 文案挂到 `sendError` 上并让 reducer 自行纠正**： splice 事件是权威的，服务端拒绝
+     * 我们的操作时不会发 splice，所以界面会保持原样——那时用户看到的就是错误条。
+     *
+     * @param message 目标条目；`confirmed == false`（本地回声还没拿到 itemId）时直接忽略，
+     *   因为服务端只认 `itemId`。
+     */
+    private fun queueAction(message: QueuedMessage, action: ChatArgs.QueueAction, pending: String?) {
+        if (!message.confirmed) return
+        queueJob?.cancel()
+        queueJob = viewModelScope.launch {
+            _state.value = _state.value.copy(sending = true)
+            try {
+                repository.updateQueue(sessionId, message.id, action)
+                _state.value = _state.value.copy(sendError = null)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Exception) {
+                _state.value = _state.value.copy(sendError = describe(cause))
+            } finally {
+                _state.value = _state.value.copy(sending = false)
+            }
+        }
+    }
+
+    /** 编辑一条排队消息的文本（服务端只接受纯文本，附件不能跟着改）。 */
+    fun editQueued(message: QueuedMessage, text: String) {
+        if (text.isBlank()) {
+            // 服务端对空白内容抛 `gateway/bad-request`（`index.js:940` 的 hasPromptContent）。
+            // 这里先挡一道，别让用户看到一句英文错误码。
+            _state.value = _state.value.copy(sendError = "排队消息不能改成空白内容")
+            return
+        }
+        queueAction(message, ChatArgs.QueueAction.Edit(text.trim()), null)
+    }
+
+    /** 撤掉一条排队消息。 */
+    fun removeQueued(message: QueuedMessage) = queueAction(message, ChatArgs.QueueAction.Remove, null)
+
+    /**
+     * 插队：不等当前轮结束，立刻进当前轮。
+     *
+     * 服务端要求该条目在 `next-turn` 且会话正在运行，否则抛 `session/steer-unavailable`
+     * （`index.js:966`）。UI 因此只在 `generating` 时才显示这个按钮。
+     */
+    fun steerQueued(message: QueuedMessage) = queueAction(message, ChatArgs.QueueAction.Steer, null)
 
     // ---------------------------------------------------------------- 附件（需求 FR-5）
 
@@ -756,6 +815,7 @@ class ChatViewModel(
         catalogJob?.cancel()
         modelJob?.cancel()
         attachJob?.cancel()
+        queueJob?.cancel()
         super.onCleared()
     }
 

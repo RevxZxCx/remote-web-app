@@ -167,9 +167,69 @@ object ChatArgs {
     }
 
     /**
+     * `session/updateQueue` 的 args——对一条**排队中**的消息做操作。
+     *
+     * 参数（`typert.host.js:843-862` + `_inboxp4.mjs` 实测）：`{sessionId, itemId, action}`，
+     * 结果 `{accepted:true}`。`itemId` 就是 `inbox` 投影里 `UserMessage.id`
+     * （服务端按 `m.id === request.itemId` 查找，`index.js:955-956`）。
+     *
+     * [action] 三选一：
+     *  - `edit`：`{kind:'edit', content:[{type:'text',text}]}`——**只接受 text 块**，
+     *    服务端 `index.js:939` 对非 text 块抛 `session/attachment-invalid` + reason
+     *    `QUEUE_EDIT_NON_TEXT`，`:940` 对空白内容抛 `gateway/bad-request`。
+     *  - `remove`：`{kind:'remove'}`——同时回收该消息的文件回执
+     *    （`index.js:977` `fileUploads.retirePrompt(agent, source.rpcId)`）。
+     *  - `steer`：`{kind:'steer'}`——**插队**，要求该条目在 `next-turn` 且会话正在运行，
+     *    否则抛 `session/steer-unavailable`（`index.js:966`）。
+     */
+    fun updateQueue(sessionId: String, itemId: String, action: QueueAction): JsonObject = request {
+        put("sessionId", JsonPrimitive(sessionId))
+        put("itemId", JsonPrimitive(itemId))
+        put(
+            "action",
+            buildJsonObject {
+                put("kind", JsonPrimitive(action.kind))
+                if (action is QueueAction.Edit) {
+                    put(
+                        "content",
+                        JsonArray(
+                            listOf(
+                                buildJsonObject {
+                                    put("type", JsonPrimitive("text"))
+                                    put("text", JsonPrimitive(action.text))
+                                },
+                            ),
+                        ),
+                    )
+                }
+            },
+        )
+    }
+
+    /** `session/updateQueue` 的三种操作（`QueueAction` 联合，`index.js:967-986`）。 */
+    sealed interface QueueAction {
+        val kind: String
+
+        /** 改成 [text]（只支持纯文本，附件不能跟着改）。 */
+        data class Edit(val text: String) : QueueAction {
+            override val kind: String get() = "edit"
+        }
+
+        /** 从队列里撤掉。 */
+        data object Remove : QueueAction {
+            override val kind: String get() = "remove"
+        }
+
+        /** 插队：不等当前轮结束，立刻进当前轮。 */
+        data object Steer : QueueAction {
+            override val kind: String get() = "steer"
+        }
+    }
+
+    /**
      * 包一层 `{request: {...}}`。
      *
-     * 四个 chat 方法的参数 wire 名**都是 `request`**（只有 `session/list` 是 `_request`）。
+     * 五个 chat 方法的参数 wire 名**都是 `request`**（只有 `session/list` 是 `_request`）。
      * 集中在这里是为了让这条实测结论只有一个落点。
      */
     private fun request(body: JsonObjectBuilder.() -> Unit): JsonObject =

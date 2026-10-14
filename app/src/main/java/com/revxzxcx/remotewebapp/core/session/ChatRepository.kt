@@ -62,7 +62,10 @@ class ChatRepository(
      * @param attachments 追加在文字后面的内容块；图片是内联 base64，文件必须先经
      *   [FileUploadRepository.upload] 换成 `receiptId`（见 [PromptAttachment] 的 KDoc）。
      * @param clientTimeZone IANA 时区，服务端用它解释消息里的相对时间。
-     * @return 客户端生成的 `requestId`，便于日志关联与失败重试。
+     * @param requestId 客户端生成的消息 id。默认自己生成一个；[ui.chat.ChatViewModel.send]
+     *   传自己生成的版本，因为排队回声要用同一个 id 与 `agent/inbox/spliced` 的
+     *   `inserted[].source.rpcId` 对上（见 [QueuedMessage.rpcId] 的 KDoc）。
+     * @return 本次用的 `requestId`，便于日志关联与失败重试。
      */
     suspend fun prompt(
         sessionId: String,
@@ -70,8 +73,8 @@ class ChatRepository(
         mode: ChatArgs.PromptMode = ChatArgs.PromptMode.Queue,
         attachments: List<PromptAttachment> = emptyList(),
         clientTimeZone: String? = null,
+        requestId: String = UUID.randomUUID().toString(),
     ): String = withContext(Dispatchers.IO) {
-        val requestId = UUID.randomUUID().toString()
         connection.typert.callRaw(
             DshEndpoints.SESSION_PROMPT,
             ChatArgs.prompt(requestId, sessionId, text, mode, attachments, clientTimeZone),
@@ -116,6 +119,25 @@ class ChatRepository(
             ChatArgs.selectModel(sessionId, provider, model, reasoningEffort),
         )
         ModelCatalogParser.parseSelection(raw, which = "selected") ?: ModelRef(provider, model, reasoningEffort)
+    }
+
+    /**
+     * 对一条**排队中**的消息做操作（`session/updateQueue` → `{accepted:true}`）。
+     *
+     * 三种操作的语义与失败码见 [ChatArgs.updateQueue]。`steer` 在「当前轮已经不接受插队」时
+     * 服务端抛 `session/steer-unavailable`，`itemId` 已不在队列时抛
+     * `session/queue-item-not-found`——两者都由调用方（ViewModel）映射成中文文案。
+     */
+    suspend fun updateQueue(
+        sessionId: String,
+        itemId: String,
+        action: ChatArgs.QueueAction,
+    ) = withContext(Dispatchers.IO) {
+        connection.typert.callRaw(
+            DshEndpoints.SESSION_UPDATE_QUEUE,
+            ChatArgs.updateQueue(sessionId, itemId, action),
+        )
+        Unit
     }
 
     /** 一次翻页的结果。 */

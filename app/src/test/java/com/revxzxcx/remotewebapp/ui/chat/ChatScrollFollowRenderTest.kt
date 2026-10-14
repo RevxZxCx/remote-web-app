@@ -82,7 +82,7 @@ class ChatScrollFollowRenderTest {
             }
             ChatScrollFollow(
                 listState = listState,
-                lastIndex = lastIndex.intValue,
+                lastIndex = { lastIndex.intValue },
                 liveLength = { liveLength.intValue },
             )
         }

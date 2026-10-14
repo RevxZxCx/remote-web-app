@@ -88,6 +88,13 @@ sealed interface ChatFrame {
          * 为 null 表示该投影还没下发（服务端可能在某些版本不带），此时按「不限制」处理。
          */
         val imageLimits: ImageLimits? = null,
+        /**
+         * 服务端**排队队列**（`projections.values.inbox`）。
+         *
+         * 这是 [ChatUiState.queued] 的权威来源之一（另一个是 `agent/inbox/spliced` 事件）。
+         * 为 emptyList 表示这个投影没下发或队列是空的——两者对 UI 是同一件事。
+         */
+        val inbox: List<QueuedMessage> = emptyList(),
     ) : ChatFrame
 
     /**
@@ -268,6 +275,7 @@ class ChatFrameParser(
                 which = "next",
             ),
             imageLimits = ImageLimits.of(values?.get("imageLimits")),
+            inbox = QueueInboxParser.parseInbox(values),
         )
     }
 

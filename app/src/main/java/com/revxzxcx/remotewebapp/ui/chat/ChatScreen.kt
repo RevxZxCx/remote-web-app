@@ -55,6 +55,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.MonotonicFrameClock
+import androidx.compose.runtime.withFrameNanos
+import kotlin.coroutines.coroutineContext
 import androidx.compose.runtime.collectAsState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -129,14 +132,19 @@ fun ChatScreen(
     // 「贴底跟随」的完整逻辑（含 R010m 修掉的首帧 latch、T7 的 scrollToBottom）在
     // [ChatScrollFollow]，抽成独立 Composable 是为了能被 Robolectric 渲染测试直接驱动——
     // 这段逻辑的缺陷只在真实渲染时现形，纯逻辑单测一条也抓不到。
-    val itemCount = state.items.size
-    val lastIndex = itemCount +
-        (if (state.loadingMore) 1 else 0) +
-        (if (state.live != null) 1 else 0) +
-        state.queued.size - 1
+    // ⚠️ 两个 lambda 都必须在**调用时**读 `state`，绝不能捕获组合时算好的 `lastIndex`。
+    // `LaunchedEffect(listState)` 的 key 在整个会话里不变 → effect 不重启 → 协程里持有的
+    // 是**第一次组合**创建的那个 lambda。捕获 `val lastIndex`（一个 Int）等于把下标冻在
+    // 首次组合那一刻：流式过程中 collect 每次触发都拿着旧下标去滚，视觉上就是
+    // 「生成时不自动往下滚」（用户 m21177 第 2.3 条反馈的根因）。
+    // 读 `state` 则相反——`by collectAsState()` 的委托在 lambda 里每次调用都取当前值。
     ChatScrollFollow(
         listState = listState,
-        lastIndex = lastIndex,
+        lastIndex = {
+            state.items.size +
+                (if (state.loadingMore) 1 else 0) +
+                (if (state.live != null) 1 else 0) - 1
+        },
         liveLength = { state.live?.text?.length ?: 0 },
     )
 
@@ -176,6 +184,16 @@ fun ChatScreen(
         },
         bottomBar = {
             Column {
+                // 排队队列（用户 m21177 第 4 条反馈）：位置在模型条与输入区之间，
+                // 即「发送框上方」。每条一个气泡，带 编辑 / 删除 / 插队 三个操作。
+                QueuedStrip(
+                    messages = state.queued,
+                    generating = state.generating,
+                    now = now,
+                    onEdit = viewModel::editQueued,
+                    onRemove = viewModel::removeQueued,
+                    onSteer = viewModel::steerQueued,
+                )
                 ModelBar(
                     model = state.model,
                     loading = state.catalogLoading,
@@ -327,11 +345,10 @@ fun ChatScreen(
                     state.live?.let { live ->
                         item(key = "live") { LiveRow(live) }
                     }
-                    // 排队回声排在最后：它们的时间戳本来就晚于所有已落盘条目
-                    // （`mode:'queue'` 的消息要等当前轮结束才写进日志）。
-                    items(state.queued, key = { "queued-${it.id}" }) { echo ->
-                        QueuedRow(echo = echo, now = now)
-                    }
+                    // 排队气泡**不在这里**：用户 m21177 第 4 条反馈明确要求「发送框上方多一个
+                    // 气泡」，而消息列表会随内容增长把气泡推到看不见的地方（R010m 就是活例：
+                    // 列表停在半路时，排在列表尾的回声在视口外，看起来像「回声消失了」）。
+                    // 现在由 bottomBar 里的 [QueuedStrip] 渲染。
                 }
             }
         }
@@ -791,26 +808,35 @@ private fun PendingAttachmentThumb(item: PromptAttachment) {
  * 开头钉在屏幕顶部——用户看到的是「生成内容停在自己开头、最新的字在屏幕外」，也就是
  * T7 里说的「回弹到生成的开头」。
  *
- * 这里改成两步：先 `scrollToItem` 把行带进来，再按视口高度补滚，靠 `scrollBy` 自带的最大值
- * 钳制收敛。收敛条件用「还能不能向前滚」而不是自己算 item 偏移，与 `LazyListItemInfo.offset`
- * 的坐标系约定无关（那个约定在 Compose 版本间变过）。
+ * 这里改成两步：先 `scrollToItem` 把行带进来，再按「最后一个可见项超出视口底边多少」补滚一次。
+ * 收敛条件是 overflow 本身而不是「还能不能向前滚」——后者需要循环若干屏才收敛，而末行可能
+ * 高过多屏（真机实测出现过 2844px 的助手气泡，视口只有 1044px），按屏补滚要么漏、要么白滚。
  *
  * 用 [androidx.compose.foundation.MutatePriority.Default] 而不是用户手势的优先级：跟随滚动
  * 不该抢走用户正在做的手势，但也不能被挂起的手势无限期挡住。
+ *
+ * ## 开头必须等一帧（用户 m21177 第 2.3 条反馈的第二个根因）
+ *
+ * `snapshotFlow` 在**快照应用后立刻**发射，那一刻列表往往还没重新测量：新行不在
+ * `layoutInfo` 里、旧行还是旧高度。此时 `scrollToItem(index)` 会钳到**旧布局**的最大滚动处
+ * （等于没滚），而 `canScrollForward` 在旧布局里又是 false → 补滚循环直接退出 → 之后
+ * 没有任何东西再触发一次，列表永远停在「差一截」的位置。
+ * `ChatScrollFollowTest` 的埋点实测到这条：`collect pair=(2,0) near=true lastIndex=2
+ * total=2`——新行已经在状态里，布局却还只有 2 行。
+ * `withFrameNanos { }` 让出到下一帧，重组与测量都跑完再读 `layoutInfo`。
  *
  * `internal` 而不是 `private`：这是 T7 设备验收实测缺陷的回归守卫，必须能被渲染测试驱动。
  */
 internal suspend fun LazyListState.scrollToBottom(index: Int) {
     if (index < 0) return
+    // 没有 MonotonicFrameClock 的上下文（例如单测里的 runBlocking）说明本来就没有帧在跑，
+    // 没什么可等的；生产路径上 LaunchedEffect 的协程一定带帧时钟。
+    if (coroutineContext[MonotonicFrameClock] != null) withFrameNanos { }
     scrollToItem(index)
     scroll(MutatePriority.Default) {
-        var guard = 0
-        while (canScrollForward && guard++ < 4) {
-            val height = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
-            if (height <= 0) break
-            // 返回 0 表示已经到底/被钳住，再滚下去只是空转。
-            if (scrollBy(height.toFloat()) <= 0f) break
-        }
+        val last = layoutInfo.visibleItemsInfo.lastOrNull() ?: return@scroll
+        val overflow = (last.offset + last.size) - layoutInfo.viewportEndOffset
+        if (overflow > 0) scrollBy(overflow.toFloat())
     }
 }
 
@@ -871,13 +897,32 @@ private fun ChatItemRow(
             time = item.time,
             now = now,
         ) {
-            // 用户消息里通常有粘贴的路径/命令，用 Markdown 渲染能保留行内代码与折行。
-            MdBlocks(
-                blocks = rememberMarkdown(item.text),
-                onLinkClick = {},
-                onFilePathClick = {},
+            Column(
                 modifier = Modifier.fillMaxWidth(),
-            )
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                // 图片/文件块必须单独渲染：早先这里只画 `item.text`，于是「只发图不发字」
+                // 的消息在对话里是一个**空白气泡**——用户 m21177 第 5c 条反馈原话
+                // 「对话气泡中没有做预览，这是不优雅的」。
+                //
+                // 图片走 BlockView（按 attachmentId 现取像素），文件给一行说明——
+                // 文件附件在会话日志里同样只剩一个 id，客户端没有可渲染的内容。
+                item.blocks.forEach { block ->
+                    when (block) {
+                        is ContentBlock.Text -> Unit // 文字统一走下面的 MdBlocks
+                        else -> BlockView(block, onOpenFile, attachments, sessionId)
+                    }
+                }
+                if (item.text.isNotBlank()) {
+                    // 用户消息里通常有粘贴的路径/命令，用 Markdown 渲染能保留行内代码与折行。
+                    MdBlocks(
+                        blocks = rememberMarkdown(item.text),
+                        onLinkClick = {},
+                        onFilePathClick = {},
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
         }
 
         is ChatItem.Assistant -> {
@@ -1084,45 +1129,142 @@ private fun LiveRow(live: LiveAttempt) {
 }
 
 /**
- * 排队中的用户消息（[QueuedMessage]）。
+ * 排队队列整条（用户 m21177 第 4 条反馈的本体）。
  *
- * 刻意做得比真消息淡：它还没有 `seq`、还没有被服务端写进会话日志，用户需要能一眼
- * 看出「这条还没生效」。这条幽灵气泡正是用户 m20380 反馈的缺口——修复前发送后
- * 输入框被清空、列表里什么都不出现，用户无法判断消息发没发出去。
+ * 位置在**输入区上方**而不是消息列表里：反馈原话「如果在对话中输入发送，发送框上方会
+ * 多一个气泡…显示实际的输入，表示排队中」。除了位置，还把 R009「刻意不做撤回按钮」
+ * 的决定推翻——那时以为远程客户端拿不到 itemId，实际它在 `inbox` 投影与
+ * `agent/inbox/spliced` 事件里（见 [QueuedMessage] 的 KDoc），所以编辑/删除/插队
+ * 三个操作都能真的打到服务端。
  *
- * 不做「撤回」按钮：`session/updateQueue` 必须要服务端 `itemId`，而 `session/prompt`
- * 只回 `{accepted:true}`、快照投影里也没有 queue 项（`typert.remote-client.js:222-341`），
- * 远程客户端拿不到那个 id。做个撤不掉的撤回按钮比不做更糟。
+ * 多条时用 `LazyColumn` 限高（最多约三条高）：三条以上仍然要能看见最后一条，
+ * 否则用户不知道刚发出去的那条在哪。
  *
- * `internal` 而不是 `private`：同 `Composer`/`SessionDrawer` 的理由——这条气泡是
- * 「用户 m20380 反馈的缺口」的修复本体，必须有渲染测试盯住它真的会被组合出来。
+ * `internal` 同 `Composer`/`SessionDrawer`：这是用户反馈的修复本体，必须有渲染测试
+ * 驱动它，确认三个按钮真的存在且绑对了回调。
  */
 @Composable
-internal fun QueuedRow(echo: QueuedMessage, now: Long) {
+internal fun QueuedStrip(
+    messages: List<QueuedMessage>,
+    generating: Boolean,
+    now: Long,
+    onEdit: (QueuedMessage, String) -> Unit,
+    onRemove: (QueuedMessage) -> Unit,
+    onSteer: (QueuedMessage) -> Unit,
+) {
+    if (messages.isEmpty()) return
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+            Text(
+                text = if (messages.size == 1) "排队中 1 条" else "排队中 ${messages.size} 条",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            LazyColumn(modifier = Modifier.heightIn(max = 168.dp)) {
+                items(messages, key = { "queued-${it.id}" }) { message ->
+                    QueuedRow(
+                        echo = message,
+                        now = now,
+                        generating = generating,
+                        onEdit = { text -> onEdit(message, text) },
+                        onRemove = { onRemove(message) },
+                        onSteer = { onSteer(message) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 一条排队中的消息。
+ *
+ * 三个操作按钮的可见性规则（不是洁癖，是契约）：
+ *  - `confirmed == false`：本地回声还没被 `agent/inbox/spliced` 确认，拿不到 itemId，
+ *    此时三个操作都发不出去（服务端只认 `itemId`），所以只显示、不给按钮。
+ *  - `插队`：只在 `generating` 时给。不生成时这条本来就排在空队列头部，下一个轮次
+ *    就是它，插队没有意义；服务端此时也会回 `session/steer-unavailable`。
+ *
+ * 编辑走对话框而不是行内输入框：气泡只有一行高，行内输入会把它撑成三行，
+ * 三条以上时把整条队列挤出屏幕（用户 m21177 的原话是「多一个气泡」，不是多一个表单）。
+ */
+@Composable
+internal fun QueuedRow(
+    echo: QueuedMessage,
+    now: Long,
+    generating: Boolean,
+    onEdit: (String) -> Unit,
+    onRemove: () -> Unit,
+    onSteer: () -> Unit,
+) {
+    var editing by rememberSaveable { mutableStateOf(false) }
+    val actionable = echo.confirmed
     Bubble(
         alignEnd = true,
         background = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
         time = echo.enqueuedAt,
         now = now,
         footer = buildString {
-            append("排队中")
+            append(if (echo.isAwaitingTurn) "排队中 · 等当前轮结束后发出" else "已插队 · 在当前轮执行")
             if (echo.attachmentCount > 0) append(" · 含 ${echo.attachmentCount} 个附件")
-            append(" · 等当前轮结束后发出")
         },
     ) {
-        when {
-            echo.text.isNotBlank() -> MdBlocks(
-                blocks = rememberMarkdown(echo.text),
-                onLinkClick = {},
-                onFilePathClick = {},
-                modifier = Modifier.fillMaxWidth(),
-            )
+        Column(modifier = Modifier.fillMaxWidth()) {
+            when {
+                echo.text.isNotBlank() -> MdBlocks(
+                    blocks = rememberMarkdown(echo.text),
+                    onLinkClick = {},
+                    onFilePathClick = {},
+                    modifier = Modifier.fillMaxWidth(),
+                )
 
-            echo.attachmentCount > 0 -> Text(
-                text = "（${echo.attachmentCount} 个附件）",
-                style = MaterialTheme.typography.bodyMedium,
-            )
+                echo.attachmentCount > 0 -> Text(
+                    text = "（${echo.attachmentCount} 个附件）",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            if (actionable) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { editing = true }) { Text("编辑") }
+                    // `steer` 只在生成中给（见 KDoc）。
+                    if (generating) TextButton(onClick = onSteer) { Text("插队") }
+                    TextButton(onClick = onRemove) { Text("删除") }
+                }
+            } else {
+                // 还没拿到服务端 id：告诉用户为什么没有按钮，而不是让人以为坏了。
+                Text(
+                    text = "等待桌面端确认…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
+    }
+    if (editing) {
+        var draft by rememberSaveable { mutableStateOf(echo.text) }
+        AlertDialog(
+            onDismissRequest = { editing = false },
+            title = { Text("编辑排队消息") },
+            text = {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("消息内容") },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        editing = false
+                        onEdit(draft)
+                    },
+                ) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { editing = false }) { Text("取消") }
+            },
+        )
     }
 }
 

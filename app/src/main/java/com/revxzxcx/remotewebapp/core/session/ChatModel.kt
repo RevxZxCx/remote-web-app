@@ -186,35 +186,53 @@ sealed interface ChatItem {
 fun visibleAssistantBlocks(blocks: List<ContentBlock>, interrupted: Boolean): List<ContentBlock> =
     if (interrupted) blocks else blocks.filterNot { it is ContentBlock.ToolCall }
 
+/** `agent/inbox/spliced` 事件的两个收件箱（`InboxTarget`）。 */
+const val INBOX_NEXT_TURN = "next-turn"
+const val INBOX_NEXT_STEP = "next-step"
+
 /**
- * 一条**本地排队回声**：消息已经发给服务端、但还没进会话日志。
+ * 一条**排队中**的消息（服务端 inbox 里还没进会话日志的用户消息）。
  *
- * 为什么需要它（用户 m20380 的亲身观察）：会话正在生成时发送，`session/prompt` 用
- * `mode:'queue'` 把消息挂到服务端队列，**只有 `{accepted:true}` 回来**
- * （`typert.host.js:803-805`），不带 itemId；`session/follow` 快照的投影白名单里
- * **没有任何 queue 投影**（`typert.remote-client.js:222-341` 逐行读完），也没有
- * queue 事件。SDK 里的 `pendingSubmissions` 是**进程内**客户端的本地回声
- * （`client.js:1684-1707` `beginSubmission`，桌面 UI 靠它乐观上屏），走 wire 的
- * 远程客户端拿不到。`session/updateQueue` 又必须要 `itemId` 才能删/改/插队
- * （`typert.host.js:843-862`）——**对纯远程客户端实际上不可用**。
+ * 权威来源有两个，都必须接（用户 m21177 的第 4 条反馈）：
+ *  1. `session/follow` 快照的 `projections.values.inbox`，形状
+ *     `{next-turn: UserMessage[], next-step: UserMessage[]}`（`typert.remote-client.js:263-266`）；
+ *  2. 实时事件 `agent/inbox/spliced`，data = `{target, start, removedCount?, inserted, outcome?}`
+ *     （`SessionEventMap`，`index.js:661` 的推进条件里就有它）。
  *
- * 结论：排队期间这条消息在 App 里完全不可见，用户只看到输入框被清空，无法判断
- * 发没发出去。所以这里复刻桌面端的本地回声思路：发送成功即上屏，服务端的
- * `user/message` 到达时由 [ChatReducer] 换掉。
+ * **`UserMessage` 的线上形状**（`_inboxp4.mjs` 实测）：
+ * ```
+ * {content:[{type:'text',text}], source:{kind:'user', rpcId:'<我方 requestId>'}, role:'user', id:'<uuid>'}
+ * ```
+ * `id` 就是 `session/updateQueue` 要的 `itemId`（`index.js:955-956` 按 `m.id === request.itemId` 查找），
+ * `source.rpcId` 则是**我们自己生成并传出去的 requestId**——服务端原样带回，所以它是把
+ * 「本地回声」与「服务端条目」对应起来的唯一可靠键（比按文本匹配稳得多）。
+ *
+ * 由此 R009 记录的「远程客户端拿不到 itemId、`updateQueue` 不可用」结论**被推翻**：
+ * itemId 就在 `inbox` 投影与 splice 事件里，`updateQueue` 的三种操作
+ * （`edit` / `remove` / `steer`）对远程客户端完全可用。
  *
  * ⚠️ 这是**纯本地乐观状态**：没有 `seq`（服务端还没给它编号），所以绝不能进
  * `state.items`（那会让 `session/page` 的游标语义和 `distinctBy{seq}` 全部错乱），
  * 也不能写进 Room 缓存——冷启动后它本来就该消失（服务端队列与它无关）。
  *
- * @param id 本地单调计数，只用作 Compose 的 `key` 与失败回滚的身份。
+ * @param id 服务端 `itemId`；本地回声还没被 `agent/inbox/spliced` 确认前是 `local:<n>`。
+ * @param rpcId 我方 `session/prompt` 的 requestId，用来把回声与服务端条目配对。
+ * @param target [INBOX_NEXT_TURN]（等当前轮结束）或 [INBOX_NEXT_STEP]（已插队进当前轮）。
+ * @param confirmed 是否已拿到服务端 itemId（拿到才能编辑/删除/插队）。
  */
 data class QueuedMessage(
-    val id: Long,
+    val id: String,
+    val rpcId: String,
     val text: String,
     val attachmentCount: Int = 0,
     /** 本地发送时刻（epoch 毫秒），仅用于气泡脚注。 */
     val enqueuedAt: Long = 0L,
-)
+    val target: String = INBOX_NEXT_TURN,
+    val confirmed: Boolean = false,
+) {
+    /** 是否还在等当前轮结束（而不是已经插队进当前轮）。 */
+    val isAwaitingTurn: Boolean get() = target == INBOX_NEXT_TURN
+}
 
 /**
  * 正在流式生成的一轮（瞬时状态，不来自持久化日志）。

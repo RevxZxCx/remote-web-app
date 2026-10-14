@@ -23,11 +23,20 @@ class ChatReducerTest {
 
     private fun obj(text: String): JsonObject = json.parseToJsonElement(text) as JsonObject
 
-    private fun event(seq: Long, text: String = "x"): ChatFrame.Event =
+    /**
+     * 造一条 `user/message` 帧。
+     *
+     * @param rpcId 消息的 `source.rpcId`。**排队相关的用例必须传**，而且要跟
+     *   [echo] 生成的 `rpcId` 对上——`ChatReducer.dropDispatched` 靠它把
+     *   「服务端取出了我们哪一条排队消息」精确匹配上，匹配不上就当作
+     *   「别人（桌面端）发的消息」而不动队列。
+     */
+    private fun event(seq: Long, text: String = "x", rpcId: String? = null): ChatFrame.Event =
         parse(
             """
             {"type":"user/message","seq":$seq,"time":${seq * 1000},
-             "data":{"content":[{"type":"text","text":"$text"}]}}
+             "data":{"content":[{"type":"text","text":"$text"}]
+              ${if (rpcId == null) "" else ""","source":{"rpcId":"$rpcId"}"""}}}
             """.trimIndent(),
         )
 
@@ -831,7 +840,8 @@ class ChatReducerTest {
         )
 
     private fun echo(id: Long, text: String = "排队的话") = QueuedMessage(
-        id = id,
+        id = "local:$id",
+        rpcId = "rpc-$id",
         text = text,
         enqueuedAt = 1_000L * id,
     )
@@ -851,7 +861,7 @@ class ChatReducerTest {
     @Test
     fun `新的用户消息到达时摘掉最老的一条排队回声`() {
         val state = ChatUiState(queued = listOf(echo(1L, "第一句"), echo(2L, "第二句")))
-        val next = ChatReducer.reduce(state, event(seq = 5L, text = "第一句"))
+        val next = ChatReducer.reduce(state, event(seq = 5L, text = "第一句", rpcId = "rpc-1"))
 
         // FIFO：服务端按入队顺序出队，所以摘最老的那条。
         assertEquals(listOf(echo(2L, "第二句")), next.queued)
@@ -888,7 +898,7 @@ class ChatReducerTest {
         assertEquals(2, state.queued.size)
 
         // 服务端取出第一条：先写日志，再开新一轮。
-        state = ChatReducer.reduce(state, event(seq = 10L, text = "one"))
+        state = ChatReducer.reduce(state, event(seq = 10L, text = "one", rpcId = "rpc-1"))
         assertEquals(listOf(echo(2L, "two")), state.queued)
         assertEquals(1, state.items.size)
 
@@ -904,7 +914,7 @@ class ChatReducerTest {
         assertFalse(state.generating)
 
         // 服务端取出第二条。
-        state = ChatReducer.reduce(state, event(seq = 14L, text = "two"))
+        state = ChatReducer.reduce(state, event(seq = 14L, text = "two", rpcId = "rpc-2"))
         assertTrue(state.queued.isEmpty())
         assertEquals(3, state.items.size)
         assertEquals(14L, state.items.last().seq)
@@ -955,7 +965,7 @@ class ChatReducerTest {
     fun `回声摘除后普通事件照旧推进游标`() {
         // 摘回声不能顺手把别的事件处理逻辑短路掉（R006 P3-15 的同族风险）。
         val state = ChatUiState(queued = listOf(echo(1L)))
-        val next = ChatReducer.reduce(state, event(seq = 7L))
+        val next = ChatReducer.reduce(state, event(seq = 7L, rpcId = "rpc-1"))
 
         assertTrue(next.queued.isEmpty())
         assertEquals(7L, next.cursor)

@@ -1,6 +1,7 @@
 package com.revxzxcx.remotewebapp.core.session
 
 import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
+import kotlinx.serialization.json.JsonObject
 
 /**
  * 聊天页的状态。
@@ -19,11 +20,16 @@ data class ChatUiState(
     /** 正在生成的预览；为 null 表示当前没有活跃生成。 */
     val live: LiveAttempt? = null,
     /**
-     * 已发送但服务端尚未写进日志的消息（排队回声）。
+     * 服务端**排队队列**的本地镜像（`mode:'queue'` 的产物）。
+     *
+     * 权威来源有两个：`session/follow` 快照的 `projections.values.inbox`，以及实时事件
+     * `agent/inbox/spliced`（插入 / 编辑 / 删除都由它通报）。消息被服务端取出执行时，
+     * `user/message` 事件的 `data.source.rpcId` 就是配对键。
      *
      * 纯本地乐观状态，没有 `seq`，因此**不参与 [items] 的任何运算**（游标、翻页、
-     * `distinctBy{seq}`）。只由 [ChatViewModel.send] 追加、由 [reduce] 收到
-     * `user/message` / `turn/start` 时摘掉，绝不写进 Room 缓存。
+     * `distinctBy{seq}`），也绝不写进 Room 缓存。
+     *
+     * 渲染顺序固定为 `loadingMore → items → live → queued`，见 `ui/chat/ChatScreen.kt`。
      */
     val queued: List<QueuedMessage> = emptyList(),
     /** 是否正在拉第一帧快照。 */
@@ -209,6 +215,8 @@ object ChatReducer {
             changesLoading = state.changesLoading.filterTo(mutableSetOf()) { it in liveSeqs },
             fromCache = false,
             model = frame.model ?: state.model,
+            // 快照带权威队列；本地回声里已被服务端确认（同 rpcId）的让位给它。
+            queued = mergeQueued(frame.inbox, state.queued),
         )
         if (frame.baseline.isNotEmpty()) {
             // 重连基线：把断开期间已生成但未落盘的增量回放成一个预览气泡。
@@ -280,12 +288,11 @@ object ChatReducer {
             state.model
         }
 
-        // 3) 排队回声的摘除。回声是**服务端队列的本地镜像**：`send()` 只在服务端回了
-        //    `{accepted:true}` 之后才挂它，所以每一条回声都对应一个确实进了队列的消息。
-        //    于是唯一的权威摘除信号就是「服务端把这条消息写进日志」——也就是一条我们
-        //    还没有的 `user/message`。队列是 FIFO 的，摘最老的一条即可。
+        // 3) 排队队列。权威来源有两个：快照的 `inbox` 投影（上面 onSnapshot 处理）与实时
+        //    事件 `agent/inbox/spliced`；「这条消息被服务端取出执行」则由 `user/message`
+        //    标记（事件 data 就是 UserMessage，`source.rpcId` 是我们发出去的 requestId）。
         //
-        //    ⚠️ **不要**在 `turn/start` 上清空全部回声。服务端是一条一清的
+        //     ⚠️ **不要**在 `turn/start` 上清空全部队列。服务端是一条一清的
         //    （用户 m20729/m20733 实测：连着发两条，序列是
         //    `user/message(A) → turn/start → … → turn/end → user/message(B) → turn/start`），
         //    所以 `turn/start` 到达时**后面的消息还在队列里**，清空就等于让它们重新变成
@@ -293,14 +300,13 @@ object ChatReducer {
         //    回声因此可能在一个角落情形里残留：另一个客户端（桌面端）用 `updateQueue`
         //    `remove` 把条目撤掉，此时不会有 `user/message`。代价是一条不会自愈的
         //    「排队中」气泡，远好过把真实还排着队的消息吞掉。
-        //
-        //    只在新条目上摘（`isNewItem`）：同 seq 事件被重新投递时内容会更新，
-        //    但那不是新的用户消息，不该消耗回声。
-        val isNewItem = state.items.none { it.seq == item?.seq }
-        val queued = when {
-            item == null -> state.queued
-            type == "user/message" && isNewItem && state.queued.isNotEmpty() ->
-                state.queued.drop(1)
+        val queued = when (type) {
+            "agent/inbox/spliced" -> {
+                val splice = QueueInboxParser.parseSplice(frame.envelope?.get("data"))
+                if (splice == null) state.queued else applySplice(state.queued, splice)
+            }
+
+            "user/message" -> dropDispatched(state.queued, frame)
             else -> state.queued
         }
 
@@ -384,13 +390,101 @@ object ChatReducer {
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // 排队队列（服务端 inbox）的合并规则
+    // ---------------------------------------------------------------------------
+
+    /**
+     * 把服务端权威队列 [server] 与本地回声 [local] 合并。
+     *
+     * 本地回声（`confirmed == false`）在拿到服务端 itemId 之前必须留着，否则用户刚点发送
+     * 会看到气泡闪一下就没了。配对键是 `rpcId`：服务端在 `UserMessage.source.rpcId` 里
+     * **原样带回**我们传出去的 requestId（`_inboxp4.mjs` 实测），比按文本匹配稳得多。
+     *
+     * 服务端条目排在前面——它是权威；回声只补充「服务端还没确认」的那几条。
+     */
+    private fun mergeQueued(server: List<QueuedMessage>, local: List<QueuedMessage>): List<QueuedMessage> {
+        if (local.isEmpty()) return server
+        val confirmed = server.mapTo(mutableSetOf()) { it.rpcId }
+        val echoes = local.filter { it.rpcId.isNotEmpty() && it.rpcId !in confirmed }
+        return server + echoes
+    }
+
+    /**
+     * 应用一条 `agent/inbox/spliced`。
+     *
+     * 关键点：`start` 是**目标 target 数组内**的下标（`index.js:969` 的 `inbox.replace`
+     * 与 `:975` 的 `inbox.remove` 都按 target 各自的下标体系走，官方
+     * `client.js:2158-2173` 也是按 target 分组的）。所以两个 target 必须分开计数，
+     * 混成一个列表会把下标算错。
+     *
+     * 插入位置取「被删的第一条」的位置：这样 `edit`（`removedCount:1` + `inserted:[m']`）
+     * 就是就地替换，纯插入（`removedCount` 缺席）则排在原第 `start` 条之前。
+     */
+    private fun applySplice(current: List<QueuedMessage>, splice: InboxSplice): List<QueuedMessage> {
+        val out = mutableListOf<QueuedMessage>()
+        var seenInTarget = 0
+        var inserted = false
+        for (message in current) {
+            if (message.target == splice.target) {
+                val indexInTarget = seenInTarget
+                seenInTarget++
+                if (indexInTarget >= splice.start &&
+                    indexInTarget < splice.start + splice.removedCount
+                ) {
+                    if (!inserted && indexInTarget == splice.start) {
+                        out.addAll(splice.inserted)
+                        inserted = true
+                    }
+                    continue
+                }
+            }
+            out.add(message)
+        }
+        // 删除区间在段尾之外（或该 target 段是空的）：追加到末尾。
+        // 用户主动发起的 prompt 就是这种形状（服务端 append 到队列尾）。
+        if (!inserted && seenInTarget <= splice.start) out.addAll(splice.inserted)
+        // 服务端把我们发出的 requestId 原样带回 → 对应的本地回声让位。
+        val confirmedRpcIds = splice.inserted
+            .map { it.rpcId }
+            .filter { it.isNotEmpty() }
+            .toSet()
+        return out.filterNot { !it.confirmed && it.rpcId in confirmedRpcIds }
+    }
+
+    /**
+     * 一条 `user/message` 到达：服务端把某条排队消息取出执行了，队列里对应的那一条该消失。
+     *
+     * 匹配键按可靠性排序：`source.rpcId`（我们自己发出去的 requestId，服务端原样带回）
+     * → `id`（服务端 itemId）→ **FIFO 兜底**（摘最老的一条）。
+     *
+     * 兜底为什么留着： splice 事件可能因为丢帧/重连没收到，而 `user/message` 一定会在
+     * 日志里。此时摘最老的一条仍然是最佳猜测——回声本来就只有我们自己发的那几条。
+     */
+    private fun dropDispatched(current: List<QueuedMessage>, frame: ChatFrame.Event): List<QueuedMessage> {
+        if (current.isEmpty()) return current
+        val data = frame.envelope?.get("data") as? JsonObject
+        val source = data?.get("source") as? JsonObject
+        val rpcId = source?.stringOrNull("rpcId")
+        val id = data?.stringOrNull("id")
+        val index = current.indexOfFirst { message ->
+            (rpcId != null && message.rpcId == rpcId) ||
+                (id != null && message.confirmed && message.id == id)
+        }
+        return when {
+            index >= 0 -> current.filterIndexed { i, _ -> i != index }
+            // 匹配不上说明这条 `user/message` 不是我们的排队消息（例如桌面端发的），不动队列。
+            rpcId == null && id == null -> current
+            else -> current.drop(1)
+        }
+    }
+
     /**
      * 把一个 delta 折进 [LiveAttempt]。
      *
      * @param index 帧上的 `index`；基线回放传 -1（无校验、不推进）。
      */
-    private fun applyDelta(
-        attempt: LiveAttempt,
+    private fun applyDelta(        attempt: LiveAttempt,
         delta: AssistantStreamExpander.Delta?,
         index: Long,
     ): LiveAttempt {
