@@ -99,8 +99,13 @@ internal fun ChatScrollFollow(
     }
 }
 
-/** 见 [ChatScrollFollow] 的 KDoc：末行部分可见也算贴底，另留 [BOTTOM_SLACK] 行余量。 */
-private fun LazyListState.isNearBottom(): Boolean {
+/**
+ * 见 [ChatScrollFollow] 的 KDoc：末行部分可见也算贴底，另留 [BOTTOM_SLACK] 行余量。
+ *
+ * `internal` 而不是 `private`：`ChatScreen` 的「滚到底部」浮动按钮要用同一个判据决定
+ * 自己显不显示。两处各写一份判据时，用户会看到「明明贴在底部却冒出一个到底部按钮」。
+ */
+internal fun LazyListState.isNearBottom(): Boolean {
     val info = layoutInfo
     val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: return false
     return lastVisible >= info.totalItemsCount - BOTTOM_SLACK

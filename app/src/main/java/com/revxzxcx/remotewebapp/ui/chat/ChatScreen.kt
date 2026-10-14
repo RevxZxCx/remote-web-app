@@ -13,11 +13,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -46,6 +48,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -136,15 +139,32 @@ fun ChatScreen(
     // 首次组合那一刻：流式过程中 collect 每次触发都拿着旧下标去滚，视觉上就是
     // 「生成时不自动往下滚」（用户 m21177 第 2.3 条反馈的根因）。
     // 读 `state` 则相反——`by collectAsState()` 的委托在 lambda 里每次调用都取当前值。
+    // 抽成局部 val 而不是内联两遍：[ChatScrollFollow] 与「滚到底部」浮动按钮
+    // （用户 m24150）必须按同一个下标滚，两处各写一遍算式必然漂移。
+    val lastIndex: () -> Int = {
+        state.items.size +
+            (if (state.loadingMore) 1 else 0) +
+            (if (state.live != null) 1 else 0) - 1
+    }
     ChatScrollFollow(
         listState = listState,
-        lastIndex = {
-            state.items.size +
-                (if (state.loadingMore) 1 else 0) +
-                (if (state.live != null) 1 else 0) - 1
-        },
+        lastIndex = lastIndex,
         liveLength = { state.live?.text?.length ?: 0 },
     )
+
+    // 「滚到底部」浮动按钮的显隐（用户 m24150）。判据与 [ChatScrollFollow] 的贴底判定
+    // 共用 [isNearBottom]，否则会出现「明明贴在底部却冒出一个到底部按钮」。
+    // `derivedStateOf` 在这里是对的（与 ChatScrollFollow 里不能用它相反）：这里是组合期读，
+    // 而且滚动过程中每个 token 都重组一次这个 Composable 并不亏——它本来就要重画。
+    val showScrollToBottom by remember(listState) {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            !state.loading &&
+                info.totalItemsCount > info.visibleItemsInfo.size &&
+                !listState.isNearBottom()
+        }
+    }
+    val scope = rememberCoroutineScope()
 
     // 滚到顶时自动加载更早历史。逻辑在 [ChatHistoryFollow]（抽出来是为了能被渲染测试
     // 直接驱动：`firstVisibleItemIndex` 与「列表是否溢出一屏」都是只有真实布局后才有的量）。
@@ -294,60 +314,97 @@ fun ChatScreen(
                 }
             }
 
-            when {
-                state.loading && state.items.isEmpty() -> Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) { CircularProgressIndicator() }
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                when {
+                    state.loading && state.items.isEmpty() -> Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) { CircularProgressIndicator() }
 
-                // `queued.isEmpty()` 必须一起判：全新会话里第一句话发出去时 items 还是空的、
-                // live 也还没到（服务端要先出队才开轮），此刻若走进这个空态分支，
-                // 刚发出去的那条回声就被「这个会话还没有消息」盖掉了——正是 m20380 的缺口。
-                state.ready && state.items.isEmpty() && state.live == null &&
-                    state.queued.isEmpty() -> Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "这个会话还没有消息。",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-
-                else -> LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    if (state.loadingMore) {
-                        item(key = "loading-more") {
-                            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator(modifier = Modifier.padding(8.dp))
-                            }
-                        }
-                    }
-                    items(state.items, key = { it.seq }) { item ->
-                        ChatItemRow(
-                            item = item,
-                            now = now,
-                            changes = state.changes[item.seq],
-                            changesLoading = item.seq in state.changesLoading,
-                            onOpenFile = onOpenFile,
-                            onRetryChanges = viewModel::retryChanges,
-                            attachments = viewModel.attachments,
-                            sessionId = viewModel.sessionId,
+                    // `queued.isEmpty()` 必须一起判：全新会话里第一句话发出去时 items 还是空的、
+                    // live 也还没到（服务端要先出队才开轮），此刻若走进这个空态分支，
+                    // 刚发出去的那条回声就被「这个会话还没有消息」盖掉了——正是 m20380 的缺口。
+                    state.ready && state.items.isEmpty() && state.live == null &&
+                        state.queued.isEmpty() -> Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "这个会话还没有消息。",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    state.live?.let { live ->
-                        item(key = "live") { LiveRow(live) }
+
+                    else -> LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (state.loadingMore) {
+                            item(key = CHAT_LOADING_MORE_KEY) {
+                                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(modifier = Modifier.padding(8.dp))
+                                }
+                            }
+                        }
+                        items(state.items, key = { it.seq }) { item ->
+                            ChatItemRow(
+                                item = item,
+                                now = now,
+                                changes = state.changes[item.seq],
+                                changesLoading = item.seq in state.changesLoading,
+                                onOpenFile = onOpenFile,
+                                onRetryChanges = viewModel::retryChanges,
+                                attachments = viewModel.attachments,
+                                sessionId = viewModel.sessionId,
+                            )
+                        }
+                        state.live?.let { live ->
+                            item(key = CHAT_LIVE_KEY) { LiveRow(live) }
+                        }
+                        // 排队气泡**不在这里**：用户 m21177 第 4 条反馈明确要求「发送框上方多一个
+                        // 气泡」，而消息列表会随内容增长把气泡推到看不见的地方（R010m 就是活例：
+                        // 列表停在半路时，排在列表尾的回声在视口外，看起来像「回声消失了」）。
+                        // 现在由 bottomBar 里的 [QueuedStrip] 渲染。
                     }
-                    // 排队气泡**不在这里**：用户 m21177 第 4 条反馈明确要求「发送框上方多一个
-                    // 气泡」，而消息列表会随内容增长把气泡推到看不见的地方（R010m 就是活例：
-                    // 列表停在半路时，排在列表尾的回声在视口外，看起来像「回声消失了」）。
-                    // 现在由 bottomBar 里的 [QueuedStrip] 渲染。
                 }
+
+                // 位置滚动条（用户 m24150）。行 key 的顺序必须与上面 LazyColumn 逐行一致，
+                // 否则标记会整体偏移几行——所以 loading-more / live 两个 key 也走这里的常量。
+                ChatScrollbar(
+                    listState = listState,
+                    itemKeys = {
+                        buildList {
+                            if (state.loadingMore) add(CHAT_LOADING_MORE_KEY)
+                            state.items.forEach { add(it.seq) }
+                            if (state.live != null) add(CHAT_LIVE_KEY)
+                        }
+                    },
+                    userItemIndices = {
+                        val base = if (state.loadingMore) 1 else 0
+                        state.items.mapIndexedNotNull { index, item ->
+                            if (item is ChatItem.User) base + index else null
+                        }
+                    },
+                    onScrollToItem = { index -> listState.scrollToItem(index) },
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .width(18.dp)
+                        .padding(vertical = 6.dp),
+                )
+
+                // 「滚到底部」浮动按钮：只在列表没贴在底部时出现，位置在滚动条下方
+                // （用户 m24150 把两者作为一个需求一起提的）。
+                ScrollToBottomFab(
+                    visible = showScrollToBottom,
+                    onClick = { scope.launch { listState.scrollToBottom(lastIndex()) } },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 16.dp, bottom = 16.dp),
+                )
             }
         }
     }
