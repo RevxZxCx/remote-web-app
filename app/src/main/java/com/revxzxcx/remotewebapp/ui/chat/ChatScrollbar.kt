@@ -62,6 +62,44 @@ internal const val CHAT_LIVE_KEY = "live"
 private const val MIN_THUMB_FRACTION = 0.06f
 
 /**
+ * 会话长度系数的上限。
+ *
+ * 系数是「cursor / 已加载窗口的 seq 跨度」估出来的，而消息在 seq 上的密度并不均匀
+ * （一个轮次里工具调用能占几百条 seq）。刚打开老会话时窗口只有 50 条消息、跨度可能很小，
+ * 系数会被放大到几百。没有上限时，一个偶发的窄窗口会让滑块缩到看不见，
+ * 而用户此刻恰好正在滚动的就是那 50 条——信息量全丢。
+ */
+private const val MAX_SESSION_SCALE = 64f
+
+/**
+ * 滚动条的**模型几何**：已加载窗口的前缀和 + 由会话长度系数放大出来的「整个会话」。
+ *
+ * @param prefixes 已加载窗口的前缀和（`prefixHeights` 的输出）。
+ * @param head 未加载（更早）部分估高。已加载的一律是较新尾部，所以它在模型顶边。
+ * @param total 模型总高 = 已加载总高 × 系数。
+ */
+private data class Geometry(
+    val prefixes: FloatArray,
+    val head: Float,
+    val total: Float,
+) {
+    // data class 持 FloatArray 时必须手写 equals/hashCode，否则每次比较都是引用比较，
+    // 而 ScrollbarModel 的相等性护栏会把它当成「变了」→ 回调每帧空转。
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is Geometry) return false
+        return head == other.head && total == other.total && prefixes.contentEquals(other.prefixes)
+    }
+
+    override fun hashCode(): Int {
+        var result = prefixes.contentHashCode()
+        result = 31 * result + head.hashCode()
+        result = 31 * result + total.hashCode()
+        return result
+    }
+}
+
+/**
  * 滚动条的**可观测模型**。
  *
  * 存在的唯一理由是测试：这条滚动条是 Canvas 画出来的，语义树里既没有「滑块在 82%」
@@ -114,10 +152,24 @@ internal data class ScrollbarModel(
  * ⚠️ 所有 lambda 都必须在**调用时**读活的 Compose 状态（`ChatScrollFollow` KDoc 第 4 条
  * 记过同类事故）：`pointerInput` 块只在修饰符安装时跑一次，里面捕获的组合期值会被冻住。
  *
+ * ## 为什么滑块大小要乘一个「会话长度系数」
+ *
+ * `session/follow` 的首屏窗口只有 50 条消息（`history.js:59` `DEFAULT_MAX_MESSAGES = 50`），
+ * 而一个老会话可能有几千条。**不乘系数时，每个会话刚打开都恰好量到 50 行**，
+ * 于是「视口 / 已加载总高」在所有会话里是同一个数——滑块大小完全不随会话长度变化
+ * （用户 m24431 实测反馈：「滑块不会根据会话长度变化，大小不变」）。
+ *
+ * 系数由调用方从 **seq 跨度**估：`cursor` 是服务端权威的日志尾部 seq，已加载窗口覆盖
+ * `[items.first().seq, cursor]`，两者之比就是「已加载部分占整个会话的比例」。
+ * 已加载部分一律是**较新的尾部**，所以未加载的头部估高为 `已加载总高 × (系数 - 1)`，
+ * 全部几何量都从「距轨道顶边」改成「距模型顶边」。
+ *
  * @param listState 调用方的列表状态。
  * @param itemKeys 当前列表的全部 key，**顺序必须与 LazyColumn 的行序逐行一致**
  *   （loading-more → items → live），否则标记会整体偏移。
  * @param userItemIndices 「我发送的消息」在 [itemKeys] 里的下标集合。
+ * @param sessionLengthScale 已加载窗口占整个会话的比例的倒数（>= 1）。1 表示已全部加载。
+ *   默认 1，测试与「不需要这个修正」的调用方都不传。
  * @param onScrollToItem 滚到指定下标（调用方通常直接给 `listState::scrollToItem`）。
  * @param onModelChange 模型变化回调，**只给测试用**；生产环境不要传。
  */
@@ -128,6 +180,7 @@ internal fun ChatScrollbar(
     userItemIndices: () -> List<Int>,
     onScrollToItem: suspend (Int) -> Unit,
     modifier: Modifier = Modifier,
+    sessionLengthScale: () -> Float = { 1f },
     onModelChange: (ScrollbarModel) -> Unit = {},
 ) {
     // 已量到的行高。只由可见项写入，永不清理——用户滚过一行就多知道一行。
@@ -142,6 +195,27 @@ internal fun ChatScrollbar(
     // 把 itemKeys() 放进 derivedStateOf 内部读，State 的标识就稳定了，读到的也永远是当前值。
     val prefixes = remember(listState) {
         derivedStateOf { prefixHeights(itemKeys(), heights) }
+    }
+
+    // 会话长度系数：已加载窗口占整个会话的比例。
+    //
+    // 在组合期读一次、再把值当 remember 的键，不把 `sessionLengthScale()` 塞进
+    // derivedStateOf 里：derivedStateOf 的计算也可能在 pointerInput / SideEffect 这些
+    // 非观察作用域里被调用，那种调用不登记依赖，系数变了模型不重算（实测踩过）。
+    // `geometry` 内部仍是 derivedStateOf——行高是滚动中逐帧量出来的，必须活读。
+    val sessionScale = sessionLengthScale().coerceIn(1f, MAX_SESSION_SCALE)
+
+    // 模型几何：把「已加载窗口的前缀和」放大成「整个会话的模型」。
+    val geometry by remember(prefixes, listState, sessionScale) {
+        derivedStateOf {
+            val raw = prefixes.value
+            val rawTotal = raw.last()
+            Geometry(
+                prefixes = raw,
+                head = rawTotal * (sessionScale - 1f),
+                total = rawTotal * sessionScale,
+            )
+        }
     }
 
     val trackColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.32f)
@@ -167,15 +241,16 @@ internal fun ChatScrollbar(
             info.totalItemsCount > info.visibleItemsInfo.size
         }
     }
-    val prefixesNow = prefixes.value
-    val totalHeight = prefixesNow.last()
+    val prefixesNow = geometry.prefixes
+    val totalHeight = geometry.total
 
     // 滑块位置：视口顶边在模型里的位置 / 总高。末行顶边 = p[index] - item.offset
-    // （item.offset 是相对视口顶边的，所以减回去才是模型坐标）。
-    val thumbTop by remember(prefixes, listState) {
+    // （item.offset 是相对视口顶边的，所以减回去才是模型坐标），再加未加载头部的估高。
+    val thumbTop by remember(prefixes, listState, geometry) {
         derivedStateOf {
             val info = listState.layoutInfo
-            val total = prefixes.value.last()
+            val geom = geometry
+            val total = geom.total
             val viewport = (info.viewportEndOffset - info.viewportStartOffset).toFloat()
             if (total <= 0f || viewport <= 0f) {
                 0f
@@ -183,23 +258,32 @@ internal fun ChatScrollbar(
                 val first = info.visibleItemsInfo.firstOrNull()
                 val index = first?.index ?: 0
                 val offset = first?.offset ?: 0
-                ((prefixes.value.getOrElse(index) { 0f } - offset) / total).coerceIn(0f, 1f)
+                val raw = (geom.head + geom.prefixes.getOrElse(index) { 0f } - offset) / total
+                // 先按比例求位置，再让滑块整体待在轨道里：长会话里 thumbHeight 被钳到
+                // MIN_THUMB_FRACTION，此时 0.975 的顶边会让滑块底边超出轨道。
+                val height = (viewport / total).coerceIn(MIN_THUMB_FRACTION, 1f)
+                raw.coerceIn(0f, 1f - height)
             }
         }
     }
-    val thumbHeight by remember(prefixes, listState) {
+    // 滑块高度。`MIN_THUMB_FRACTION` 是**下限**：长会话里视口占总高的比例可能小于 6%，
+    // 不钳的话滑块会细到点不着。所以钳完上界还要反过来钳位置——否则贴底时
+    // `thumbTop + thumbHeight > 1`，滑块下半截被画到轨道外面去。
+    val thumbHeight by remember(prefixes, listState, geometry) {
         derivedStateOf {
             val info = listState.layoutInfo
-            val total = prefixes.value.last()
+            val total = geometry.total
             val viewport = (info.viewportEndOffset - info.viewportStartOffset).toFloat()
             if (total <= 0f) 1f else (viewport / total).coerceIn(MIN_THUMB_FRACTION, 1f)
         }
     }
 
+    // 标记位置：行的模型中点 / 模型总高。已加载的是较新的尾部，所以要加上未加载头部的估高，
+    // 否则几千条消息的老会话会把所有标记挤在轨道最下面一小段里。
     val markerFractions = if (totalHeight > 0f) {
         userItemIndices().mapNotNull { index ->
             if (index in 0 until prefixesNow.size - 1) {
-                ((prefixesNow[index] + prefixesNow[index + 1]) * 0.5f) / totalHeight
+                (geometry.head + (prefixesNow[index] + prefixesNow[index + 1]) * 0.5f) / totalHeight
             } else {
                 null
             }
@@ -232,8 +316,9 @@ internal fun ChatScrollbar(
      * 都不能在修饰符安装时求值（见类 KDoc 的 ⚠️）。
      */
     fun resolve(trackHeight: Float, y: Float): Int {
-        val p = prefixes.value
-        val total = p.last()
+        val p = geometry.prefixes
+        val head = geometry.head
+        val total = geometry.total
         if (trackHeight <= 0f || total <= 0f) return -1
         val clampedY = y.coerceIn(0f, trackHeight)
         val markers = userItemIndices()
@@ -242,7 +327,7 @@ internal fun ChatScrollbar(
         var bestDistance = Float.MAX_VALUE
         for (index in markers) {
             if (index !in 0 until p.size - 1) continue
-            val centerPx = ((p[index] + p[index + 1]) * 0.5f) / total * trackHeight
+            val centerPx = (head + (p[index] + p[index + 1]) * 0.5f) / total * trackHeight
             val distance = abs(centerPx - clampedY)
             if (distance < bestDistance) {
                 bestDistance = distance
@@ -251,7 +336,9 @@ internal fun ChatScrollbar(
         }
         if (bestIndex >= 0 && bestDistance <= hitRadiusPx) return bestIndex
         // 否则按比例二分。p 是单调递增的前缀和，二分的是「第一个 p[i] 超过目标」的前一行。
-        val target = clampedY / trackHeight * total
+        // 目标是模型坐标，要先减掉未加载头部才是已加载窗口里的偏移。
+        val target = clampedY / trackHeight * total - head
+        if (target <= 0f) return 0
         var lo = 0
         var hi = p.size - 1
         while (lo < hi - 1) {

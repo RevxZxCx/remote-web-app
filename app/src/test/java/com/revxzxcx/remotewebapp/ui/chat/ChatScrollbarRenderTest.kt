@@ -25,6 +25,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -54,6 +55,8 @@ class ChatScrollbarRenderTest {
     private var state: LazyListState? = null
     private var count by mutableIntStateOf(20)
     private var userEvery = 5
+    private var sessionScale by mutableStateOf(1f)
+
 
     private var scrollToIndex = -1
     private var lastModel: ScrollbarModel? = null
@@ -61,15 +64,24 @@ class ChatScrollbarRenderTest {
     private var fabVisible = false
 
     /**
-     * 造一个聊天列表并挂上 [ChatScrollbar]。
+     * 造一个聊天列表并挂上 [ChatScrollbar]。只能调用一次（`createComposeRule` 的
+     * `setContent` 全局只能设一次），所以「不同会话长度系数」的对比要拆成多个用例，
+     * 各自断言绝对数值而不是靠改字段后重测。
      *
      * @param items 总行数
      * @param viewportDp 视口高度（dp）；行高固定 50dp
      * @param userEvery 每隔几行算一条「我发送的消息」（0 表示一条都没有）
+     * @param sessionScale 会话长度系数：已加载窗口只占整个会话的 1/scale
      */
-    private fun setChatList(items: Int, viewportDp: Int = 200, userEvery: Int = 5) {
+    private fun setChatList(
+        items: Int,
+        viewportDp: Int = 200,
+        userEvery: Int = 5,
+        sessionScale: Float = 1f,
+    ) {
         count = items
         this.userEvery = userEvery
+        this.sessionScale = sessionScale
         lastModel = null
         scrollToIndex = -1
         compose.setContent {
@@ -100,6 +112,7 @@ class ChatScrollbarRenderTest {
                             (0 until count).filter { it % userEvery == 0 }
                         }
                     },
+                    sessionLengthScale = { sessionScale },
                     onScrollToItem = { index -> scrollToIndex = index },
                     onModelChange = { lastModel = it },
                     modifier = Modifier
@@ -268,6 +281,90 @@ class ChatScrollbarRenderTest {
         compose.waitForIdle()
         // 没有标记时只能按比例二分，落点必然在中段而不是某个标记行。
         assertTrue(scrollToIndex in 7..13)
+    }
+
+    // ---- 会话长度系数（用户 m24431：「滑块不会根据会话长度变化，大小不变」）----
+
+    @Test
+    fun `会话长度系数为 1 时滑块等于视口占已加载的比例`() {
+        // 视口 200dp、已加载 20 行 × 50dp = 1000dp → 滑块 200/1000 = 20%。
+        setChatList(items = 20, sessionScale = 1f)
+        compose.waitForIdle()
+        assertEquals("系数 1 时滑块占 200/1000", 0.2f, lastModel!!.thumbHeightFraction, 0.01f)
+    }
+
+    @Test
+    fun `会话长度系数为 3 时滑块缩到三分之一`() {
+        // 同一个会话、同一批行，只把「已加载窗口占整个会话的比例」从 1 改成 1/3：
+        // 模型总高变成 3000dp，滑块变成 200/3000 ≈ 6.7%。
+        // 修复前滑块大小与会话长度无关，这两个数会一样——那就是用户报的「大小不变」。
+        // 系数取 3 而不是 10：10 会让比例掉到 6% 下限以下被钳住，就分不清是缩放还是下限。
+        setChatList(items = 20, sessionScale = 3f)
+        compose.waitForIdle()
+        assertEquals("系数 3 时滑块占 200/3000", 0.0667f, lastModel!!.thumbHeightFraction, 0.005f)
+    }
+
+    @Test
+    fun `会话很长时滑块仍保留下限而不是消失`() {
+        // 系数 64（MAX_SESSION_SCALE）时 200/64000 = 0.3%，远低于 6% 下限。
+        // 下限是必须的：几千条消息的会话里没有下限就看不见也点不着。
+        setChatList(items = 20, sessionScale = 64f)
+        compose.waitForIdle()
+        assertEquals("下限 6%", 0.06f, lastModel!!.thumbHeightFraction, 0.001f)
+        assertTrue("滑块仍应在轨道内", lastModel!!.thumbTopFraction + 0.06f <= 1.001f)
+    }
+
+    @Test
+    fun `会话长度系数不影响标记数量也不越界`() {
+        setChatList(items = 20, sessionScale = 10f)
+        compose.waitForIdle()
+        val markers = lastModel!!.markerFractions
+
+        assertEquals("标记条数只取决于我发送的消息条数", 4, markers.size)
+        assertTrue("标记必须在轨道内：$markers", markers.all { it in 0f..1f })
+    }
+
+    @Test
+    fun `未加载头部把标记推到轨道下半段`() {
+        // 已加载窗口是最新的 20 行，只占整个会话的 1/10 → 这 20 行里的所有
+        // 「我发送的消息」都应落在轨道最后 10% 里，而不是挤在轨道中段。
+        setChatList(items = 20, sessionScale = 10f)
+        compose.waitForIdle()
+        val markers = lastModel!!.markerFractions
+
+        assertTrue("有标记才验：$markers", markers.isNotEmpty())
+        assertTrue("标记应集中在轨道末段：$markers", markers.all { it > 0.9f })
+    }
+
+    @Test
+    fun `会话长度系数不改变贴底时滑块在轨道末端`() {
+        setChatList(items = 20, sessionScale = 8f)
+        compose.runOnIdle { runBlocking { state?.scrollToBottom(19) } }
+        compose.waitForIdle()
+        val model = lastModel!!
+        assertTrue(
+            "贴底时滑块应紧贴轨道末端：${model.thumbTopFraction}",
+            model.thumbTopFraction > 0.9f,
+        )
+        assertTrue(
+            "滑块加高度不应超出轨道：${model.thumbTopFraction}+${model.thumbHeightFraction}",
+            model.thumbTopFraction + model.thumbHeightFraction <= 1.001f,
+        )
+    }
+
+    @Test
+    fun `会话长度系数下点标记仍然跳到那条消息`() {
+        setChatList(items = 20, viewportDp = 200, userEvery = 5, sessionScale = 12f)
+        compose.waitForIdle()
+        val node = scrollbar.fetchSemanticsNode()
+        val height = node.size.height.toFloat()
+        val centerX = node.size.width / 2f
+        // 未加载头部占前 11/12，第一个标记落在轨道最后 1/12 里。
+        val fraction = lastModel!!.markerFractions.first()
+        assertTrue("第一个标记应在轨道末段：$fraction", fraction > 0.9f)
+        scrollbar.performTouchInput { click(Offset(centerX, fraction * height)) }
+        compose.waitForIdle()
+        assertEquals("点第一个标记仍应跳到第 0 行", 0, scrollToIndex)
     }
 }
 

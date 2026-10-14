@@ -388,6 +388,21 @@ fun ChatScreen(
                             if (item is ChatItem.User) base + index else null
                         }
                     },
+                    // 会话长度系数。不乘它时每个会话刚打开都恰好量到 50 行
+                    // （DEFAULT_MAX_MESSAGES），滑块大小在所有会话里是同一个数。
+                    // cursor 是服务端权威的日志尾部 seq，已加载窗口覆盖
+                    // [items.first().seq, cursor]，两者之比就是已加载部分占整个会话的比例。
+                    sessionLengthScale = {
+                        val items = state.items
+                        val cursor = state.cursor
+                        if (items.isEmpty() || cursor < 0L || !state.hasMore) {
+                            1f
+                        } else {
+                            val oldest = items.first().seq
+                            val span = (cursor - oldest + 1L).coerceAtLeast(1L)
+                            ((cursor + 1L).toDouble() / span.toDouble()).toFloat()
+                        }
+                    },
                     onScrollToItem = { index -> listState.scrollToItem(index) },
                     modifier = Modifier
                         .align(Alignment.CenterEnd)
