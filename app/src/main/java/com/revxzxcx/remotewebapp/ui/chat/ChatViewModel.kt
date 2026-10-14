@@ -26,6 +26,8 @@ import com.revxzxcx.remotewebapp.core.session.ModelRef
 import com.revxzxcx.remotewebapp.core.session.PromptAttachment
 import com.revxzxcx.remotewebapp.core.session.SessionAttachmentRepository
 import com.revxzxcx.remotewebapp.core.session.SessionEventParser
+import com.revxzxcx.remotewebapp.core.session.SniffedImage
+import com.revxzxcx.remotewebapp.core.session.sniffImage
 import com.revxzxcx.remotewebapp.core.session.toBase64
 import com.revxzxcx.remotewebapp.core.session.validateImage
 import kotlinx.coroutines.Job
@@ -204,6 +206,9 @@ class ChatViewModel(
         val attachments = _pending.value
         if (text.isEmpty() && attachments.isEmpty()) return
         if (sendJob?.isActive == true) return
+        // T5 设备验收：发送是网络调用，期间「发送」按钮必须进入不可点的加载态。
+        // 否则用户看到按钮一直亮着，会反复点（每次都白跑一次 RPC）。
+        _state.value = _state.value.copy(sending = true)
         sendJob = viewModelScope.launch {
             try {
                 // 文件附件在上面的 attachFile 里就已经上传换好回执了，这里直接发。
@@ -225,6 +230,8 @@ class ChatViewModel(
                 throw cause
             } catch (cause: Exception) {
                 _state.value = _state.value.copy(sendError = describe(cause))
+            } finally {
+                _state.value = _state.value.copy(sending = false)
             }
         }
     }
@@ -244,7 +251,8 @@ class ChatViewModel(
      * 加入一张待发送的图片。
      *
      * @param bytes 原始字节（不是 base64 后）。
-     * @param mediaType MIME 类型。
+     * @param mediaType 声明出来的 MIME（通常来自 `contentResolver.getType`）。
+     *   **会被字节嗅探覆盖**，见 [sniffImage]。
      * @param name 文件名，可为 null。
      * @return 被 [ImageLimits] 挡下时的中文理由；成功加入返回 null。
      */
@@ -254,10 +262,23 @@ class ChatViewModel(
         name: String?,
         measure: ImageMeasure,
     ): ImageRejection? {
+        // T5 设备验收实测：只信声明值会让桌面端回
+        // `session/attachment-invalid: Declared image type does not match its bytes.`
+        // 这里先按魔数纠正，认得出的类型一律以字节为准。
+        val effectiveType = when (val sniffed = sniffImage(bytes)) {
+            is SniffedImage.Supported -> sniffed.mediaType
+            is SniffedImage.Unsupported -> {
+                val rejection = ImageRejection.UnsupportedType(sniffed.label)
+                _attachNotice.value = rejection.message()
+                return rejection
+            }
+
+            SniffedImage.Unknown -> mediaType
+        }
         val already = _pending.value.filter { it.kind == PromptAttachment.Kind.IMAGE }
         // base64 后长度 ≈ 原始 × 4/3，反推已挂图片占用的原始字节。
         val alreadyBytes = already.sumOf { it.data.length * 3L / 4L }
-        val rejection = imageLimits.validateImage(measure, mediaType, already, alreadyBytes)
+        val rejection = imageLimits.validateImage(measure, effectiveType, already, alreadyBytes)
         // 提示一并落到 ViewModel（R007 P2-3）：早先由 UI 侧 `remember` 承载，
         // 旋转屏幕就没了。成功时清掉上一次的提示。
         _attachNotice.value = rejection?.message()
@@ -265,7 +286,7 @@ class ChatViewModel(
         _pending.value = _pending.value + PromptAttachment(
             kind = PromptAttachment.Kind.IMAGE,
             name = name,
-            mediaType = mediaType,
+            mediaType = effectiveType,
             data = bytes.toBase64(),
         )
         return null

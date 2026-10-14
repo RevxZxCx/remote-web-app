@@ -61,6 +61,9 @@ class MdStream {
     /** 未闭合围栏的行首；-1 表示没有。 */
     private var scanFenceStart: Int = -1
 
+    /** 未闭合围栏的长度（闭栏必须不短于它，CommonMark）。 */
+    private var scanFenceLen: Int = 0
+
     /** 最近一个非空行的内容（`isSafeBoundary` 要用）。 */
     private var scanPrevLine: String = ""
 
@@ -119,6 +122,7 @@ class MdStream {
         scanAt = 0
         scanFence = null
         scanFenceStart = -1
+        scanFenceLen = 0
         scanPrevLine = ""
         scanSplit = 0
     }
@@ -139,11 +143,23 @@ class MdStream {
      * 而全文解析里它明明是代码块的内容。表现为 `MdStreamTest` 的两条不变量用例失败
      * （`无语言代码块` 文档 len=5：期望 1 块，实得 CodeBlock + Paragraph）。
      * 因此每次处理一行前先快照状态，遇到没有换行符的行就回滚并中断。
+     *
+     * ## 开栏必须认语言标签（M5-10 实测踩到，比上面那条更隐蔽）
+     *
+     * 早先这里自己写了一份 `fenceAt`，**只认裸围栏**（```` ``` ```` 或 `~~~` 后面必须
+     * 只有空白）。于是 ```` ```kotlin ```` 这种带语言标签的开栏行被判成普通行，状态机
+     * 全程认为「不在围栏内」——代码块内部的空行就此命中下面的「围栏外空行」分支，
+     * 把 `split` 推到**代码块中间**：冻结区含一个永不闭合的 CodeBlock 且永不重解析，
+     * 表现为代码块尾部几行掉成块外段落、头部标签永远显示「生成中…」。
+     * 设备验收（T6）截图的 `fun main()` 掉出块外 + 「生成中…」不消失，正是这条。
+     * 修法：围栏判定**只保留 [MdParser.fenceInfo] 一份**，开栏认 info、闭栏要求
+     * 同字符、不短于开栏、且 info 为空白。
      */
     private fun safeSplit(text: String, resumed: Boolean = true): Int {
         var lineStart = if (resumed) scanAt else 0
         var fenceChar: Char? = if (resumed) scanFence else null
         var openFenceStart = if (resumed) scanFenceStart else -1
+        var openFenceLen = if (resumed) scanFenceLen else 0
         var prevLine = if (resumed) scanPrevLine else ""
         var split = if (resumed) scanSplit else 0
 
@@ -154,20 +170,26 @@ class MdStream {
             // 处理这一行之前的状态快照（见方法 KDoc 的「为什么必须回滚最后一行」）。
             val beforeFence = fenceChar
             val beforeFenceStart = openFenceStart
+            val beforeFenceLen = openFenceLen
             val beforePrevLine = prevLine
 
             val line = text.substring(lineStart, lineEnd)
 
-            val fence = fenceAt(line)
+            val fence = MdParser.fenceInfo(line)
             if (fence != null) {
                 if (fenceChar == null) {
-                    fenceChar = fence
+                    // 开栏：可带语言标签（```` ```kotlin ````），info 内容不重要。
+                    fenceChar = fence.char
                     openFenceStart = lineStart
-                } else if (fence == fenceChar) {
+                    openFenceLen = fence.len
+                } else if (fence.char == fenceChar && fence.info.isBlank() && fence.len >= openFenceLen) {
+                    // 闭栏：同字符、不短于开栏、后面没有 info。
                     fenceChar = null
                     openFenceStart = -1
+                    openFenceLen = 0
                     if (lineEnd < text.length) split = lineEnd + 1
                 }
+                // 其余围栏行（不同字符 / 更短 / 带 info）是代码块的内容，不是围栏。
             } else if (fenceChar == null && line.isBlank() && lineEnd < text.length && isSafeBoundary(prevLine)) {
                 split = lineEnd + 1
             }
@@ -180,6 +202,7 @@ class MdStream {
                 //  而这里 `lineEnd == text.length`，必然不成立。）
                 fenceChar = beforeFence
                 openFenceStart = beforeFenceStart
+                openFenceLen = beforeFenceLen
                 prevLine = beforePrevLine
                 break
             }
@@ -191,6 +214,7 @@ class MdStream {
         scanAt = lineStart
         scanFence = fenceChar
         scanFenceStart = openFenceStart
+        scanFenceLen = openFenceLen
         scanPrevLine = prevLine
         scanSplit = split
 
@@ -221,18 +245,6 @@ class MdStream {
             return false
         }
         return true
-    }
-
-    /** @return 裸围栏的字符（`` ` `` 或 `~`）；不是裸围栏则返回 null。 */
-    private fun fenceAt(line: String): Char? {
-        val trimmed = line.trimStart()
-        if (trimmed.isEmpty()) return null
-        val c = trimmed[0]
-        if (c != '`' && c != '~') return null
-        var n = 0
-        while (n < trimmed.length && trimmed[n] == c) n++
-        if (n < 3) return null
-        return if (trimmed.substring(n).isBlank()) c else null
     }
 
     private fun normalize(text: String): String =

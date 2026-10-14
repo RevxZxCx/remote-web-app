@@ -3,9 +3,11 @@ package com.revxzxcx.remotewebapp.ui.chat
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,14 +17,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -44,6 +49,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -56,6 +62,9 @@ import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
@@ -71,10 +80,12 @@ import com.revxzxcx.remotewebapp.core.session.ModelRef
 import com.revxzxcx.remotewebapp.core.session.PromptAttachment
 import com.revxzxcx.remotewebapp.core.session.SessionAttachmentRepository
 import com.revxzxcx.remotewebapp.core.session.ToolFilePaths
+import com.revxzxcx.remotewebapp.core.session.fromBase64
 import com.revxzxcx.remotewebapp.core.session.message
 import com.revxzxcx.remotewebapp.core.session.visibleAssistantBlocks
 import com.revxzxcx.remotewebapp.ui.common.CacheNotice
 import com.revxzxcx.remotewebapp.ui.common.ConnectionBanner
+import com.revxzxcx.remotewebapp.ui.common.decodeScaled
 import com.revxzxcx.remotewebapp.ui.files.FileTarget
 import com.revxzxcx.remotewebapp.ui.home.TimeText
 import com.revxzxcx.remotewebapp.ui.home.rememberNow
@@ -142,6 +153,15 @@ fun ChatScreen(
     // 进行的滚动（`scrollToItem` 是挂起函数），在高频 token 下表现为抖动甚至完全跟不上
     // （R006 P3-4）。文本增长改在同一个 effect 内用 `snapshotFlow` 收集——它天然按快照帧
     // 合并，一秒几十次 chunk 只会滚几次。
+    //
+    // 读的是组合里的 `state`（`collectAsState` 桥接出来的 Compose `State`），不是
+    // `viewModel.state.value`：`snapshotFlow` 只观察 Compose 快照系统里的对象，
+    // `MutableStateFlow` 不在其中，读它的原值会让这个 flow 只在建立时发射一次、此后再也不滚
+    // （`SnapshotFlowObservationTest` 把这条语义钉成了可执行契约）。
+    //
+    // 滚动用 [scrollToBottom] 而不是 `scrollToItem(lastIndex)`：后者只把最后一行的顶边
+    // 对齐视口顶边，而流式气泡一直在长高，于是最新的字永远在屏幕下面——这正是 T7 设备验收
+    // 看到的「生成时不自动往下滚」；用户手动下滚时它又会把气泡顶边弹回来，即「回弹到生成开头」。
     val itemCount = state.items.size
     val lastIndex = itemCount +
         (if (state.loadingMore) 1 else 0) +
@@ -149,7 +169,7 @@ fun ChatScreen(
     LaunchedEffect(listState, lastIndex) {
         if (lastIndex < 0) return@LaunchedEffect
         snapshotFlow { state.live?.text?.length ?: 0 }
-            .collect { if (atBottom) listState.scrollToItem(lastIndex) }
+            .collect { if (atBottom) listState.scrollToBottom(lastIndex) }
     }
 
     // 滚到顶时自动加载更早历史。
@@ -200,6 +220,7 @@ fun ChatScreen(
                 Composer(
                     draft = draft,
                     generating = state.generating,
+                    sending = state.sending,
                     pending = pending,
                     attachNotice = attachNotice,
                     onDraftChange = viewModel::onDraftChange,
@@ -559,6 +580,7 @@ private fun effortOf(model: com.revxzxcx.remotewebapp.core.session.CatalogModel,
 internal fun Composer(
     draft: String,
     generating: Boolean,
+    sending: Boolean,
     pending: List<PromptAttachment>,
     attachNotice: String?,
     onDraftChange: (String) -> Unit,
@@ -653,9 +675,9 @@ internal fun Composer(
                 )
                 Button(
                     onClick = onSend,
-                    enabled = draft.isNotBlank() || pending.isNotEmpty(),
+                    enabled = (draft.isNotBlank() || pending.isNotEmpty()) && !sending,
                     modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
-                ) { Text("发送") }
+                ) { Text(if (sending) "发送中" else "发送") }
             }
         }
     }
@@ -708,9 +730,12 @@ private fun PendingAttachmentsRow(
                 modifier = Modifier.widthIn(max = 220.dp),
             ) {
                 Row(
-                    modifier = Modifier.padding(start = 10.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
+                    modifier = Modifier.padding(start = 4.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // 图片给真缩略图，文件给一个图标占位——T5 设备验收：早先两种都是
+                    // 一行文字，用户完全看不出自己挂上去的是什么。
+                    PendingAttachmentThumb(item)
                     Text(
                         text = when (item.kind) {
                             PromptAttachment.Kind.IMAGE -> "图片 · ${item.name ?: "未命名"}"
@@ -718,6 +743,7 @@ private fun PendingAttachmentsRow(
                         },
                         style = MaterialTheme.typography.labelSmall,
                         maxLines = 1,
+                        modifier = Modifier.weight(1f, fill = false),
                     )
                     TextButton(
                         onClick = { onRemove(index) },
@@ -725,6 +751,88 @@ private fun PendingAttachmentsRow(
                     ) { Text("×") }
                 }
             }
+        }
+    }
+}
+
+/**
+ * 待发送附件的缩略图。
+ *
+ * 图片从 base64 现场解一张小图（[decodeScaled] 只按宽度下采样，缩略图给 96px 足够，
+ * 内存代价可以忽略）；解不出来时退成一个灰色方块而不是留白。文件用 `📎` 文字图标，
+ * 因为文件附件在发送前**只有回执**，本地没有可渲染的内容（D15：服务端没有读任意
+ * 本地文件的接口，`fileUploads/upload` 之后内容只在桌面端）。
+ */
+@Composable
+private fun PendingAttachmentThumb(item: PromptAttachment) {
+    val isImage = item.kind == PromptAttachment.Kind.IMAGE
+    val bitmap = produceState<ImageBitmap?>(
+        initialValue = null,
+        isImage,
+        item.data,
+    ) {
+        value = if (!isImage || item.data.isEmpty()) {
+            null
+        } else {
+            withContext(Dispatchers.Default) {
+                // 缩略图宽度 96px：屏幕上它只有 36dp 宽，2x 密度下 72px 已够，96 留余量。
+                decodeScaled(item.data.fromBase64(), maxWidth = 96)?.asImageBitmap()
+            }
+        }
+    }
+    Box(
+        modifier = Modifier
+            .padding(end = 6.dp)
+            .size(36.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center,
+    ) {
+        val current = bitmap.value
+        if (current != null) {
+            Image(
+                bitmap = current,
+                contentDescription = "附件预览",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        } else {
+            Text(
+                text = if (isImage) "图" else "📎",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * 滚到列表末尾，并让最后一行的**底部**贴住视口底部。
+ *
+ * 为什么不能只用 `scrollToItem(index)`：它把该行的**顶边**对齐到视口顶边。聊天页最后一行
+ * 是流式生成的助手气泡，高度随 token 不断增长，一旦超过一屏，`scrollToItem` 就把它的
+ * 开头钉在屏幕顶部——用户看到的是「生成内容停在自己开头、最新的字在屏幕外」，也就是
+ * T7 里说的「回弹到生成的开头」。
+ *
+ * 这里改成两步：先 `scrollToItem` 把行带进来，再按视口高度补滚，靠 `scrollBy` 自带的最大值
+ * 钳制收敛。收敛条件用「还能不能向前滚」而不是自己算 item 偏移，与 `LazyListItemInfo.offset`
+ * 的坐标系约定无关（那个约定在 Compose 版本间变过）。
+ *
+ * 用 [androidx.compose.foundation.MutatePriority.Default] 而不是用户手势的优先级：跟随滚动
+ * 不该抢走用户正在做的手势，但也不能被挂起的手势无限期挡住。
+ *
+ * `internal` 而不是 `private`：这是 T7 设备验收实测缺陷的回归守卫，必须能被渲染测试驱动。
+ */
+internal suspend fun LazyListState.scrollToBottom(index: Int) {
+    if (index < 0) return
+    scrollToItem(index)
+    scroll(MutatePriority.Default) {
+        var guard = 0
+        while (canScrollForward && guard++ < 4) {
+            val height = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
+            if (height <= 0) break
+            // 返回 0 表示已经到底/被钳住，再滚下去只是空转。
+            if (scrollBy(height.toFloat()) <= 0f) break
         }
     }
 }

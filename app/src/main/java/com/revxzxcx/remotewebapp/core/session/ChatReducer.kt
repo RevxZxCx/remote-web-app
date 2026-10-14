@@ -45,6 +45,13 @@ data class ChatUiState(
     val error: String? = null,
     /** 发送 / 中止失败。重试动作是重新发送，不是重启流。 */
     val sendError: String? = null,
+    /**
+     * 正在发送（`session/prompt` 在途）。
+     *
+     * T5 设备验收：没有这个标志时「发送」按钮在 RPC 期间一直是亮的，用户会反复点。
+     * 放进 reducer 状态而不是 `remember`：旋转屏幕后不该丢掉「正在发送」这个事实。
+     */
+    val sending: Boolean = false,
     /** 翻页（加载更早历史）失败。重试动作是重新翻页。 */
     val pageError: String? = null,
     /** 是否已成功收到过第一帧（用于区分「空会话」与「还没加载」）。 */
@@ -251,6 +258,16 @@ object ChatReducer {
             else -> state.committedSeq
         }
 
+        // 2) 模型选择。`model/selection` 事件由 session controller 在**任何一侧**改模型时
+        //    追加（桌面端与手机端走同一条路），data 就是 {provider, model, reasoningEffort?}。
+        //    不收它就只能等下一次快照才同步——用户看到的就是「桌面端改了模型，手机端不动，
+        //    退出会话重进才看到」（T4 实测）。这里与 selectModel 的乐观更新汇合到同一字段。
+        val model = if (type == "model/selection") {
+            ModelCatalogParser.parseSelectionValue(frame.envelope?.get("data")) ?: state.model
+        } else {
+            state.model
+        }
+
         if (item == null || item.isInvisible()) {
             // 不占行的东西：纯噪声事件（`step/end` 等），或「只承载工具调用」的助手消息。
             //
@@ -268,6 +285,7 @@ object ChatReducer {
                 cursor = if (seq >= 0L) maxOf(state.cursor, seq) else state.cursor,
                 ready = true,
                 loading = false,
+                model = model,
             )
         }
 
@@ -284,6 +302,7 @@ object ChatReducer {
             loading = false,
             cursor = if (seq >= 0L) maxOf(state.cursor, seq) else state.cursor,
             generating = generating,
+            model = model,
             // 真的渲染出内容了才清错误条；否则会把重连提示一并抹掉。
             error = null,
         )

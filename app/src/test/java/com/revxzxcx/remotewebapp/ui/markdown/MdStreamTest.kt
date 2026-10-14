@@ -39,6 +39,13 @@ class MdStreamTest {
         "段落续行" to "para\n  continued\n\nnext\n",
         "任务列表" to "- [ ] todo\n- [x] done\n- plain\n",
         "CRLF 文档" to "# A\r\n\r\ntext\r\n\r\n- item\r\n",
+        // M5-10 实测缺陷：带语言标签的围栏内部有空行。早先 safeSplit 的 fenceAt 只认裸围栏，
+        // ```kotlin 被判成普通行 → 代码块内的空行被当成安全边界 → 冻结线切进代码块中间。
+        "围栏内含空行" to "before\n\n```kotlin\nval x = 1\n\nfun f() = x\n```\nafter\n",
+        "围栏内含空行且前面无空行" to "```kotlin\nval x = 1\n\nfun f() = x\n```\n",
+        "波浪线围栏含语言与空行" to "~~~kotlin\nval x = 1\n\nfun f() = x\n~~~\n",
+        "围栏内含更短的同类围栏行" to "```kotlin\nval x = 1\n``\n\nfun f() = x\n```\n",
+        "围栏内含不同字符的围栏行" to "```kotlin\nval x = 1\n~~~\n\nfun f() = x\n```\n",
     )
 
     // ------------------------------------------------------------ 核心不变量
@@ -150,6 +157,53 @@ class MdStreamTest {
         assertTrue("必须是 CodeBlock，实际 ${block::class.simpleName}", block is MdBlock.CodeBlock)
         assertEquals("len=5 时代码块内容", "x", (block as MdBlock.CodeBlock).code)
         assertFalse("尚未闭合", block.closed)
+    }
+
+    /**
+     * 回归：**带语言标签的开栏行必须被认成围栏，代码块内部的空行不能当安全边界**。
+     *
+     * 这是 M5-10 设备验收（T6）抓到的真缺陷，比 M5-3 那条更隐蔽：早先 `safeSplit` 自己写了
+     * 一份 `fenceAt`，只认**裸**围栏（```` ``` ```` 后面必须只有空白），于是 ```` ```kotlin ````
+     * 被判成普通行，状态机全程认为「不在围栏内」——代码块内部一出现空行就命中「围栏外空行」
+     * 分支，把 `split` 推到**代码块中间**。冻结区因此含一个永不闭合的 CodeBlock 且永不重解析：
+     * 后续的代码行进块外变成普通段落，头部标签永远显示「生成中…」。
+     *
+     * 修法：围栏判定只保留 [MdParser.fenceInfo] 一份——开栏认 info，闭栏要求同字符、
+     * 不短于开栏、且 info 为空白。
+     */
+    @Test
+    fun `带语言标签的围栏内部空行不会把冻结线切进代码块`() {
+        val doc = "before\n\n```kotlin\nval x = 1\n\nfun f() = x\n```\nafter\n"
+        val stream = MdStream()
+        for (end in 1..doc.length) {
+            val prefix = doc.substring(0, end)
+            assertSameBlocks(
+                expected = MdParser.parse(prefix),
+                actual = stream.update(prefix),
+                where = "围栏内含空行 len=$end",
+            )
+        }
+        // 关键节点：走到代码块内部那个空行之后，绝不能多出一个段落。
+        val insideBlank = "before\n\n```kotlin\nval x = 1\n\n"
+        val blocks = stream.update(insideBlank)
+        assertEquals("空行之后仍应是 2 块", 2, blocks.size)
+        val code = blocks[1]
+        assertTrue("第二块必须是 CodeBlock，实际 ${code::class.simpleName}", code is MdBlock.CodeBlock)
+        assertEquals("代码必须还在代码块里", "val x = 1\n\n", (code as MdBlock.CodeBlock).code)
+    }
+
+    @Test
+    fun `围栏闭合后生成的代码不会掉到块外`() {
+        // T6 截图的形状：代码块闭合后又来一段普通文本，代码必须整块留在 CodeBlock 里。
+        val stream = MdStream()
+        val doc = "```kotlin\nfun f() = 1\n```\nafter\n"
+        stream.update(doc)
+        val blocks = stream.update(doc)
+        assertEquals(2, blocks.size)
+        val code = blocks[0]
+        assertTrue(code is MdBlock.CodeBlock)
+        assertTrue("闭合后不能再显示生成中", (code as MdBlock.CodeBlock).closed)
+        assertEquals("fun f() = 1", code.code)
     }
 
     @Test

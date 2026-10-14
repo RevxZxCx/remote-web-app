@@ -197,6 +197,91 @@ fun ImageRejection.message(): String = when (this) {
     is ImageRejection.UnsupportedType -> "不支持 $mediaType 格式的图片。"
 }
 
+/**
+ * 按**字节**嗅探一张图的真实类型。
+ *
+ * 为什么不能只信 `contentResolver.getType(uri)`（T5 设备验收实测缺陷）：桌面端的
+ * `attachmentService` 会自己按魔数再嗅一遍，并与 `mediaType` 比对，不一致就抛
+ * `session/attachment-invalid: Declared image type does not match its bytes.`
+ * ——一条用户完全看不懂的英文。照片选择器/provider 给出的 MIME 有几种常见的不准：
+ *
+ * - 某些相册把 HEIC/HEIF 的照片按 `image/jpeg` 报出来；
+ * - 从文件管理器选图时拿到 `application/octet-stream`；
+ * - 文件被改过扩展名（`x.png` 其实是 JPEG）。
+ *
+ * 所以**嗅探结果优先于声明值**：认得出就按真实类型发，认不出才退回声明值交给
+ * [ImageLimits.validateImage] 的白名单。
+ */
+internal sealed interface SniffedImage {
+    /** 认得，而且是桌面端接受的四种之一。 */
+    data class Supported(val mediaType: String) : SniffedImage
+
+    /** 认得，但桌面端不收（[label] 是给人看的名字）。 */
+    data class Unsupported(val label: String) : SniffedImage
+
+    /** 认不出来：太短、不是图片、或格式未知。 */
+    data object Unknown : SniffedImage
+}
+
+/**
+ * 魔数嗅探。实现刻意保持「只读前 16 个字节」——相册里的大图动辄几十 MB，
+ * 而判定只需要文件头。
+ */
+internal fun sniffImage(bytes: ByteArray): SniffedImage {
+    if (bytes.size < 12) return SniffedImage.Unknown
+    // ISO-BMFF 容器（HEIC/HEIF/AVIF 都是）：字节 0..3 是大端长度，4..7 是 "ftyp"，
+    // 8..11 是品牌。所以判 `bytes[4..7] == "ftyp"` 而不是看扩展名。
+    if (
+        bytes[0] == 0x00.toByte() && bytes[1] == 0x00.toByte() && bytes[2] == 0x00.toByte() &&
+        bytes[4] == 'f'.code.toByte() && bytes[5] == 't'.code.toByte() &&
+        bytes[6] == 'y'.code.toByte() && bytes[7] == 'p'.code.toByte()
+    ) {
+        val brand = String(bytes, 8, 4, Charsets.US_ASCII).lowercase(java.util.Locale.ROOT)
+        return when (brand) {
+            "avif", "avis" -> SniffedImage.Unsupported("AVIF")
+            else -> SniffedImage.Unsupported("HEIC/HEIF")
+        }
+    }
+    if (startsWith(bytes, byteArrayOf(0x47, 0x49, 0x46, 0x38, 0x37, 0x61)) ||
+        startsWith(bytes, byteArrayOf(0x47, 0x49, 0x46, 0x38, 0x39, 0x61))
+    ) {
+        return SniffedImage.Supported("image/gif")
+    }
+    if (startsWith(bytes, byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))) {
+        return SniffedImage.Supported("image/png")
+    }
+    if (startsWith(bytes, byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte()))) {
+        return SniffedImage.Supported("image/jpeg")
+    }
+    if (startsWith(bytes, byteArrayOf(0x42, 0x4D))) {
+        return SniffedImage.Unsupported("BMP")
+    }
+    if (startsWith(bytes, byteArrayOf(0x49, 0x49, 0x2A, 0x00)) ||
+        startsWith(bytes, byteArrayOf(0x4D, 0x4D, 0x00, 0x2A))
+    ) {
+        return SniffedImage.Unsupported("TIFF")
+    }
+    if (startsWith(bytes, byteArrayOf(0x38, 0x42, 0x50, 0x53, 0x00, 0x01))) {
+        return SniffedImage.Unsupported("Photoshop PSD")
+    }
+    // RIFF 容器：前 4 字节 "RIFF"，第 8..12 字节是格式。WebP 之外还有 WAV/AVI。
+    if (startsWith(bytes, byteArrayOf(0x52, 0x49, 0x46, 0x46))) {
+        val form = String(bytes, 8, 4, Charsets.US_ASCII).uppercase(java.util.Locale.ROOT)
+        return if (form == "WEBP") {
+            SniffedImage.Supported("image/webp")
+        } else {
+            SniffedImage.Unsupported("RIFF($form)")
+        }
+    }
+    return SniffedImage.Unknown
+}
+
+private fun startsWith(bytes: ByteArray, prefix: ByteArray): Boolean {
+    if (bytes.size < prefix.size) return false
+    for (i in prefix.indices) if (bytes[i] != prefix[i]) return false
+    return true
+}
+
 /** 把字节数格式化成 `1.5 MB` 这样的人话。 */
 fun formatBytes(bytes: Long): String {
     if (bytes < 1024) return "$bytes B"

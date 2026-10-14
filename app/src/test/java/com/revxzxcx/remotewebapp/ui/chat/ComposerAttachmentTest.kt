@@ -49,6 +49,8 @@ class ComposerAttachmentTest {
 
     private fun setComposer(
         draft: String = "",
+        generating: Boolean = false,
+        sending: Boolean = false,
         pending: List<PromptAttachment> = emptyList(),
         attachNotice: String? = null,
         onRemove: (Int) -> Unit = {},
@@ -57,7 +59,8 @@ class ComposerAttachmentTest {
         compose.setContent {
             Composer(
                 draft = draft,
-                generating = false,
+                generating = generating,
+                sending = sending,
                 pending = pending,
                 attachNotice = attachNotice,
                 onDraftChange = {},
@@ -74,6 +77,17 @@ class ComposerAttachmentTest {
     fun `只有文字没有附件时发送可用`() {
         setComposer(draft = "你好")
         compose.onNodeWithText("发送").assertIsEnabled()
+    }
+
+    @Test
+    fun `发送在途中按钮进入加载态且不可再点`() {
+        // T5 设备验收：发送是网络调用，期间按钮一直亮着，用户会反复点。
+        var calls = 0
+        setComposer(draft = "你好", sending = true, onSend = { calls++ })
+        compose.onNodeWithText("发送中").assertIsNotEnabled()
+        // 不可点的节点上 performClick 是空操作，但守卫是 Button 自己的 enabled。
+        compose.onNodeWithText("发送中").performClick()
+        assertEquals("在途期间不该再发一次", 0, calls)
     }
 
     @Test

@@ -391,9 +391,18 @@ object MdParser {
 
     // ------------------------------------------------------------------ 小块
 
-    private data class Fence(val char: Char, val len: Int, val info: String)
+    /**
+     * 围栏行信息。
+     *
+     * **internal 是为了让 [MdStream] 复用同一套判定**：M5-10 修的真缺陷就是
+     * `MdStream` 自己写了一份「只认裸围栏」的 `fenceAt`，于是 ```` ```kotlin ````
+     * 这种带语言标签的开栏行被当成普通行，代码块内部的空行就被误判成安全块边界，
+     * 冻结线切进代码块中间——尾部代码掉成段落、「生成中…」永驻。
+     * 围栏判定只能有一份，否则两边必然漂移。
+     */
+    internal data class Fence(val char: Char, val len: Int, val info: String)
 
-    private fun fenceInfo(line: String): Fence? {
+    internal fun fenceInfo(line: String): Fence? {
         val trimmed = line.trimStart()
         if (trimmed.isEmpty()) return null
         val c = trimmed[0]

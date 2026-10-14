@@ -124,6 +124,18 @@ object ModelCatalogParser {
         return obj[which].asObject()?.let(::parseRef)
     }
 
+    /**
+     * 解析**裸的**选择对象 `{provider, model, reasoningEffort?}`。
+     *
+     * 这是 `model/selection` 事件的 `data` 形状——桌面端或手机端任何一侧改模型，
+     * session controller 都会往会话日志里追加这样一条事件
+     * （`model-selection-projection.js:22-27`：`apply` 收到 `model/selection` 就把
+     * `event.data` 记成 `pending`）。不收它就只能等下一次快照才同步，
+     * 用户看到的就是「桌面端改了模型，手机端不动，退出重进才对」。
+     */
+    fun parseSelectionValue(element: JsonElement?): ModelRef? =
+        (element as? JsonObject)?.let(::parseRef)
+
     private fun parseRef(obj: JsonObject): ModelRef? {
         val provider = obj.string("provider")?.takeIf { it.isNotBlank() } ?: return null
         val model = obj.string("model")?.takeIf { it.isNotBlank() } ?: return null

@@ -305,4 +305,83 @@ class PromptAttachmentTest {
         mediaType = "image/png",
         data = "AAAA",
     )
+
+    // ------------------------------------------------------------ 魔数嗅探（T5）
+
+    /**
+     * T5 设备验收实测缺陷的回归：只信 `contentResolver.getType(uri)` 会让桌面端回
+     * `session/attachment-invalid: Declared image type does not match its bytes.`
+     *
+     * 所以发送前必须按字节嗅探，**嗅探结果优先于声明值**。
+     */
+
+    @Test
+    fun `四种受支持格式都能被字节认出来`() {
+        assertEquals("image/png", sniffImage(pngHeader()).let { (it as SniffedImage.Supported).mediaType })
+        assertEquals("image/jpeg", sniffImage(jpegHeader()).let { (it as SniffedImage.Supported).mediaType })
+        assertEquals("image/gif", sniffImage(gifHeader()).let { (it as SniffedImage.Supported).mediaType })
+        assertEquals("image/webp", sniffImage(webpHeader()).let { (it as SniffedImage.Supported).mediaType })
+    }
+
+    @Test
+    fun `声明成 jpeg 其实是 png 时以字节为准`() {
+        // 这条就是用户在设备上撞到的形状：相册/provider 报错 MIME，桌面端按字节嗅探。
+        val sniffed = sniffImage(pngHeader())
+        assertTrue("必须是受支持的那一支", sniffed is SniffedImage.Supported)
+        assertEquals("image/png", (sniffed as SniffedImage.Supported).mediaType)
+    }
+
+    @Test
+    fun `HEIC 与 AVIF 被认成不受支持的格式而不是放过`() {
+        // HEIC 在 ISO-BMFF 容器里：4 字节长度 + "ftyp" + 品牌。
+        val heic = byteArrayOf(0, 0, 0, 24) + "ftypheic".toByteArray(Charsets.US_ASCII) + ByteArray(8)
+        assertTrue(sniffImage(heic) is SniffedImage.Unsupported)
+
+        val avif = byteArrayOf(0, 0, 0, 28) + "ftypavif".toByteArray(Charsets.US_ASCII) + ByteArray(8)
+        assertTrue(sniffImage(avif) is SniffedImage.Unsupported)
+    }
+
+    @Test
+    fun `BMP 与 TIFF 也被认成不受支持的格式`() {
+        assertTrue(sniffImage("BM".toByteArray(Charsets.US_ASCII) + ByteArray(16)) is SniffedImage.Unsupported)
+        // "II" 是 little-endian TIFF，"MM" 是 big-endian。
+        assertTrue(sniffImage(byteArrayOf(0x49, 0x49, 0x2A, 0x00) + ByteArray(12)) is SniffedImage.Unsupported)
+        assertTrue(sniffImage(byteArrayOf(0x4D, 0x4D, 0x00, 0x2A) + ByteArray(12)) is SniffedImage.Unsupported)
+    }
+
+    @Test
+    fun `RIFF 容器里只有 WEBP 是受支持的`() {
+        // 前 4 字节 "RIFF" + 4 字节长度 + "WEBP"。WAV/AVI 也是 RIFF，但不该放行。
+        val riffWav = "RIFF".toByteArray(Charsets.US_ASCII) + ByteArray(4) +
+            "WAVEfmt ".toByteArray(Charsets.US_ASCII) + ByteArray(8)
+        assertTrue(sniffImage(riffWav) is SniffedImage.Unsupported)
+    }
+
+    @Test
+    fun `太短或不是图片的字节返回 Unknown`() {
+        assertEquals(SniffedImage.Unknown, sniffImage(ByteArray(0)))
+        assertEquals(SniffedImage.Unknown, sniffImage(ByteArray(4)))
+        assertEquals(SniffedImage.Unknown, sniffImage("这不是图片".toByteArray(Charsets.UTF_8) + ByteArray(64)))
+        // Unknown 时调用方应退回声明值，交给 validateImage 的白名单说话。
+    }
+
+    @Test
+    fun `JPG 扩展名其实是 PNG 也能纠正`() {
+        // 文件被改过扩展名（x.jpg 其实是 PNG）——`getType` 会报 image/jpeg。
+        val sniffed = sniffImage(pngHeader())
+        assertEquals("image/png", (sniffed as SniffedImage.Supported).mediaType)
+    }
+
+    private fun pngHeader(): ByteArray =
+        byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) +
+            "IHDR".toByteArray(Charsets.US_ASCII) + ByteArray(8)
+
+    private fun jpegHeader(): ByteArray =
+        byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte()) + "JFIF".toByteArray(Charsets.US_ASCII) + ByteArray(8)
+
+    private fun gifHeader(): ByteArray =
+        "GIF89a".toByteArray(Charsets.US_ASCII) + ByteArray(10)
+
+    private fun webpHeader(): ByteArray =
+        "RIFF".toByteArray(Charsets.US_ASCII) + ByteArray(4) + "WEBPVP8 ".toByteArray(Charsets.US_ASCII)
 }

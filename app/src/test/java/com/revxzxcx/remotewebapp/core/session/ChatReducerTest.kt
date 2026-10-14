@@ -57,6 +57,9 @@ class ChatReducerTest {
             item = parser.toChatItem(event),
             turn = event.data.longOrNull("turn"),
             step = event.data.longOrNull("step"),
+            // 与生产一致：`ChatFrameParser.eventFrame` 把原始信封一路带出来，
+            // reducer 的 `model/selection` 处理要从它上面取 `data`。
+            envelope = json,
         )
     }
 
@@ -67,6 +70,90 @@ class ChatReducerTest {
         assertTrue(state.items.isEmpty())
         assertNull(state.live)
         assertFalse(state.ready)
+    }
+
+    // ---------------------------------------------------- 模型选择（T4）
+
+    /**
+     * 回归：**桌面端改模型也要同步到手机上**。
+     *
+     * `model/selection` 由 session controller 的 `selectForNextRequest` 追加
+     * （`agent.js:349-352`），桌面端与手机端走同一条路。早先 reducer 只从**快照投影**
+     * 读模型，于是一条实时事件被当成噪声丢掉——用户看到的就是「桌面端改了模型，
+     * 手机端不动，退出会话重进才看到」（T4 设备验收实测）。
+     */
+    @Test
+    fun `model-selection 事件更新当前模型`() {
+        var state = ChatUiState()
+        state = ChatReducer.reduce(state, event(1, "hi"))
+        assertNull("起初没有模型", state.model)
+
+        state = ChatReducer.reduce(
+            state,
+            parse(
+                """
+                {"type":"model/selection","seq":2,"time":2000,
+                 "data":{"provider":"deepseek-official","model":"deepseek-flash","reasoningEffort":"high"}}
+                """.trimIndent(),
+            ),
+        )
+        assertNotNull(state.model)
+        assertEquals("deepseek-official", state.model?.provider)
+        assertEquals("deepseek-flash", state.model?.model)
+        assertEquals("high", state.model?.reasoningEffort)
+        // 噪声事件不占行，但游标必须推进（R006 P3-15 的同类要求）。
+        assertEquals(2L, state.cursor)
+        assertEquals("不该多出卡片", 1, state.items.size)
+    }
+
+    @Test
+    fun `model-selection 不带推理档时档位是 null`() {
+        var state = ChatUiState()
+        state = ChatReducer.reduce(
+            state,
+            parse(
+                """
+                {"type":"model/selection","seq":1,"time":1000,
+                 "data":{"provider":"stepfun","model":"step-5-preview"}}
+                """.trimIndent(),
+            ),
+        )
+        assertEquals("stepfun", state.model?.provider)
+        assertNull("没有档位就不能编一个", state.model?.reasoningEffort)
+    }
+
+    @Test
+    fun `畸形的 model-selection 不破坏状态`() {
+        var state = ChatUiState(model = ModelRef("stepfun", "step-5-preview"))
+        state = ChatReducer.reduce(
+            state,
+            parse(
+                """
+                {"type":"model/selection","seq":1,"time":1000,"data":{"provider":"","model":""}}
+                """.trimIndent(),
+            ),
+        )
+        assertEquals("解析不出来就保持原值", "stepfun", state.model?.provider)
+    }
+
+    @Test
+    fun `快照里的模型不会被后面的噪声事件清掉`() {
+        var state = ChatUiState()
+        state = ChatReducer.reduce(
+            state,
+            ChatFrame.Snapshot(
+                items = emptyList(),
+                cursor = 5,
+                hasMore = false,
+                baseline = emptyList(),
+                title = null,
+                cwd = null,
+                model = ModelRef("deepseek-official", "deepseek-v41-pro"),
+            ),
+        )
+        assertEquals("deepseek-v41-pro", state.model?.model)
+        state = ChatReducer.reduce(state, event(6, "hi"))
+        assertEquals("普通事件不动模型", "deepseek-v41-pro", state.model?.model)
     }
 
     @Test
