@@ -33,7 +33,7 @@ class ChatFrameParserTest {
                  "cursor":42,
                  "records":[
                    {"type":"event","event":{"type":"user/message","seq":1,"time":100,
-                     "data":{"content":[{"type":"text","text":"早"}]}}},
+                     "data":{"source":{"kind":"user"},"content":[{"type":"text","text":"早"}]}}},
                    {"type":"event","event":{"type":"assistant/message","seq":2,"time":200,
                      "data":{"turn":0,"step":0,
                        "message":{"id":"m","role":"assistant",
@@ -60,11 +60,11 @@ class ChatFrameParserTest {
                 {"type":"snapshot","cursor":9,
                  "records":[
                    {"type":"event","event":{"type":"user/message","seq":5,"time":1,
-                     "data":{"content":[{"type":"text","text":"b"}]}}},
+                     "data":{"source":{"kind":"user"},"content":[{"type":"text","text":"b"}]}}},
                    {"type":"event","event":{"type":"user/message","seq":3,"time":1,
-                     "data":{"content":[{"type":"text","text":"a"}]}}},
+                     "data":{"source":{"kind":"user"},"content":[{"type":"text","text":"a"}]}}},
                    {"type":"event","event":{"type":"user/message","seq":5,"time":1,
-                     "data":{"content":[{"type":"text","text":"b again"}]}}}],
+                     "data":{"source":{"kind":"user"},"content":[{"type":"text","text":"b again"}]}}}],
                  "hasMore":false,
                  "projections":{"asOfSeq":9,"values":{}}}
                 """.trimIndent(),
@@ -90,7 +90,7 @@ class ChatFrameParserTest {
             element(
                 """
                 {"type":"event","event":{"type":"user/message","seq":7,"time":1,
-                  "data":{"content":[{"type":"text","text":"hi"}]}}}
+                  "data":{"source":{"kind":"user"},"content":[{"type":"text","text":"hi"}]}}}
                 """.trimIndent(),
             ),
         )
@@ -216,7 +216,7 @@ class ChatFrameParserTest {
                 """
                 {"records":[
                    {"type":"event","event":{"type":"user/message","seq":1,"time":1,
-                     "data":{"content":[{"type":"text","text":"更早"}]}}}],
+                     "data":{"source":{"kind":"user"},"content":[{"type":"text","text":"更早"}]}}}],
                  "hasMore":true}
                 """.trimIndent(),
             ),
@@ -239,7 +239,7 @@ class ChatFrameParserTest {
             element(
                 """
                 [{"type":"event","event":{"type":"user/message","seq":1,"time":1,
-                   "data":{"content":[{"type":"text","text":"ok"}]}}},
+                   "data":{"source":{"kind":"user"},"content":[{"type":"text","text":"ok"}]}}},
                  {"notAnEvent":true}]
                 """.trimIndent(),
             ),
@@ -250,5 +250,115 @@ class ChatFrameParserTest {
     @Test
     fun `records 接受 null`() {
         assertTrue(parser.records(null).isEmpty())
+    }
+
+    // ------------------------------------------------------------ R012 P2-A 回归
+    //
+    // `recordEnvelopes` 一度按「能不能渲染成卡片」过滤，把 `turn/start`、`step/end`
+    // 这些不占行的事件也挡在缓存外。后果是 `windowMinSeq` 退化成「首个可渲染事件的
+    // seq」，与条目最小 seq 重合，重连合并时旧缓存里 seq 低于新窗口起点的条目会被
+    // 判成「窗口之外的旧历史」而 prepend 回列表——升级场景下注入物复活。
+    //
+    // 判据必须收窄成「只挡注入的 user/message」，turn 系列照旧进 envelopes。
+
+    /** 构造一段含「不可渲染事件 + 真实用户消息 + 注入用户消息」的 records。 */
+    private fun cacheableRecords() = element(
+        """
+        [{"type":"event","event":{"type":"turn/start","seq":10,"time":1000,"data":{"turn":1}}},
+         {"type":"event","event":{"type":"user/message","seq":11,"time":1100,
+           "data":{"source":{"kind":"user"},"content":[{"type":"text","text":"我发的"}]}}},
+         {"type":"event","event":{"type":"user/message","seq":12,"time":1200,
+           "data":{"source":{"kind":"time-context"},
+                   "content":[{"type":"text","text":"Time sampled while preparing turn 1, step 1: ..."}]}}},
+         {"type":"event","event":{"type":"step/end","seq":13,"time":1300,"data":{"turn":1,"step":0}}}]
+        """.trimIndent(),
+    )
+
+    @Test
+    fun `recordEnvelopes 保留不可渲染的 turn 与 step 事件`() {
+        val envelopes = parser.recordEnvelopes(cacheableRecords())
+        val types = envelopes.map { (it as JsonObject)["type"]?.toString()?.trim('"') }
+        // `turn/start` 与 `step/end` 都渲染不出卡片，但必须留在 envelopes 里：
+        // windowMinSeq 靠它们兜住「服务端窗口内夹带非渲染事件」的旧条目残留。
+        assertTrue(types.contains("turn/start"))
+        assertTrue(types.contains("step/end"))
+    }
+
+    @Test
+    fun `recordEnvelopes 挡掉注入的 user-message 但保留真实用户消息`() {
+        val envelopes = parser.recordEnvelopes(cacheableRecords())
+        val texts: List<String?> = envelopes.map { envelope ->
+            val data = (envelope as JsonObject)["data"] as? JsonObject
+            val content = data?.get("content") as? kotlinx.serialization.json.JsonArray
+            content
+                ?.mapNotNull { block ->
+                    (block as? JsonObject)?.get("text")?.toString()?.trim('"')
+                }
+                ?.joinToString("\n")
+        }
+        assertTrue(texts.contains("我发的"))
+        assertFalse(texts.any { it?.startsWith("Time sampled") == true })
+        assertEquals(3, envelopes.size)
+    }
+
+    @Test
+    fun `snapshot 的 windowMinSeq 由全部可解析事件决定而不是可渲染事件`() {        val frame = parser.parse(
+            element(
+                """
+                {"type":"snapshot",
+                 "header":{"version":1,"id":"session-1","createdAt":1,"cwd":"F:\\bot","isSeeded":true},
+                 "cursor":13,
+                 "records":[
+                   {"type":"event","event":{"type":"user/message","seq":11,"time":1100,
+                     "data":{"source":{"kind":"user"},"content":[{"type":"text","text":"我发的"}]}}},
+                   {"type":"event","event":{"type":"turn/start","seq":10,"time":1000,"data":{"turn":1}}}],
+                 "hasMore":true,
+                 "projections":{"asOfSeq":13,"values":{}}}
+                """.trimIndent(),
+            ),
+        ) as ChatFrame.Snapshot
+        // 若按渲染性过滤，windowMinSeq 会变成 11（首个可渲染事件），turn/start 的 10 丢失。
+        assertEquals(10L, frame.windowMinSeq)
+    }
+
+    // ---------------------------------------------------- R012 P2-B 回归
+    //
+    // 实时路径（`ChatViewModel.envelopesOf` 的 `ChatFrame.Event` 分支）必须与快照路径
+    // 共用同一条判据。只修快照路径的话，缓存预算只在「打开会话那一瞬间」生效，
+    // 挂机期间服务端推进的事件仍会把注入物逐条写进去——而这件事在 UI 上完全看不出来。
+
+    private fun envelope(text: String) = obj(text)
+
+    @Test
+    fun `cacheable 对已取出的信封同样只挡注入的 user-message`() {
+        val envelopes = listOf(
+            envelope(
+                """{"type":"turn/start","seq":1,"time":1,"data":{"turn":1}}""",
+            ),
+            envelope(
+                """{"type":"user/message","seq":2,"time":1,
+                    "data":{"source":{"kind":"user"},
+                            "content":[{"type":"text","text":"我发的"}]}}""",
+            ),
+            envelope(
+                """{"type":"user/message","seq":3,"time":1,
+                    "data":{"source":{"kind":"time-context"},
+                            "content":[{"type":"text","text":"Time sampled ..."}]}}""",
+            ),
+        )
+        val kept = parser.cacheable(envelopes)
+        val seqs = kept.map { it["seq"].toString().toLong() }
+        assertEquals(listOf(1L, 2L), seqs)
+    }
+
+    @Test
+    fun `cacheable 接受畸形信封而不抛`() {
+        val kept = parser.cacheable(
+            listOf(
+                envelope("""{"noType":true}"""),
+                envelope("""{"type":"user/message"}"""),
+            ),
+        )
+        assertTrue(kept.isEmpty())
     }
 }

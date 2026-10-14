@@ -1,4 +1,4 @@
-package com.revxzxcx.remotewebapp
+package com.revxzxcx.remotewebapp.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme

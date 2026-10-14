@@ -209,17 +209,43 @@ class ChatFrameParser(
     /**
      * 从 `[{type:'event',event}]` 里取出**原始事件信封**，供离线缓存落盘。
      *
-     * 只保留能解析出 `{type,seq,time,data}` 的对象：缓存里的每一行都要能被
-     * [SessionEventParser] 原样读回来，塞进无法解析的东西只会在读取时被丢掉。
+     * 判据是 [SessionEventParser.isCacheable]：**注入的 `user/message` 不写，其余全写**。
+     *
+     * 不把注入物写进缓存的理由：`user/message` 里只有 `source.kind === 'user'` 的才会渲染
+     * （见 [SessionEventParser] 的 `userItem` KDoc），其余 187/227 是注入物，其中
+     * `time-context` 一条（约每 10 分钟一次）就在真实会话里占到 141 条。不在这里挡掉，
+     * 它们会占满 `DshCache` 的 `MESSAGE_CACHE_LIMIT`（600 条）预算，把真正的对话挤出缓存。
+     *
+     * ⚠️ **不能**按「能不能渲染成卡片」过滤：`turn/start`、`step/end` 这类事件解析不出
+     * 卡片，却是 [windowMinSeq] 的原料。按渲染性过滤会让它退化成「首个可渲染事件的 seq」，
+     * 旧缓存里 seq 低于新窗口起点的条目就会被误判成窗口外的旧历史而 prepend 回列表
+     * （R012 P2-A）。同理，缓存读回时这些行会被 [CacheMappers.decodeEnvelope] 自然滤掉，
+     * 写进去不会污染 UI。
      */
     fun recordEnvelopes(element: JsonElement?): List<JsonObject> {
         val array = element as? JsonArray ?: return emptyList()
         return array.mapNotNull { entry ->
             val wrapper = entry as? JsonObject ?: return@mapNotNull null
             val event = wrapper["event"] as? JsonObject ?: return@mapNotNull null
-            event.takeIf { events.parseEvent(it) != null }
+            val parsed = events.parseEvent(event) ?: return@mapNotNull null
+            event.takeIf { events.isCacheable(parsed) }
         }
     }
+
+    /**
+     * 从一批**已经取出的**信封里挑出可缓存的。
+     *
+     * 与 [recordEnvelopes] 是同一条判据（[SessionEventParser.isCacheable]），只是输入形态
+     * 不同：实时路径（`ChatViewModel.envelopesOf` 的 `ChatFrame.Event` 分支）每次只有一条
+     * 信封，没有 `[{type:'event',event}]` 的外壳。
+     *
+     * 抽成公开函数是为了让实时路径也能被单测覆盖：快照路径挡了注入物、实时路径不挡，
+     * 缓存预算目标就只完成一半（R012 P2-B），而这件事在 UI 上完全看不出来。
+     */
+    fun cacheable(envelopes: List<JsonObject>): List<JsonObject> =
+        envelopes.filter { envelope ->
+            events.parseEvent(envelope)?.let { events.isCacheable(it) } == true
+        }
 
     /**
      * 解析一条 `event` 帧。

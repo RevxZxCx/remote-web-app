@@ -10,6 +10,7 @@ import androidx.compose.runtime.getValue
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.revxzxcx.remotewebapp.ui.AppRoot
+import com.revxzxcx.remotewebapp.ui.theme.DshAssistantTheme
 
 /**
  * 唯一 Activity。

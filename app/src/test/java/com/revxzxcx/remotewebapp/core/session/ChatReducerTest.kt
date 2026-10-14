@@ -26,19 +26,31 @@ class ChatReducerTest {
     /**
      * 造一条 `user/message` 帧。
      *
+     * `source.kind` 恒为 `user`：只有这个 kind 会被 [SessionEventParser] 渲染成用户
+     * 气泡（R012 的来源过滤），这里必须显式带上，否则整批 reducer 用例会静默拿到
+     * `item = null` 而断言「消息条数」的用例全部失粘。
+     *
      * @param rpcId 消息的 `source.rpcId`。**排队相关的用例必须传**，而且要跟
      *   [echo] 生成的 `rpcId` 对上——`ChatReducer.dropDispatched` 靠它把
      *   「服务端取出了我们哪一条排队消息」精确匹配上，匹配不上就当作
      *   「别人（桌面端）发的消息」而不动队列。
      */
-    private fun event(seq: Long, text: String = "x", rpcId: String? = null): ChatFrame.Event =
-        parse(
+    private fun event(seq: Long, text: String = "x", rpcId: String? = null): ChatFrame.Event {
+        // source 的 JSON 单独拼：Kotlin 原始字符串里嵌带引号的字符串字面量会让解析器
+        // 报「Literals must be surrounded by whitespace」（本项目踩过）。
+        val source = if (rpcId == null) {
+            """{"kind":"user"}"""
+        } else {
+            """{"kind":"user","rpcId":"$rpcId"}"""
+        }
+        return parse(
             """
             {"type":"user/message","seq":$seq,"time":${seq * 1000},
-             "data":{"content":[{"type":"text","text":"$text"}]
-              ${if (rpcId == null) "" else ""","source":{"rpcId":"$rpcId"}"""}}}
+             "data":{"content":[{"type":"text","text":"$text"}],
+              "source":$source}}
             """.trimIndent(),
         )
+    }
 
     private fun assistant(seq: Long, turn: Long, step: Long, text: String = "a"): ChatFrame.Event =
         parse(
@@ -947,7 +959,8 @@ class ChatReducerTest {
         val snapshot = ChatFrame.Snapshot(
             items = listOf(requireNotNull(SessionEventParser().toChatItem(
                 SessionEventParser().parseEvent(obj("""{"type":"user/message","seq":3,"time":3000,
-                    "data":{"content":[{"type":"text","text":"旧消息"}]}}"""))!!,
+                    "data":{"content":[{"type":"text","text":"旧消息"}],
+                            "source":{"kind":"user"}}}"""))!!,
             ))),
             cursor = 3L,
             hasMore = false,

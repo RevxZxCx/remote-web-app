@@ -26,7 +26,6 @@ import com.revxzxcx.remotewebapp.core.session.ModelRef
 import com.revxzxcx.remotewebapp.core.session.PromptAttachment
 import com.revxzxcx.remotewebapp.core.session.QueuedMessage
 import com.revxzxcx.remotewebapp.core.session.SessionAttachmentRepository
-import com.revxzxcx.remotewebapp.core.session.SessionEventParser
 import com.revxzxcx.remotewebapp.core.session.SniffedImage
 import com.revxzxcx.remotewebapp.core.session.sniffImage
 import com.revxzxcx.remotewebapp.core.session.toBase64
@@ -65,7 +64,6 @@ class ChatViewModel(
 
     private val repository = ChatRepository(connection)
     private val changesRepository = ChangesRepository(connection)
-    private val events = SessionEventParser()
 
     /**
      * 附件读取（需求 FR-5 的「图片」）。
@@ -676,10 +674,15 @@ class ChatViewModel(
      * 快照带的是整段窗口（可能几百条），单条事件帧只有一条。瞬时流式帧
      * （`ChatFrame.Live`）**不缓存**：它按定义不落盘，存下去会让下次冷启动把一段从未
      * 确认过的半成品当成历史画出来。
+     *
+     * 单条事件帧也要过 [SessionEventParser.isCacheable]：注入的 `user/message`
+     * （`time-context` 等 187/227 条）不经这一步挡掉就会逐条写进缓存，把
+     * `MESSAGE_CACHE_LIMIT`（600 条）的预算吃光——快照路径挡了、实时路径不挡，
+     * 等于预算目标只完成一半（R012 P2-B）。
      */
     private fun envelopesOf(frame: ChatFrame): List<JsonObject> = when (frame) {
         is ChatFrame.Snapshot -> frame.envelopes
-        is ChatFrame.Event -> listOfNotNull(frame.envelope)
+        is ChatFrame.Event -> repository.cacheable(listOfNotNull(frame.envelope))
         is ChatFrame.Live -> emptyList()
     }
 

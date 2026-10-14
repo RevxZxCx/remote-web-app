@@ -89,8 +89,61 @@ class SessionEventParser {
             turn = event.data.long("turn") ?: 0L,
         )
 
+    /**
+     * 这条事件是否值得写进离线缓存（需求 FR-4.3）。
+     *
+     * 判据**只针对 `user/message`**：注入物不写，其余事件一律写。
+     *
+     * 为什么不能按「能不能渲染成卡片」过滤：`turn/start`、`turn/end`、`step/start`
+     * 这类事件解析不出卡片，却是 `ChatUiState.generating` 与断线补齐窗口下界
+     * （`ChatFrame.Snapshot.windowMinSeq`）的权威来源。按渲染性过滤会让
+     * `windowMinSeq` 退化成「首个可渲染事件的 seq」，与条目最小 seq 重合，
+     * 于是旧缓存里 seq 低于新窗口起点的条目会被误判成「窗口之外的旧历史」而
+     * prepend 回列表（R012 P2-A）。
+     *
+     * `user/message` 之所以可以单独挑出来：注入只经由这一种事件抵达
+     * （实测 187/227 条注入全是 `user/message`，141 条 `time-context`）。
+     */
+    fun isCacheable(event: SessionEvent): Boolean =
+        event.type != "user/message" || userItem(event) != null
+
+    /**
+     * `user/message` → 用户气泡。
+     *
+     * ⚠️ **只有 `source.kind === 'user'` 才渲染**，其余一律返回 null。
+     *
+     * 根因（用户 m22856 反馈「聊天界面中出现很多不是我发送的提示词，看起来是插件构建的
+     * prompt」）：`user/message` 这个事件类型被**所有**往会话日志里追加用户可见文本的
+     * 发起方共用，`source.kind` 才是区分「人输入的」与「系统注入的」的字段。
+     *
+     * 权威定义在 `typert.host.js:1913` 的 `MessageSourceMap`：`user` 与 `user-rpc`
+     * 的 kind 都是 `'user'`（前者桌面端人工输入，后者远程客户端 RPC —— 也就是本 App
+     * 发出的消息，实测 `source = {kind:'user', rpcId:'…'}`），其余 16 种 kind 全是
+     * 注入物：`model` / `tool` / `system-prompt` / `model-selection` /
+     * `user-approval` / `ptc-mode` / `tool-registry` / `agent-message` /
+     * `subagent-settled` / `skill-invocation` / `cordis-host-runner` / `goal` /
+     * `schedule` / `compact-checkpoint` / `session-reference` / `user-question-reply`。
+     * 宿主插件还会往里加这张表里没有的 kind（实测有 `time-context` /
+     * `runtime-context` / `skill-catalog` / `tool-jobs` / `tool-goal`），
+     * 所以必须**白名单**而不是黑名单。
+     *
+     * 实测规模（`app开发 main`，31361 条事件里 227 条 `user/message`）：
+     * 只有 **40 条** kind 是 `user`，其余 **187 条**是注入物，其中 `time-context`
+     * （「Time sampled while preparing turn N, step M…」，约每 10 分钟一条）**141 条**、
+     * `subagent-settled` 17、`agent-message` 13、`model-selection` 5、`tool-jobs` 4、
+     * `goal` 3，`user-approval` / `runtime-context` / `skill-catalog` / `tool-goal`
+     * 各 1。全部渲染出来会把聊天刷满，且用户分不清哪条是自己发的。
+     *
+     * 服务端自己也用同一条判据（`lib/types/index.js:264`、`lib/index.js:2895` 的
+     * `api-session/activity`、`lib/types/list.js:29` 的 `lastPromptAt` 全是
+     * `event.data.source.kind !== 'user'` 就跳过），所以这不是 UI 偏好而是数据语义。
+     *
+     * 刻意严格：`source` 缺席时也返回 null。本工程面对的所有会话都带 source
+     * （实测 227/227），而「多显示一行」的代价远大于「少显示一行」。
+     */
     private fun userItem(event: SessionEvent): ChatItem? {
         // `user/message` 的 data 就是 UserMessage 本身（不是 {message: ...} 包裹）。
+        if ((event.data["source"] as? JsonObject)?.string("kind") != "user") return null
         val blocks = contentBlocks(event.data["content"])
         val text = blocks.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
         if (text.isBlank() && blocks.isEmpty()) return null

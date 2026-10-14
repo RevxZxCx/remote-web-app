@@ -9,6 +9,7 @@ import com.revxzxcx.remotewebapp.core.cache.DshCache
 import com.revxzxcx.remotewebapp.core.connection.DshConnection
 import com.revxzxcx.remotewebapp.core.protocol.CarrierState
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
+import com.revxzxcx.remotewebapp.core.session.SessionActionRepository
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
 import com.revxzxcx.remotewebapp.core.session.SessionListResult
 import com.revxzxcx.remotewebapp.core.session.SessionRepository
@@ -16,6 +17,7 @@ import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.workspace.Workspace
 import com.revxzxcx.remotewebapp.core.workspace.WorkspaceRepository
 import com.revxzxcx.remotewebapp.core.workspace.WorkspaceSnapshot
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -108,9 +110,23 @@ class HomeViewModel(
 
     private val workspaces = WorkspaceRepository(connection)
     private val sessions = SessionRepository(connection)
+    private val sessionActions = SessionActionRepository(connection)
 
     private val _state = MutableStateFlow(HomeUiState())
     val state: StateFlow<HomeUiState> = _state.asStateFlow()
+
+    /**
+     * 正在执行管理动作的会话 id 集合（归档 / 取消归档 / 置顶 / 取消置顶）。
+     *
+     * 为什么是集合而不是单个 `String?`：长按菜单弹出后用户可能快速连点两个会话，
+     * 单值会把前一个动作的进行态静默丢掉，UI 上表现为「点了没反应但其实是还在飞」。
+     */
+    private val _actionBusy = MutableStateFlow<Set<String>>(emptySet())
+    val actionBusy: StateFlow<Set<String>> = _actionBusy.asStateFlow()
+
+    /** 管理动作的失败文案；null 表示没有待展示的错误。 */
+    private val _actionError = MutableStateFlow<String?>(null)
+    val actionError: StateFlow<String?> = _actionError.asStateFlow()
 
     /**
      * 全局连接状态（需求 FR-4.4），直接取自唯一的载波。
@@ -161,6 +177,66 @@ class HomeViewModel(
         _state.value = _state.value.copy(
             expandedWorkspaceIds = if (workspaceId in current) current - workspaceId else current + workspaceId,
         )
+    }
+
+    // ------------------------------------------------------------------
+    // 会话管理动作（归档 / 置顶）
+    //
+    // 服务端**没有**删除会话的 API（`SessionActions` 的 KDoc 记录了全量 grep 的证据），
+    // 所以这里提供的「移除」是归档：会话从「会话 / 置顶」段移到「已归档」段，
+    // 仍然可以取消归档。UI 文案一律说「归档」，不说「删除」。
+    // ------------------------------------------------------------------
+
+    /** 归档一个会话（同时叫停它正在跑的活动）。 */
+    fun archiveSession(sessionId: String) = runSessionAction(sessionId) {
+        sessionActions.archive(sessionId)
+    }
+
+    /** 取消归档。 */
+    fun unarchiveSession(sessionId: String) = runSessionAction(sessionId) {
+        sessionActions.unarchive(sessionId)
+    }
+
+    /** 置顶。 */
+    fun pinSession(sessionId: String) = runSessionAction(sessionId) {
+        sessionActions.pin(sessionId)
+    }
+
+    /** 取消置顶。 */
+    fun unpinSession(sessionId: String) = runSessionAction(sessionId) {
+        sessionActions.unpin(sessionId)
+    }
+
+    /** 清掉管理动作的错误横幅。 */
+    fun dismissActionError() {
+        _actionError.value = null
+    }
+
+    /**
+     * 四个管理动作的公共骨架：busy 标记 + 取消上抛 + 错误文案。
+     *
+     * 成功之后**不刷新列表**：`workspace/follow` 会推 `{type:'archived'|'pinned'}` 增量帧，
+     * [com.revxzxcx.remotewebapp.core.workspace.WorkspaceReducer] 已经处理，
+     * 再拉一次 `session/list` 只会多一次往返。详见 [SessionActionRepository] 的 KDoc。
+     */
+    private fun runSessionAction(sessionId: String, block: suspend () -> Unit) {
+        if (sessionId in _actionBusy.value) return
+        viewModelScope.launch {
+            _actionBusy.value = _actionBusy.value + sessionId
+            _actionError.value = null
+            try {
+                block()
+            } catch (cause: Exception) {
+                // 与 loadSessions 同一条铁律：取消不是失败。旋转屏幕 / 离开页面时
+                // CancellationException 会被 catch (Exception) 接住，写一条假错误。
+                if (cause is CancellationException) throw cause
+                val typert = cause as? TypertException
+                _actionError.value = typert?.let { "${it.code}：${it.message}" }
+                    ?: (cause.message ?: cause.javaClass.simpleName)
+            } finally {
+                _actionBusy.value = _actionBusy.value - sessionId
+            }
+        }
     }
 
     /**
@@ -316,7 +392,7 @@ class HomeViewModel(
                 // 协程被取消时（离开页面 / retry() 取消旧 job）如果写一条
                 // 「会话列表读取失败：JobCancellationException」，用户会看到一条假错误，
                 // 而且 sessionsError 会一直挂在界面上（R003 P1-2 / R004 P3-1 同类）。
-                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                if (cause is CancellationException) throw cause
                 val typert = cause as? TypertException
                 _state.value = _state.value.copy(
                     sessionsLoading = false,

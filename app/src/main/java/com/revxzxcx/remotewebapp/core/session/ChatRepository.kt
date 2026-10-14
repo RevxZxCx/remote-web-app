@@ -56,6 +56,15 @@ class ChatRepository(
     }
 
     /**
+     * 挑出可缓存的信封（供实时事件路径用）。
+     *
+     * 与 [loadPage] 里的 [ChatFrameParser.recordEnvelopes] 是同一条判据，只是输入已经是
+     * 取出的信封而不是 `[{type:'event',event}]` 数组。快照路径与实时路径必须共用，
+     * 否则缓存预算只在一条路径上生效（R012 P2-B）。
+     */
+    fun cacheable(envelopes: List<JsonObject>): List<JsonObject> = frames.cacheable(envelopes)
+
+    /**
      * 发送一条文本消息，可附带图片/文件。
      *
      * @param mode `'queue'` 排到当前轮之后；`'steer'` 插进当前轮（FR-3.5，M3 只用 queue）。

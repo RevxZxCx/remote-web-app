@@ -1,6 +1,7 @@
 package com.revxzxcx.remotewebapp.ui.home
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -78,6 +79,8 @@ fun HomeScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val carrier by viewModel.carrier.collectAsState()
+    val actionBusy by viewModel.actionBusy.collectAsState()
+    val actionError by viewModel.actionError.collectAsState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
@@ -115,6 +118,11 @@ fun HomeScreen(
                         openSession(session, workspace)
                     },
                     onRefreshSessions = viewModel::refreshSessions,
+                    busySessionIds = actionBusy,
+                    onArchive = viewModel::archiveSession,
+                    onUnarchive = viewModel::unarchiveSession,
+                    onPin = viewModel::pinSession,
+                    onUnpin = viewModel::unpinSession,
                     // 复用 HomeScreen 那一个时钟：抽屉自己再起一个定时器是多余的
                     // （R006 P3-3），而且两边的 `now` 还不完全同步。
                     now = now,
@@ -201,6 +209,26 @@ fun HomeScreen(
                     }
                 }
 
+                // 管理动作（归档 / 置顶）失败必须可见：这四类动作成功后 UI 靠
+                // `workspace/follow` 的 `archived` / `pinned` 增量帧自动更新，
+                // 失败时什么都不会变——不挂横幅的话用户只以为「点了没反应」。
+                actionError?.let { error ->
+                    Surface(color = Color(0xFF33280F), modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "操作失败：$error",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFF3D08A),
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(onClick = viewModel::dismissActionError) { Text("知道了") }
+                        }
+                    }
+                }
+
                 when {
                     // 只有「还没有任何可显示的内容」时才整屏转圈。`warmStart` 刻意不复位
                     // `loading`（缓存不是权威数据），若这里只看 `loading`，缓存铺好之后屏幕
@@ -245,6 +273,11 @@ fun HomeScreen(
                                 onToggle = { viewModel.toggleWorkspace(group.workspace.workspaceId) },
                                 onOpenSession = { openSession(it, group.workspace) },
                                 now = now,
+                                busySessionIds = actionBusy,
+                                onArchive = viewModel::archiveSession,
+                                onUnarchive = viewModel::unarchiveSession,
+                                onPin = viewModel::pinSession,
+                                onUnpin = viewModel::unpinSession,
                             )
                             HorizontalDivider(
                                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.08f),
@@ -275,6 +308,11 @@ private fun WorkspaceRow(
     onToggle: () -> Unit,
     onOpenSession: (SessionSummary) -> Unit,
     now: Long = System.currentTimeMillis(),
+    busySessionIds: Set<String> = emptySet(),
+    onArchive: (String) -> Unit = {},
+    onUnarchive: (String) -> Unit = {},
+    onPin: (String) -> Unit = {},
+    onUnpin: (String) -> Unit = {},
 ) {
     val workspace = group.workspace
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -338,15 +376,48 @@ private fun WorkspaceRow(
 
             if (pinned.isNotEmpty()) {
                 SectionLabel("置顶")
-                pinned.forEach { SessionRowItem(it, onOpenSession, now) }
+                pinned.forEach {
+                    SessionRowItem(
+                        row = it,
+                        onOpenSession = onOpenSession,
+                        now = now,
+                        busy = it.summary.sessionId in busySessionIds,
+                        onArchive = onArchive,
+                        onUnarchive = onUnarchive,
+                        onPin = onPin,
+                        onUnpin = onUnpin,
+                    )
+                }
             }
             if (recent.isNotEmpty()) {
                 if (pinned.isNotEmpty()) SectionLabel("会话")
-                recent.forEach { SessionRowItem(it, onOpenSession, now) }
+                recent.forEach {
+                    SessionRowItem(
+                        row = it,
+                        onOpenSession = onOpenSession,
+                        now = now,
+                        busy = it.summary.sessionId in busySessionIds,
+                        onArchive = onArchive,
+                        onUnarchive = onUnarchive,
+                        onPin = onPin,
+                        onUnpin = onUnpin,
+                    )
+                }
             }
             if (archived.isNotEmpty()) {
                 SectionLabel("已归档 ${archived.size}")
-                archived.forEach { SessionRowItem(it, onOpenSession, now) }
+                archived.forEach {
+                    SessionRowItem(
+                        row = it,
+                        onOpenSession = onOpenSession,
+                        now = now,
+                        busy = it.summary.sessionId in busySessionIds,
+                        onArchive = onArchive,
+                        onUnarchive = onUnarchive,
+                        onPin = onPin,
+                        onUnpin = onUnpin,
+                    )
+                }
             }
             if (group.rows.isEmpty()) {
                 Text(
@@ -370,18 +441,29 @@ private fun SectionLabel(text: String) {
     )
 }
 
-/** 会话列表里的一行：标题 + 时间 + 状态点。 */
+/** 会话列表里的一行：标题 + 时间 + 状态点。长按出管理菜单（归档 / 置顶）。 */
 @Composable
 private fun SessionRowItem(
     row: SessionGrouping.SessionRow,
     onOpenSession: (SessionSummary) -> Unit,
     now: Long = System.currentTimeMillis(),
+    busy: Boolean = false,
+    onArchive: (String) -> Unit = {},
+    onUnarchive: (String) -> Unit = {},
+    onPin: (String) -> Unit = {},
+    onUnpin: (String) -> Unit = {},
 ) {
     val summary = row.summary
+    // `rememberSaveable` 而不是 `remember`：旋屏会让 `remember` 复位、菜单弹到一半消失
+    // （R012 P3-2）。与全工程其它 menuOpen（`HomeScreen.kt:385`）保持一致。
+    var menuOpen by rememberSaveable { mutableStateOf(false) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onOpenSession(summary) }
+            .combinedClickable(
+                onClick = { onOpenSession(summary) },
+                onLongClick = { menuOpen = true },
+            )
             .padding(start = 40.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -429,6 +511,17 @@ private fun SessionRowItem(
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.35f),
             )
         }
+        SessionActionsMenu(
+            expanded = menuOpen,
+            onDismiss = { menuOpen = false },
+            archived = row.isArchived,
+            pinned = row.isPinned,
+            busy = busy,
+            onArchive = { onArchive(summary.sessionId) },
+            onUnarchive = { onUnarchive(summary.sessionId) },
+            onPin = { onPin(summary.sessionId) },
+            onUnpin = { onUnpin(summary.sessionId) },
+        )
     }
 }
 
@@ -453,6 +546,11 @@ internal fun SessionDrawer(
     state: HomeUiState,
     onOpenSession: (SessionSummary, Workspace?) -> Unit,
     onRefreshSessions: () -> Unit,
+    busySessionIds: Set<String> = emptySet(),
+    onArchive: (String) -> Unit = {},
+    onUnarchive: (String) -> Unit = {},
+    onPin: (String) -> Unit = {},
+    onUnpin: (String) -> Unit = {},
     // 由调用方传入（R006 P3-3）：这里自己也调一次 `rememberNow()` 会起第二个定时器，
     // 而 HomeScreen 的那个每 30 秒跳一次就足以让整个抽屉重组。一个时钟够了。
     now: Long,
@@ -462,6 +560,8 @@ internal fun SessionDrawer(
     val pinned = state.pinned
     val recent = state.recent
     val groups = state.groups
+    val archivedIds = state.snapshot.archivedSessionIds
+    val pinnedIds = state.snapshot.pinnedSessionIds
 
     Column(modifier = Modifier.fillMaxSize()) {
         Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth()) {
@@ -520,6 +620,13 @@ internal fun SessionDrawer(
                         subtitle = pair.second?.displayName,
                         onClick = { onOpenSession(pair.first, pair.second) },
                         now = now,
+                        busy = pair.first.sessionId in busySessionIds,
+                        archivedIds = archivedIds,
+                        pinnedIds = pinnedIds,
+                        onArchive = onArchive,
+                        onUnarchive = onUnarchive,
+                        onPin = onPin,
+                        onUnpin = onUnpin,
                     )
                 }
             }
@@ -534,6 +641,13 @@ internal fun SessionDrawer(
                             onOpenSession(summary, state.snapshot.workspaceOf(summary.sessionId))
                         },
                         now = now,
+                        busy = summary.sessionId in busySessionIds,
+                        archivedIds = archivedIds,
+                        pinnedIds = pinnedIds,
+                        onArchive = onArchive,
+                        onUnarchive = onUnarchive,
+                        onPin = onPin,
+                        onUnpin = onUnpin,
                     )
                 }
             }
@@ -567,6 +681,13 @@ internal fun SessionDrawer(
                         subtitle = null,
                         onClick = { onOpenSession(row.summary, group.workspace) },
                         now = now,
+                        busy = row.summary.sessionId in busySessionIds,
+                        archivedIds = archivedIds,
+                        pinnedIds = pinnedIds,
+                        onArchive = onArchive,
+                        onUnarchive = onUnarchive,
+                        onPin = onPin,
+                        onUnpin = onUnpin,
                     )
                 }
             }
@@ -616,11 +737,19 @@ private fun DrawerSessionRow(
     subtitle: String?,
     onClick: () -> Unit,
     now: Long = System.currentTimeMillis(),
+    busy: Boolean = false,
+    archivedIds: Set<String> = emptySet(),
+    pinnedIds: Set<String> = emptySet(),
+    onArchive: (String) -> Unit = {},
+    onUnarchive: (String) -> Unit = {},
+    onPin: (String) -> Unit = {},
+    onUnpin: (String) -> Unit = {},
 ) {
+    var menuOpen by rememberSaveable { mutableStateOf(false) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = { menuOpen = true })
             .padding(horizontal = 16.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -649,5 +778,19 @@ private fun DrawerSessionRow(
                 modifier = Modifier.size(6.dp),
             ) {}
         }
+        // 抽屉里没有独立的「已归档」段（归档会话只在工作区展开段出现），所以
+        // archived / pinned 从 `state.snapshot` 推导而不是写死——写死会在主区与抽屉
+        // 行为分叉，而这条分叉没有测试盯着。
+        SessionActionsMenu(
+            expanded = menuOpen,
+            onDismiss = { menuOpen = false },
+            archived = summary.sessionId in archivedIds,
+            pinned = summary.sessionId in pinnedIds,
+            busy = busy,
+            onArchive = { onArchive(summary.sessionId) },
+            onUnarchive = { onUnarchive(summary.sessionId) },
+            onPin = { onPin(summary.sessionId) },
+            onUnpin = { onUnpin(summary.sessionId) },
+        )
     }
 }

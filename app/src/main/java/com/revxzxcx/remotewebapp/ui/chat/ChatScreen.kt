@@ -45,7 +45,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -54,7 +53,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.MonotonicFrameClock
 import androidx.compose.runtime.withFrameNanos
 import kotlin.coroutines.coroutineContext
@@ -148,13 +146,13 @@ fun ChatScreen(
         liveLength = { state.live?.text?.length ?: 0 },
     )
 
-    // 滚到顶时自动加载更早历史。
-    LaunchedEffect(listState, state.hasMore) {
-        snapshotFlow { listState.firstVisibleItemIndex }
-            .collect { index ->
-                if (index == 0 && state.hasMore) viewModel.loadMore()
-            }
-    }
+    // 滚到顶时自动加载更早历史。逻辑在 [ChatHistoryFollow]（抽出来是为了能被渲染测试
+    // 直接驱动：`firstVisibleItemIndex` 与「列表是否溢出一屏」都是只有真实布局后才有的量）。
+    ChatHistoryFollow(
+        listState = listState,
+        hasMore = { viewModel.state.value.hasMore },
+        onLoadMore = { viewModel.loadMore() },
+    )
 
     Scaffold(
         topBar = {
@@ -1018,12 +1016,7 @@ private fun BlockView(
             modifier = Modifier.fillMaxWidth(),
         )
 
-        is ContentBlock.Reasoning -> Text(
-            text = block.text,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontFamily = FontFamily.Monospace,
-        )
+        is ContentBlock.Reasoning -> ReasoningBlock(block.text)
 
         // 图片要按 attachmentId 现取像素（`session/attachment`），不是占位文字。
         // `offloaded: true` 是常态：服务端把像素卸载进附件库，内容块只留 id。
@@ -1068,6 +1061,68 @@ private fun BlockView(
 }
 
 /**
+ * 思考过程块（用户 m22856 反馈「对话的气泡中总是掺杂一些思考过程的文字…这些我都不太想
+ * 看到出现在对话中」）。
+ *
+ * **默认折叠**，只留一行「思考过程 · N 字」；点一下才展开。理由：reasoning 是模型的
+ * 内部推理，不是给用户读的正文，但它偶尔有排查价值（「模型为什么这么做」），所以不删、
+ * 只收起。桌面端 Web UI 同样把 reasoning 收在可折叠区域里。
+ *
+ * **为什么展开状态不挂文本前缀**：第一版写成 `rememberSaveable(text.take(64))`，想让
+ * 同一段推理在流式增量之间保持展开。但 `take(64)` 对**短于 64 字的推理等于整段文本**，
+ * 每个 token 都会换键 → 用户展开后立刻被折回去（`ReasoningBlockRenderTest`
+ * 「流式增长时折叠状态保持」钉住这条）。改成不带输入键：状态绑定到**组合槽位**，
+ * 而列表用 `items(key = …)` 给每条消息稳定槽位，既不会在流式中丢状态，也不会串到别的消息。
+ *
+ * ⚠️ 这里只能承诺「同一条 `LiveAttempt` 更新期间（item 未被回收）保持展开态」。
+ * item 滚出可视区后 provider 被注销，`rememberSaveable` 的 `expanded` 随之丢失，
+ * 长思考滚走再回来会回到折叠。行为可接受（默认折叠本来就是既定期望），但**不要**
+ * 把注释写成「回收时按槽位保留」——那不成立（R012 P3-1）。
+ *
+ * `internal` 同 [Composer]/[QueuedStrip]：这是用户反馈的修复本体，必须有渲染测试
+ * 驱动它，确认「默认不显示正文」与「点一下才显示」两条契约。
+ */
+@Composable
+internal fun ReasoningBlock(text: String) {
+    if (text.isBlank()) return
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+            Row(
+                modifier = Modifier
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Start,
+            ) {
+                Text(
+                    text = if (expanded) {
+                        "▾ 思考过程 · ${text.length} 字"
+                    } else {
+                        "▸ 思考过程 · ${text.length} 字"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (expanded) {
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                )
+            }
+        }
+    }
+}
+
+/**
  * 把一段 Markdown 文本解析成块，并按文本记忆。
  *
  * 用 [MdStream] 而不是每次直接 `MdParser.parse`：流式生成时文本每几十毫秒就变一次，
@@ -1092,12 +1147,8 @@ private fun LiveRow(live: LiveAttempt) {
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             if (live.reasoning.isNotEmpty()) {
-                Text(
-                    text = live.reasoning,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontFamily = FontFamily.Monospace,
-                )
+                // 与已落盘的助手消息同一套形态：思考过程默认收起（用户 m22856）。
+                ReasoningBlock(live.reasoning)
             }
             if (live.text.isNotEmpty()) {
                 // 流式正文同样走 Markdown，且用同一个增量解析器：未闭合的围栏会被

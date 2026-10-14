@@ -151,6 +151,9 @@ class DshCacheTest {
             put(
                 "data",
                 buildJsonObject {
+                    // `source.kind` 必须是 'user'：SessionEventParser 只渲染这个 kind
+                    // （R012 的来源过滤），少了它冷启动读缓存时会少一行。
+                    put("source", buildJsonObject { put("kind", "user") })
                     put("content", buildJsonArray { add(buildJsonObject { put("type", "text"); put("text", text) }) })
                 },
             )
