@@ -2,6 +2,8 @@ package com.revxzxcx.remotewebapp.ui
 
 import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -20,6 +22,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
@@ -40,6 +43,7 @@ import com.revxzxcx.remotewebapp.ui.home.HomeViewModel
 import com.revxzxcx.remotewebapp.ui.pair.PairScreen
 import com.revxzxcx.remotewebapp.ui.pair.PairViewModel
 import com.revxzxcx.remotewebapp.ui.settings.SettingsScreen
+import com.revxzxcx.remotewebapp.ui.theme.Motion
 import kotlinx.coroutines.launch
 
 /**
@@ -72,6 +76,48 @@ private fun rememberScopedViewModelStoreOwner(): ViewModelStoreOwner {
 
 private class ScopedViewModelStoreOwner : ViewModelStoreOwner {
     override val viewModelStore = ViewModelStore()
+}
+
+/**
+ * 屏幕进场动画（R016）。
+ *
+ * ## 为什么不用 `Crossfade` / `AnimatedContent`
+ *
+ * 那两个会把**新旧两屏同时**组合一段时间。聊天页挂着 `session/follow` 长连接、
+ * 文件查看页最多 32 MiB 的 `media`，切换时两屏并存就意味着两条流同时跑、
+ * 两份大内存同时占——为了一个转场动画付这个代价不划算。
+ *
+ * 这里的做法是「新屏自己淡入」：`route` 一变，分支换掉，新分支的 [remember] 从
+ * `visible = false` 起，`LaunchedEffect(route)` 随后把它推到 true。旧屏在同一帧
+ * 就被销毁，不存在并存窗口。
+ *
+ * 位移只有 12dp：聊天页这种重屏，大幅滑入会让用户觉得「等它滑完才能操作」，
+ * 而 12dp 只是给眼睛一个「这里是新的一层」的暗示。
+ */
+@Composable
+private fun ScreenTransition(route: String, content: @Composable () -> Unit) {
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(route) { visible = true }
+    val alpha by animateFloatAsState(
+        targetValue = if (visible) 1f else 0f,
+        animationSpec = tween(Motion.SLOW, easing = Motion.Emphasized),
+        label = "screenAlpha",
+    )
+    val offset by animateFloatAsState(
+        targetValue = if (visible) 0f else 12f,
+        animationSpec = tween(Motion.SLOW, easing = Motion.Emphasized),
+        label = "screenOffset",
+    )
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer {
+                this.alpha = alpha
+                translationY = offset * density
+            },
+    ) {
+        content()
+    }
 }
 
 /**
@@ -149,7 +195,7 @@ fun AppRoot(container: AppContainer) {
                     key = "pair",
                     factory = PairViewModel.factory(container, deviceLabel = Build.MODEL.orEmpty()),
                 )
-                PairScreen(viewModel = vm)
+                ScreenTransition(route = "pair") { PairScreen(viewModel = vm) }
             }
 
             is AppState.Paired -> {
@@ -171,17 +217,21 @@ fun AppRoot(container: AppContainer) {
                                 ),
                             )
                             BackHandler(enabled = true) { openDebug = false }
-                            DebugScreen(viewModel = vm, onBack = { openDebug = false })
+                            ScreenTransition(route = "debug") {
+                                DebugScreen(viewModel = vm, onBack = { openDebug = false })
+                            }
                         }
 
                         openSettings -> {
                             // 主题是**进程级**偏好，不依赖配对状态，所以设置页不读 connection。
                             BackHandler(enabled = true) { openSettings = false }
-                            SettingsScreen(
-                                themePreferences = container.themePreferences,
-                                onBack = { openSettings = false },
-                                onUnpair = { scope.launch { container.unpair() } },
-                            )
+                            ScreenTransition(route = "settings") {
+                                SettingsScreen(
+                                    themePreferences = container.themePreferences,
+                                    onBack = { openSettings = false },
+                                    onUnpair = { scope.launch { container.unpair() } },
+                                )
+                            }
                         }
 
                         session == null -> {
@@ -193,16 +243,18 @@ fun AppRoot(container: AppContainer) {
                                     ownerId = container.ownerId,
                                 ),
                             )
-                            HomeScreen(
-                                viewModel = vm,
-                                onUnpair = { scope.launch { container.unpair() } },
-                                onOpenSession = { summary, _ ->
-                                    openSession = summary
-                                    openFile = null
-                                },
-                                onOpenDebug = { openDebug = true },
-                                onOpenSettings = { openSettings = true },
-                            )
+                            ScreenTransition(route = "home") {
+                                HomeScreen(
+                                    viewModel = vm,
+                                    onUnpair = { scope.launch { container.unpair() } },
+                                    onOpenSession = { summary, _ ->
+                                        openSession = summary
+                                        openFile = null
+                                    },
+                                    onOpenDebug = { openDebug = true },
+                                    onOpenSettings = { openSettings = true },
+                                )
+                            }
                         }
 
                         file != null -> {
@@ -225,7 +277,9 @@ fun AppRoot(container: AppContainer) {
                             )
                             LaunchedEffect(file) { vm.open(file) }
                             BackHandler(enabled = true) { openFile = null }
-                            FileViewerScreen(viewModel = vm, onBack = { openFile = null })
+                            ScreenTransition(route = "file") {
+                                FileViewerScreen(viewModel = vm, onBack = { openFile = null })
+                            }
                         }
 
                         else -> {
@@ -252,13 +306,15 @@ fun AppRoot(container: AppContainer) {
                             )
                             // 系统返回键与标题栏「返回」等效：不然两层下钻后按返回会直接退出 App。
                             BackHandler(enabled = true) { openSession = null }
-                            ChatScreen(
-                                viewModel = vm,
-                                title = session.displayName,
-                                onBack = { openSession = null },
-                                onOpenFile = { target -> openFile = target },
-                                onUnpair = { scope.launch { container.unpair() } },
-                            )
+                            ScreenTransition(route = "chat") {
+                                ChatScreen(
+                                    viewModel = vm,
+                                    title = session.displayName,
+                                    onBack = { openSession = null },
+                                    onOpenFile = { target -> openFile = target },
+                                    onUnpair = { scope.launch { container.unpair() } },
+                                )
+                            }
                         }
                     }
                 }

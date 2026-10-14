@@ -1,7 +1,17 @@
 package com.revxzxcx.remotewebapp.ui.home
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,6 +27,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -35,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -47,16 +59,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.draw.clip
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.workspace.Workspace
 import com.revxzxcx.remotewebapp.ui.common.CacheNotice
 import com.revxzxcx.remotewebapp.ui.common.ConfirmUnpairDialog
 import com.revxzxcx.remotewebapp.ui.common.ConnectionBanner
+import com.revxzxcx.remotewebapp.ui.theme.Motion
+import com.revxzxcx.remotewebapp.ui.theme.bubbleShape
+import com.revxzxcx.remotewebapp.ui.theme.groupShape
 import kotlinx.coroutines.launch
 
 /**
@@ -172,15 +189,19 @@ fun HomeScreen(
                 }
 
                 state.error?.let { error ->
-                    Surface(color = Color(0xFF3A1E22), modifier = Modifier.fillMaxWidth()) {
+                    // 配色跟随主题（早先是硬编码深红底 + 亮红字，浅色主题下与整个界面不协调）。
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
                         Column(
-                            Modifier.padding(12.dp),
+                            Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             Text(
                                 text = if (state.needsRepair) "配对已失效：$error" else "连接失败：$error",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFFFFB4AB),
+                                color = MaterialTheme.colorScheme.onErrorContainer,
                             )
                             if (state.needsRepair) {
                                 Button(onClick = onUnpair) { Text("重新配对") }
@@ -193,7 +214,10 @@ fun HomeScreen(
 
                 // 会话摘要失败不阻塞工作区列表，只挂一条黄条。
                 state.sessionsError?.let { error ->
-                    Surface(color = Color(0xFF33280F), modifier = Modifier.fillMaxWidth()) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
                         Row(
                             Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -201,7 +225,7 @@ fun HomeScreen(
                             Text(
                                 text = "会话列表读取失败：$error",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFFF3D08A),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.weight(1f),
                             )
                             TextButton(onClick = viewModel::refreshSessions) { Text("重试") }
@@ -213,7 +237,10 @@ fun HomeScreen(
                 // `workspace/follow` 的 `archived` / `pinned` 增量帧自动更新，
                 // 失败时什么都不会变——不挂横幅的话用户只以为「点了没反应」。
                 actionError?.let { error ->
-                    Surface(color = Color(0xFF33280F), modifier = Modifier.fillMaxWidth()) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
                         Row(
                             Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -221,7 +248,7 @@ fun HomeScreen(
                             Text(
                                 text = "操作失败：$error",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFFF3D08A),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.weight(1f),
                             )
                             TextButton(onClick = viewModel::dismissActionError) { Text("知道了") }
@@ -315,25 +342,55 @@ private fun WorkspaceRow(
     onUnpin: (String) -> Unit = {},
 ) {
     val workspace = group.workspace
-    Column(modifier = Modifier.fillMaxWidth()) {
+    // 整行按下时轻微内缩（0.98）：比单纯换个背景色更像「按到了」，而且不改变行高。
+    var pressed by remember { mutableStateOf(false) }
+    val interactionSource = remember { MutableInteractionSource() }
+    LaunchedEffect(interactionSource) {
+        interactionSource.interactions.collect { interaction ->
+            pressed = interaction is PressInteraction.Press ||
+                interaction is PressInteraction.Release
+        }
+    }
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.98f else 1f,
+        animationSpec = tween(Motion.FAST),
+        label = "workspaceRowScale",
+    )
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .graphicsLayer(scaleX = scale, scaleY = scale)
+            .clip(groupShape)
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+            .clickable(interactionSource = interactionSource, indication = ripple(), onClick = onToggle)
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+    ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onToggle)
-                .padding(horizontal = 16.dp, vertical = 14.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // 左侧文件夹图标：纯文字的层级要靠缩进和字号区分，加一个图形锚点后
+            // 「工作区 → 会话」的两级关系一眼可见（R016）。
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = if (expanded) "▾" else "▸",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Spacer(Modifier.width(10.dp))
             Column(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = if (expanded) "▾" else "▸",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
-                    )
-                    Spacer(Modifier.width(6.dp))
                     Text(
                         text = workspace.displayName,
                         style = MaterialTheme.typography.titleMedium,
@@ -343,17 +400,29 @@ private fun WorkspaceRow(
                     )
                     if (group.hasRunning) {
                         Spacer(Modifier.width(8.dp))
+                        // 呼吸圆点：正在生成中的工作区。用 alpha 动画而不是静态色块，
+                        // 远看也能注意到（R016）。
+                        val transition = rememberInfiniteTransition(label = "runningDot")
+                        val alpha by transition.animateFloat(
+                            initialValue = 0.35f,
+                            targetValue = 1f,
+                            animationSpec = infiniteRepeatable(
+                                animation = tween(durationMillis = 900),
+                                repeatMode = RepeatMode.Reverse,
+                            ),
+                            label = "runningDotAlpha",
+                        )
                         Surface(
-                            color = Color(0xFF4ADE80),
+                            color = Color(0xFF4ADE80).copy(alpha = alpha),
                             shape = RoundedCornerShape(50),
-                            modifier = Modifier.size(6.dp),
+                            modifier = Modifier.size(8.dp),
                         ) {}
                     }
                 }
                 Text(
                     text = workspace.path,
                     style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -364,7 +433,7 @@ private fun WorkspaceRow(
                         if (group.missingIds.isNotEmpty()) append(" · ${group.missingIds.size} 个读取不到")
                     },
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                 )
             }
         }
@@ -423,8 +492,8 @@ private fun WorkspaceRow(
                 Text(
                     text = "这个工作区还没有会话。",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
-                    modifier = Modifier.padding(start = 40.dp, end = 16.dp, bottom = 12.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(start = 56.dp, end = 16.dp, bottom = 12.dp),
                 )
             }
         }
@@ -436,8 +505,9 @@ private fun SectionLabel(text: String) {
     Text(
         text = text,
         style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.45f),
-        modifier = Modifier.padding(start = 40.dp, top = 6.dp, bottom = 2.dp),
+        fontWeight = FontWeight.Medium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+        modifier = Modifier.padding(start = 56.dp, top = 8.dp, bottom = 2.dp),
     )
 }
 
@@ -457,14 +527,33 @@ private fun SessionRowItem(
     // `rememberSaveable` 而不是 `remember`：旋屏会让 `remember` 复位、菜单弹到一半消失
     // （R012 P3-2）。与全工程其它 menuOpen（`HomeScreen.kt:385`）保持一致。
     var menuOpen by rememberSaveable { mutableStateOf(false) }
+    var pressed by remember { mutableStateOf(false) }
+    val interactionSource = remember { MutableInteractionSource() }
+    LaunchedEffect(interactionSource) {
+        interactionSource.interactions.collect { interaction ->
+            pressed = interaction is PressInteraction.Press ||
+                interaction is PressInteraction.Release
+        }
+    }
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.98f else 1f,
+        animationSpec = tween(Motion.FAST),
+        label = "sessionRowScale",
+    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(start = 56.dp, end = 12.dp, top = 3.dp, bottom = 3.dp)
+            .graphicsLayer(scaleX = scale, scaleY = scale)
+            .clip(bubbleShape)
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
             .combinedClickable(
+                interactionSource = interactionSource,
+                indication = ripple(),
                 onClick = { onOpenSession(summary) },
                 onLongClick = { menuOpen = true },
             )
-            .padding(start = 40.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+            .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {

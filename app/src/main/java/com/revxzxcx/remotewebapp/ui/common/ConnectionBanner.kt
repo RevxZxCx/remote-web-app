@@ -1,7 +1,13 @@
 package com.revxzxcx.remotewebapp.ui.common
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,10 +20,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.core.protocol.CarrierState
 import com.revxzxcx.remotewebapp.core.protocol.describe
@@ -78,11 +87,27 @@ fun ConnectionBanner(
     val tone = toneOf(carrier)
     Surface(color = tone.background, modifier = modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // 状态点带一圈呼吸：正在重连时用户能隔着屏幕感觉到「它还在试」，
+            // 而不是一条静止的黄条（R016）。
+            val dotAlpha by if (carrier is CarrierState.Reconnecting) {
+                val transition = rememberInfiniteTransition(label = "bannerDot")
+                transition.animateFloat(
+                    initialValue = 0.35f,
+                    targetValue = 1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(durationMillis = 900),
+                        repeatMode = RepeatMode.Reverse,
+                    ),
+                    label = "bannerDotAlpha",
+                )
+            } else {
+                remember { mutableFloatStateOf(1f) }
+            }
             Surface(
-                color = tone.dot,
+                color = tone.dot.copy(alpha = dotAlpha),
                 shape = RoundedCornerShape(50),
                 modifier = Modifier.size(7.dp),
             ) {}
@@ -90,6 +115,7 @@ fun ConnectionBanner(
             Text(
                 text = carrier.describe(nowMillis),
                 style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Medium,
                 color = tone.foreground,
                 modifier = Modifier.weight(1f),
             )
@@ -97,13 +123,23 @@ fun ConnectionBanner(
             if (!healthy) {
                 when (carrier) {
                     is CarrierState.Unpaired -> if (onRepair != null) {
-                        TextButton(onClick = onRepair) { Text("重新配对", color = tone.foreground) }
+                        TextButton(
+                            onClick = onRepair,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                        ) {
+                            Text("重新配对", color = tone.foreground, style = MaterialTheme.typography.labelSmall)
+                        }
                     }
 
                     CarrierState.Idle, CarrierState.Connecting -> Unit
                     is CarrierState.Connected, is CarrierState.Reconnecting ->
                         if (onRetry != null) {
-                            TextButton(onClick = onRetry) { Text("重试", color = tone.foreground) }
+                            TextButton(
+                                onClick = onRetry,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                            ) {
+                                Text("重试", color = tone.foreground, style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                 }
             }
@@ -111,14 +147,26 @@ fun ConnectionBanner(
     }
 }
 
-/** 状态条配色的三档：健康（绿）/ 正在恢复（黄）/ 需要用户介入（红）。 */
+/**
+ * 状态条配色的三档：健康（绿）/ 正在恢复（黄）/ 需要用户介入（红）。
+ *
+ * **必须跟随主题**：早先是三组硬编码深色值，浅色主题下会变成「白底上压深红底 + 亮红字」，
+ * 与整个界面的底色完全不协调（R016 修）。现在从 `colorScheme` 的 container/onContainer
+ * 角色派生，两套主题各自调过对比度。
+ */
 private data class CarrierTone(val background: Color, val foreground: Color, val dot: Color)
 
-private fun toneOf(carrier: CarrierState): CarrierTone = when (carrier) {
-    is CarrierState.Connected -> CarrierTone(Color(0xFF12301F), Color(0xFF9BE7B8), Color(0xFF4ADE80))
-    is CarrierState.Unpaired -> CarrierTone(Color(0xFF3A1E22), Color(0xFFFFB4AB), Color(0xFFEF5350))
-    CarrierState.Idle, CarrierState.Connecting, is CarrierState.Reconnecting ->
-        CarrierTone(Color(0xFF33280F), Color(0xFFF3D08A), Color(0xFFFBBF24))
+@Composable
+private fun toneOf(carrier: CarrierState): CarrierTone {
+    val scheme = MaterialTheme.colorScheme
+    val container = scheme.surfaceVariant
+    val onContainer = scheme.onSurfaceVariant
+    return when (carrier) {
+        is CarrierState.Connected -> CarrierTone(container, onContainer, scheme.primary)
+        is CarrierState.Unpaired -> CarrierTone(container, scheme.error, scheme.error)
+        CarrierState.Idle, CarrierState.Connecting, is CarrierState.Reconnecting ->
+            CarrierTone(container, onContainer, scheme.tertiary)
+    }
 }
 
 /**
@@ -126,21 +174,24 @@ private fun toneOf(carrier: CarrierState): CarrierTone = when (carrier) {
  *
  * 单独一条而不是并进 [ConnectionBanner]：两者可以同时为真（正在重连、同时显示的是缓存），
  * 合成一条会丢掉其中一半的信息。
+ *
+ * 配色同样跟随主题（早先是硬编码深蓝底 + 亮蓝字，浅色主题下刺眼）——R016。
  */
 @Composable
 fun CacheNotice(text: String, modifier: Modifier = Modifier) {
     Surface(
-        color = Color(0xFF1B2A38),
+        color = MaterialTheme.colorScheme.surfaceVariant,
         modifier = modifier.fillMaxWidth(),
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 5.dp),
             verticalArrangement = Arrangement.Center,
         ) {
             Text(
                 text = text,
                 style = MaterialTheme.typography.labelSmall,
-                color = Color(0xFF9EC5E8),
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }

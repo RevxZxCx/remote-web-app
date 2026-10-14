@@ -5,6 +5,7 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.revxzxcx.remotewebapp.core.session.PromptAttachment
@@ -82,11 +83,21 @@ class ComposerAttachmentTest {
     @Test
     fun `发送在途中按钮进入加载态且不可再点`() {
         // T5 设备验收：发送是网络调用，期间按钮一直亮着，用户会反复点。
+        //
+        // R016 把「发送中」文案换成了一个 14dp 的转圈（文案切换会让按钮宽度跳一下，
+        // 而转圈 + AnimatedContent 是连续的）。所以这里不能再按文案断言，改成：
+        // ① 用固定的 contentDescription（「发送按钮」）找到按钮断言 disabled；
+        // ② 「发送」二字在在途期间消失，说明按钮内容确实被换掉了。
         var calls = 0
         setComposer(draft = "你好", sending = true, onSend = { calls++ })
-        compose.onNodeWithText("发送中").assertIsNotEnabled()
+        compose.onNodeWithContentDescription("发送按钮").assertIsNotEnabled()
+        assertEquals(
+            "在途期间不该还写着「发送」",
+            0,
+            compose.onAllNodesWithText("发送").fetchSemanticsNodes().size,
+        )
         // 不可点的节点上 performClick 是空操作，但守卫是 Button 自己的 enabled。
-        compose.onNodeWithText("发送中").performClick()
+        compose.onNodeWithContentDescription("发送按钮").performClick()
         assertEquals("在途期间不该再发一次", 0, calls)
     }
 

@@ -204,7 +204,7 @@ private fun InfoRow(label: String, value: String) {
 @Composable
 private fun ErrorRow(error: MuxError) {
     Surface(
-        color = Color(0xFF2A1B1D),
+        color = MaterialTheme.colorScheme.errorContainer,
         shape = MaterialTheme.shapes.small,
         modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
     ) {
@@ -218,7 +218,7 @@ private fun ErrorRow(error: MuxError) {
                 Text(
                     text = "  ${error.code}",
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFFFFB4AB),
+                    color = MaterialTheme.colorScheme.onErrorContainer,
                     fontFamily = FontFamily.Monospace,
                 )
             }

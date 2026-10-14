@@ -3,6 +3,20 @@ package com.revxzxcx.remotewebapp.ui.chat
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -28,8 +42,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -70,6 +86,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -78,6 +96,11 @@ import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
 import com.revxzxcx.remotewebapp.core.protocol.isHealthy
 import com.revxzxcx.remotewebapp.core.session.ChatItem
 import com.revxzxcx.remotewebapp.core.session.ContentBlock
+import com.revxzxcx.remotewebapp.ui.theme.Motion
+import com.revxzxcx.remotewebapp.ui.theme.bubbleShape
+import com.revxzxcx.remotewebapp.ui.theme.bubbleTailShape
+import com.revxzxcx.remotewebapp.ui.theme.groupShape
+import com.revxzxcx.remotewebapp.ui.theme.pillShape
 import com.revxzxcx.remotewebapp.core.session.ImageMeasure
 import com.revxzxcx.remotewebapp.core.session.LiveAttempt
 import com.revxzxcx.remotewebapp.core.session.ModelCatalog
@@ -280,8 +303,14 @@ fun ChatScreen(
             // 三类错误各自带自己的重试动作（R006 P3-6）：共用一个字段时，「发送失败」的
             // 错误条上那个「重试」也去重启整条 follow 流——比失败本身重得多，还不会重新
             // 发送那条消息。用户点了按钮发现什么都没发生。
+            //
+            // 三条横幅同形，配色跟随主题的 errorContainer 角色（早先是硬编码深红底 +
+            // 亮红字，浅色主题下变成「白底上贴一块深红」，与整个界面不协调）——R016。
             state.error?.let { error ->
-                Surface(color = Color(0xFF3A1E22), modifier = Modifier.fillMaxWidth()) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
                     Row(
                         Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -289,7 +318,7 @@ fun ChatScreen(
                         Text(
                             text = error,
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFFFB4AB),
+                            color = MaterialTheme.colorScheme.onErrorContainer,
                             modifier = Modifier.weight(1f),
                         )
                         TextButton(onClick = viewModel::retry) { Text("重试") }
@@ -298,7 +327,10 @@ fun ChatScreen(
             }
 
             state.sendError?.let { error ->
-                Surface(color = Color(0xFF3A1E22), modifier = Modifier.fillMaxWidth()) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
                     Row(
                         Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -306,7 +338,7 @@ fun ChatScreen(
                         Text(
                             text = error,
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFFFB4AB),
+                            color = MaterialTheme.colorScheme.onErrorContainer,
                             modifier = Modifier.weight(1f),
                         )
                         TextButton(onClick = viewModel::retrySend) { Text("重试") }
@@ -315,7 +347,10 @@ fun ChatScreen(
             }
 
             state.pageError?.let { error ->
-                Surface(color = Color(0xFF3A1E22), modifier = Modifier.fillMaxWidth()) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
                     Row(
                         Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -323,7 +358,7 @@ fun ChatScreen(
                         Text(
                             text = error,
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFFFB4AB),
+                            color = MaterialTheme.colorScheme.onErrorContainer,
                             modifier = Modifier.weight(1f),
                         )
                         TextButton(onClick = viewModel::retryLoadMore) { Text("重试") }
@@ -367,6 +402,16 @@ fun ChatScreen(
                             }
                         }
                         itemsIndexed(rows, key = { _, row -> row.key }) { index, row ->
+                            // 新消息淡入（R016）。用 LazyItemScope.animateItem 而不是自己套
+                            // AnimatedVisibility：后者是**每个 item 各自**的进出动画，会在
+                            // loadMore 往前插历史时让整页老消息一起重播一遍淡入——用户看到
+                            // 的是「整页闪一下」。animateItem 只对新出现的 key 播放一次，
+                            // 已存在的 key 换位置时走 placement 动画，两者分工正好是我们要的。
+                            val enter = Modifier.animateItem(
+                                fadeInSpec = tween(Motion.MEDIUM, easing = Motion.Emphasized),
+                                placementSpec = tween(Motion.MEDIUM, easing = Motion.Emphasized),
+                                fadeOutSpec = tween(Motion.FAST, easing = Motion.Emphasized),
+                            )
                             when (row) {
                                 is ChatRow.Single -> ChatItemRow(
                                     item = row.item,
@@ -377,6 +422,7 @@ fun ChatScreen(
                                     onRetryChanges = viewModel::retryChanges,
                                     attachments = viewModel.attachments,
                                     sessionId = viewModel.sessionId,
+                                    modifier = enter,
                                 )
 
                                 is ChatRow.Group -> GroupRow(
@@ -389,6 +435,7 @@ fun ChatScreen(
                                     onRetryChanges = viewModel::retryChanges,
                                     attachments = viewModel.attachments,
                                     sessionId = viewModel.sessionId,
+                                    modifier = enter,
                                 )
                             }
                         }
@@ -515,7 +562,7 @@ private fun ModelBar(
                 Text(
                     text = error,
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFFFFB4AB),
+                    color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.weight(1f).padding(end = 12.dp),
                     maxLines = 1,
                 )
@@ -733,15 +780,23 @@ internal fun Composer(
             if (pending.isNotEmpty()) {
                 PendingAttachmentsRow(pending = pending, onRemove = onRemoveAttachment)
             }
-            attachNotice?.let { notice ->
+            // 附件提示走 AnimatedVisibility 而不是 `let`：上传成功/失败/「正在上传…」
+            // 三态切换是硬切时会闪一下，淡入淡出让它看起来是连续的状态变化。
+            AnimatedVisibility(
+                visible = attachNotice != null,
+                enter = fadeIn(tween(Motion.FAST)) + expandVertically(tween(Motion.FAST)),
+                exit = fadeOut(tween(Motion.FAST)) + shrinkVertically(tween(Motion.FAST)),
+            ) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = notice,
+                        text = attachNotice.orEmpty(),
                         style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFFFFB4AB),
+                        // 早先是硬编码 `Color(0xFFFFB4AB)`，浅色主题下几乎不可见。
+                        // error 角色两套主题都调好了对比度（R016）。
+                        color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.weight(1f),
                         maxLines = 2,
                     )
@@ -754,29 +809,71 @@ internal fun Composer(
                     .padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
-                TextButton(
-                    onClick = { showAttachSheet = true },
-                    modifier = Modifier.padding(bottom = 4.dp),
-                ) { Text("＋") }
+                // 「＋」做成小圆钮而不是 TextButton：TextButton 自带 48dp 最小触控区与
+                // 内边距，在只有两行高的输入区里会把整行撑高，而且字重和「发送」不一致。
+                Box(
+                    modifier = Modifier
+                        .padding(bottom = 4.dp)
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.surface)
+                        .clickable { showAttachSheet = true },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "＋",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 OutlinedTextField(
                     value = draft,
                     onValueChange = onDraftChange,
                     modifier = Modifier
                         .weight(1f)
-                        .padding(horizontal = 4.dp)
+                        .padding(horizontal = 6.dp)
                         .heightIn(min = 48.dp, max = 160.dp),
                     placeholder = {
                         Text(if (generating) "生成中…（发送会排到当前轮之后）" else "发消息…")
                     },
                     maxLines = 6,
+                    shape = MaterialTheme.shapes.large,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = { onSend() }),
                 )
+                // 发送键：胶囊形 + 内容随状态过渡。「发送中」时按钮缩窄并显示转圈，
+                // 用户看得到「点了有反应」，而不是按了一次没动静（R016 交互优雅）。
+                //
+                // contentDescription 固定为「发送按钮」：按钮**内容**会在「发送」文字与
+                // 转圈之间切换，测试与无障碍服务都需要一个稳定的锚点（R016）。
+                val canSend = (draft.isNotBlank() || pending.isNotEmpty()) && !sending
                 Button(
                     onClick = onSend,
-                    enabled = (draft.isNotBlank() || pending.isNotEmpty()) && !sending,
-                    modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
-                ) { Text(if (sending) "发送中" else "发送") }
+                    enabled = canSend,
+                    shape = pillShape,
+                    modifier = Modifier
+                        .padding(start = 4.dp, bottom = 4.dp)
+                        .semantics { contentDescription = "发送按钮" },
+                ) {
+                    AnimatedContent(
+                        targetState = sending,
+                        transitionSpec = {
+                            (fadeIn(tween(Motion.FAST)) + scaleIn(tween(Motion.FAST), initialScale = 0.8f)) togetherWith
+                                fadeOut(tween(Motion.FAST))
+                        },
+                        label = "sendLabel",
+                    ) { busy ->
+                        if (busy) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                            )
+                        } else {
+                            Text("发送")
+                        }
+                    }
+                }
             }
         }
     }
@@ -1019,25 +1116,34 @@ internal fun GroupRow(
     onRetryChanges: (Long) -> Unit,
     attachments: SessionAttachmentRepository,
     sessionId: String,
+    modifier: Modifier = Modifier,
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     val summary = remember(members, running) { summarizeGroup(members, running) }
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-        shape = RoundedCornerShape(8.dp),
-        modifier = Modifier.fillMaxWidth(),
+        shape = groupShape,
+        modifier = modifier.fillMaxWidth(),
     ) {
-        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { expanded = !expanded },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // chevron 旋转而不是换字符（R016）：`▸`/`▾` 两个字形宽度不同，
+                // 切换时标题会被推着左右跳一下；旋转是纯 transform，位置不动。
+                val rotation by animateFloatAsState(
+                    targetValue = if (expanded) 90f else 0f,
+                    animationSpec = tween(Motion.FAST, easing = Motion.Emphasized),
+                    label = "groupChevron",
+                )
                 Text(
-                    text = if (expanded) "▾" else "▸",
+                    text = "▸",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.rotate(rotation),
                 )
                 Text(
                     text = summary.title,
@@ -1045,23 +1151,51 @@ internal fun GroupRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier
                         .weight(1f)
-                        .padding(start = 6.dp),
+                        .padding(start = 8.dp),
                 )
                 // 徽标用参数 `running`（「这一组就是正在生成的那一组」）而不是细节行是否为空：
                 // 纯思考的分组即使暂时没有可显示的细节，用户也该知道它还在跑。
                 // 早期版本另有一个 `FoldSummary.running = running && detail.isNotEmpty()`，
                 // 但没有任何消费方，是死字段（R015 审查 P3-1），已删。
                 if (running) {
-                    Text(
-                        text = "进行中",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
+                    // 「进行中」做一个呼吸点：静止的文字徽标在几十条折叠卡片里不显眼，
+                    // 而用户需要立刻知道「现在跑的是这一组」。
+                    val alpha by rememberInfiniteTransition(label = "groupRunning").animateFloat(
+                        initialValue = 0.45f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(900, easing = Motion.Decelerate),
+                            repeatMode = RepeatMode.Reverse,
+                        ),
+                        label = "groupRunningAlpha",
                     )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary.copy(alpha = alpha)),
+                        )
+                        Text(
+                            text = "进行中",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(start = 5.dp),
+                        )
+                    }
                 }
             }
             // 进行中的那一行细节（`liveToolDetail`）。只在真有内容时才占一行高度，
             // 否则纯思考的分组会在摘要下面多出一条空白。
-            if (summary.detail.isNotEmpty()) {
+            //
+            // 细节行走 AnimatedVisibility 而不是 `if`：流式过程中 detail 每个 token
+            // 都在变，用 `if` 会让它在「有内容」和「没内容」之间反复出现/消失，
+            // 每次都是硬切。淡入淡出让这种高频变化看起来是连续的。
+            AnimatedVisibility(
+                visible = summary.detail.isNotEmpty(),
+                enter = fadeIn(tween(Motion.FAST)) + expandVertically(tween(Motion.FAST)),
+                exit = fadeOut(tween(Motion.FAST)) + shrinkVertically(tween(Motion.FAST)),
+            ) {
                 Text(
                     text = summary.detail,
                     style = MaterialTheme.typography.labelSmall,
@@ -1069,10 +1203,14 @@ internal fun GroupRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 2.dp),
+                    modifier = Modifier.padding(top = 3.dp),
                 )
             }
-            if (expanded) {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = fadeIn(tween(Motion.MEDIUM)) + expandVertically(tween(Motion.MEDIUM)),
+                exit = fadeOut(tween(Motion.FAST)) + shrinkVertically(tween(Motion.FAST)),
+            ) {
                 // 展开内容必须是**内层 lazy + 限高**，不能 `members.forEach` 一次性全渲染。
                 // `MESSAGE_CACHE_LIMIT = 600` 之下一个轮次的分组可含数百个成员，在单个
                 // LazyColumn item 里同时建数百个气泡会让测量/布局卡顿，而且巨型行高还会
@@ -1080,7 +1218,7 @@ internal fun GroupRow(
                 // 限高让这一行始终有界，内层 lazy 保证同时只有可见成员被组合。
                 LazyColumn(
                     modifier = Modifier
-                        .padding(top = 8.dp)
+                        .padding(top = 10.dp)
                         .heightIn(max = 360.dp)
                         .fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1113,6 +1251,7 @@ private fun ChatItemRow(
     onRetryChanges: (Long) -> Unit,
     attachments: SessionAttachmentRepository,
     sessionId: String,
+    modifier: Modifier = Modifier,
 ) {
     when (item) {
         is ChatItem.User -> Bubble(
@@ -1120,6 +1259,7 @@ private fun ChatItemRow(
             background = MaterialTheme.colorScheme.primaryContainer,
             time = item.time,
             now = now,
+            modifier = modifier,
         ) {
             Column(
                 modifier = Modifier.fillMaxWidth(),
@@ -1156,14 +1296,17 @@ private fun ChatItemRow(
             // 实测 182:182 一一对应，不滤就渲染两遍。
             val visible = visibleAssistantBlocks(item.blocks, item.interrupted)
             if (visible.isEmpty()) return
+            // R016：助手正文不设背景。内容自带层次（Markdown 标题 / 代码块 / 分隔线），
+            // 再套色块只会把层次糊掉。用户气泡仍然有底色，那才是「谁说的」的分界。
             Bubble(
                 alignEnd = false,
-                background = MaterialTheme.colorScheme.surfaceVariant,
+                background = null,
                 time = item.time,
                 now = now,
                 footer = if (item.interrupted) "（已中止）" else null,
                 // 助手正文常有代码块与表格，320dp 太窄。
                 wide = true,
+                modifier = modifier,
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     visible.forEach { block -> BlockView(block, onOpenFile, attachments, sessionId) }
@@ -1173,18 +1316,20 @@ private fun ChatItemRow(
 
         is ChatItem.ToolCall -> Bubble(
             alignEnd = false,
-            background = MaterialTheme.colorScheme.surfaceVariant,
+            background = null,
             time = item.time,
             now = now,
+            modifier = modifier,
         ) {
             ToolCallCard(item, onOpenFile = { path -> onOpenFile(FileTarget(path)) })
         }
 
         is ChatItem.ToolResult -> Bubble(
             alignEnd = false,
-            background = if (item.isError) Color(0xFF3A1E22) else MaterialTheme.colorScheme.surfaceVariant,
+            background = null,
             time = item.time,
             now = now,
+            modifier = modifier,
         ) {
             ToolResultCard(item)
         }
@@ -1212,7 +1357,7 @@ private fun ChatItemRow(
         )
 
         is ChatItem.Notice -> Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            modifier = modifier.fillMaxWidth().padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             HorizontalDivider(modifier = Modifier.weight(1f))
@@ -1315,34 +1460,48 @@ internal fun ReasoningBlock(text: String) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-        shape = RoundedCornerShape(8.dp),
+        shape = groupShape,
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(modifier = Modifier.padding(vertical = 4.dp)) {
             Row(
                 modifier = Modifier
                     .clickable { expanded = !expanded }
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                    .padding(horizontal = 12.dp, vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Start,
             ) {
+                // chevron 旋转而不是换字符，同 [GroupRow]：`▸`/`▾` 字形宽度不同，
+                // 切换时后面的标题会被推着跳一下。
+                val rotation by animateFloatAsState(
+                    targetValue = if (expanded) 90f else 0f,
+                    animationSpec = tween(Motion.FAST, easing = Motion.Emphasized),
+                    label = "reasoningChevron",
+                )
                 Text(
-                    text = if (expanded) {
-                        "▾ 思考过程 · ${text.length} 字"
-                    } else {
-                        "▸ 思考过程 · ${text.length} 字"
-                    },
+                    text = "▸",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.rotate(rotation),
+                )
+                Text(
+                    text = "思考过程 · ${text.length} 字",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 6.dp),
                 )
             }
-            if (expanded) {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = fadeIn(tween(Motion.MEDIUM)) + expandVertically(tween(Motion.MEDIUM)),
+                exit = fadeOut(tween(Motion.FAST)) + shrinkVertically(tween(Motion.FAST)),
+            ) {
                 Text(
                     text = text,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                 )
             }
         }
@@ -1551,47 +1710,90 @@ internal fun QueuedRow(
     }
 }
 
-/** 统一的气泡外壳：靠左或靠右、限宽、带时间脚注。 */
+/**
+ * 统一的消息外壳：靠左或靠右、限宽、带时间脚注。
+ *
+ * ## 助手侧不设背景（R016，用户 m25865「回复的气泡不设置背景更好一些」）
+ *
+ * [background] 传 null 时走「无底色」形态：没有 Surface、没有圆角、没有内边距，
+ * 内容直接铺在列表背景上。理由是助手消息的内容本身已经有层次（Markdown 标题、
+ * 代码块、折叠分组、分隔线），再套一层色块只会把这些层次糊成一块。桌面端标准
+ * 模式的助手消息同样不带底色。
+ *
+ * 用户气泡**保留**底色——没有底色就无法一眼分开「我说的」和「它说的」，那是对话
+ * 界面最基本的可读性。底色用 [bubbleTailShape] 的非对称圆角（右下角收窄到 6dp）
+ * 暗示气泡从哪一侧冒出，比画一个小三角干净。
+ *
+ * ## 为什么背景是 `Color?` 而不是 `Boolean`
+ *
+ * 早先是 `background: Color` + `alignEnd`，调用方为了「不要背景」只能传
+ * `Color.Transparent`——那仍然会建一个 Surface、仍然有内边距，视觉上没差别但
+ * 布局上多了一层。可空让「没有背景」成为一个真实状态而不是一个透明颜色。
+ */
 @Composable
 private fun Bubble(
     alignEnd: Boolean,
-    background: Color,
+    background: Color?,
     time: Long,
     now: Long,
+    // `modifier` 必须是第一个可选参数（lint `ModifierParameter`）：调用方全是命名参数，
+    // 调换顺序不影响任何调用点，只是让这条告警回到基线。
+    modifier: Modifier = Modifier,
     footer: String? = null,
     /** 助手气泡里有代码块/表格时需要更宽，否则 320dp 会把它们挤成一条条。 */
     wide: Boolean = false,
     content: @Composable () -> Unit,
 ) {
+    val caption = buildString {
+        if (time > 0L) append(TimeText.relative(time, now))
+        if (footer != null) {
+            if (isNotEmpty()) append(' ')
+            append(footer)
+        }
+    }
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         horizontalArrangement = if (alignEnd) Arrangement.End else Arrangement.Start,
     ) {
-        Surface(
-            color = background,
-            shape = RoundedCornerShape(12.dp),
-            modifier = if (wide) {
-                Modifier.fillMaxWidth(0.95f)
-            } else {
-                Modifier.widthIn(max = 320.dp)
-            },
-        ) {
-            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+        if (background == null) {
+            // 无底色：直接铺开，只留让内容呼吸的横向 2dp 与脚注间距。
+            Column(
+                modifier = Modifier
+                    .then(if (wide) Modifier.fillMaxWidth() else Modifier.widthIn(max = 340.dp))
+                    .padding(horizontal = 2.dp, vertical = 2.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 content()
-                val caption = buildString {
-                    if (time > 0L) append(TimeText.relative(time, now))
-                    if (footer != null) {
-                        if (isNotEmpty()) append(' ')
-                        append(footer)
-                    }
-                }
                 if (caption.isNotBlank()) {
                     Text(
                         text = caption,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 4.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
                     )
+                }
+            }
+        } else {
+            Surface(
+                color = background,
+                shape = if (alignEnd) bubbleTailShape else bubbleShape,
+                modifier = if (wide) {
+                    Modifier.fillMaxWidth(0.95f)
+                } else {
+                    Modifier.widthIn(max = 300.dp)
+                },
+            ) {
+                Column(
+                    Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    content()
+                    if (caption.isNotBlank()) {
+                        Text(
+                            text = caption,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                        )
+                    }
                 }
             }
         }

@@ -33,9 +33,12 @@ private fun androidx.compose.ui.test.SemanticsNodeInteractionCollection.count():
  * ③ 再点一下收回（否则用户没有回头路）；
  * ④ 进行中的分组多一条实时细节，已结束的分组没有。
  *
- * ⚠️ 标题里的 `▸`/`▾` 与文字是**两个独立的 Text 节点**（[GroupRow] 把 chevron 单独放，
- * 这样展开态只需改一个字符）。所以断言要按文字本身找，点也点在文字上——
- * 首跑我把 "▸ 已读取文件" 当一个节点找，7 项全挂。
+ * ⚠️ 标题里的 chevron 与文字是**两个独立的 Text 节点**（[GroupRow] 把 chevron 单独放）。
+ * 所以断言要按文字本身找，点也点在文字上——首跑我把 "▸ 已读取文件" 当一个节点找，7 项全挂。
+ *
+ * ⚠️ R016 之后 chevron 改成「同一个 `▸` 字形旋转 90°」而不是 `▸`/`▾` 换字符
+ * （两个字形宽度不同，切换时标题会被推着左右跳），所以**展开态不再有 `▾` 文本节点**。
+ * 展开/收起的判据统一改成「成员卡片在不在语义树里」——那才是用户关心的东西。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -120,7 +123,6 @@ class GroupRowRenderTest {
         compose.onNodeWithText("已读取文件").performClick()
         compose.runOnIdle { }
 
-        compose.onNodeWithText("▾").assertExists()
         assertEquals(1, compose.onAllNodesWithText("工具 · read", substring = true).count())
         compose.onNodeWithText("结果文本").assertExists()
     }
@@ -132,10 +134,11 @@ class GroupRowRenderTest {
 
         compose.onNodeWithText("已读取文件").performClick()
         compose.runOnIdle { }
-        compose.onNodeWithText("▾").performClick()
+        assertEquals(1, compose.onAllNodesWithText("工具 · read", substring = true).count())
+
+        compose.onNodeWithText("已读取文件").performClick()
         compose.runOnIdle { }
 
-        compose.onNodeWithText("▸").assertExists()
         assertEquals(0, compose.onAllNodesWithText("工具 · read", substring = true).count())
     }
 

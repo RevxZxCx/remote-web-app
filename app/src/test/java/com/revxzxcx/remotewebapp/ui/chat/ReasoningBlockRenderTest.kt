@@ -34,8 +34,13 @@ private fun androidx.compose.ui.test.SemanticsNodeInteractionCollection.count():
  * ② 点一下才展开，展开后正文出现；
  * ③ 再点一下收起——否则用户没有回头路，只能重开会话。
  *
- * 断言只查文本在不在：配色/圆角由真机验收管。同 `QueuedRowRenderTest` 的教训，
- * Robolectric 下 bounds 退化，所以用 `assertExists()` 而不是 `assertIsDisplayed()`。
+ * **断言只查文本在不在，不查 chevron 字符**：R016 把 `▸`/`▾` 换字符改成了同一个
+ * `▸` 字形旋转 90°（两个字形宽度不同，切换时标题会被推着左右跳），所以展开态
+ * **不再有**「▾」这个文本节点。展开/收起的判据改成「正文在不在语义树里」——
+ * 那是用户真正关心的东西，也顺带对实现细节免疫。
+ *
+ * 配色/圆角由真机验收管。同 `QueuedRowRenderTest` 的教训，Robolectric 下 bounds
+ * 退化，所以用 `assertExists()` 而不是 `assertIsDisplayed()`。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -46,6 +51,9 @@ class ReasoningBlockRenderTest {
 
     private val reasoning = "先读一遍文件，再决定怎么改。这里是很长很长的推理过程，真实会话里会有几千字。"
 
+    /** 标题行的文案：chevron 是独立的 Text 节点（且字形不随展开态变），所以只断标题。 */
+    private fun title(length: Int) = "思考过程 · $length 字"
+
     @Test
     fun `默认折叠且不显示推理正文`() {
         compose.setContent {
@@ -54,7 +62,7 @@ class ReasoningBlockRenderTest {
             }
         }
 
-        compose.onNodeWithText("▸ 思考过程 · ${reasoning.length} 字").assertExists()
+        compose.onNodeWithText(title(reasoning.length)).assertExists()
         // 折叠态下正文必须**完全不在语义树里**——只靠「看不见」是不够的，
         //  TalkBack 与 find 都能摸到它。
         assertEquals(0, compose.onAllNodesWithText(reasoning).count())
@@ -68,10 +76,9 @@ class ReasoningBlockRenderTest {
             }
         }
 
-        compose.onNodeWithText("▸ 思考过程 · ${reasoning.length} 字").performClick()
+        compose.onNodeWithText(title(reasoning.length)).performClick()
         compose.runOnIdle { }
 
-        compose.onNodeWithText("▾ 思考过程 · ${reasoning.length} 字").assertExists()
         compose.onNodeWithText(reasoning).assertExists()
     }
 
@@ -83,12 +90,11 @@ class ReasoningBlockRenderTest {
             }
         }
 
-        compose.onNodeWithText("▸ 思考过程 · ${reasoning.length} 字").performClick()
+        compose.onNodeWithText(title(reasoning.length)).performClick()
         compose.runOnIdle { }
-        compose.onNodeWithText("▾ 思考过程 · ${reasoning.length} 字").performClick()
+        compose.onNodeWithText(title(reasoning.length)).performClick()
         compose.runOnIdle { }
 
-        compose.onNodeWithText("▸ 思考过程 · ${reasoning.length} 字").assertExists()
         assertEquals(0, compose.onAllNodesWithText(reasoning).count())
     }
 
@@ -113,14 +119,13 @@ class ReasoningBlockRenderTest {
                 ReasoningBlock(text.value)
             }
         }
-        compose.onNodeWithText("▸ 思考过程 · 7 字").performClick()
+        compose.onNodeWithText(title("先读一遍文件。".length)).performClick()
         compose.runOnIdle { }
         compose.onNodeWithText("先读一遍文件。").assertExists()
 
         // 同一个前缀继续增长（流式的真实形状）：状态不应被重置。
         text.value = "先读一遍文件。然后决定怎么改。"
         compose.runOnIdle { }
-        compose.onNodeWithText("▾ 思考过程 · 15 字").assertExists()
         compose.onNodeWithText("先读一遍文件。然后决定怎么改。").assertExists()
     }
 
@@ -132,7 +137,7 @@ class ReasoningBlockRenderTest {
                 ReasoningBlock(long)
             }
         }
-        compose.onNodeWithText("▸ 思考过程 · ${long.length} 字").performClick()
+        compose.onNodeWithText(title(long.length)).performClick()
         compose.runOnIdle { }
         compose.onNodeWithText(long).assertExists()
     }

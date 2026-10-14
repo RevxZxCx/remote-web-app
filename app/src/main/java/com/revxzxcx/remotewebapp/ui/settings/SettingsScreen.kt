@@ -115,7 +115,7 @@ fun SettingsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             TextButton(onClick = { showUnpairConfirm = true }) {
-                Text("解除配对", color = Color(0xFFFFB4AB))
+                Text("解除配对", color = MaterialTheme.colorScheme.error)
             }
         }
     }

@@ -123,7 +123,8 @@ fun PairScreen(
 
             state.error?.let { error ->
                 Surface(
-                    color = Color(0xFF3A1E22),
+                    // 配色跟随主题（早先是硬编码深红底 + 亮红字）——R016。
+                    color = MaterialTheme.colorScheme.errorContainer,
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -135,7 +136,7 @@ fun PairScreen(
                             text = error,
                             modifier = Modifier.weight(1f),
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFFFB4AB),
+                            color = MaterialTheme.colorScheme.onErrorContainer,
                         )
                         TextButton(onClick = viewModel::clearError) { Text("知道了") }
                     }
