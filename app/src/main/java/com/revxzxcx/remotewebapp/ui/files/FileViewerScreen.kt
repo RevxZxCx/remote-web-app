@@ -1,7 +1,6 @@
 package com.revxzxcx.remotewebapp.ui.files
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
@@ -54,6 +53,7 @@ import com.revxzxcx.remotewebapp.core.changes.DiffHunk
 import com.revxzxcx.remotewebapp.core.files.FileKind
 import com.revxzxcx.remotewebapp.ui.chat.ADDED_COLOR
 import com.revxzxcx.remotewebapp.ui.chat.DELETED_COLOR
+import com.revxzxcx.remotewebapp.ui.common.decodeScaled
 import com.revxzxcx.remotewebapp.ui.markdown.MdBlocks
 import com.revxzxcx.remotewebapp.ui.markdown.MdParser
 import kotlinx.coroutines.Dispatchers
@@ -467,23 +467,6 @@ private sealed interface ImageDecode {
     data object Decoding : ImageDecode
     data class Ready(val bitmap: Bitmap) : ImageDecode
     data class Failed(val reason: String) : ImageDecode
-}
-
-/**
- * 按屏幕宽度下采样解码 [bytes]。
- *
- * 先用 `inJustDecodeBounds` 只读尺寸（不分配像素内存），算出 2 的幂次 `inSampleSize`，
- * 再真正解码。宽度取 1440：手机上超过这个宽度肉眼已无差别，而内存按面积下降。
- */
-private fun decodeScaled(bytes: ByteArray, maxWidth: Int = 1440): Bitmap? {
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-    val width = bounds.outWidth
-    if (width <= 0) return null
-    var sample = 1
-    while (width / (sample * 2) >= maxWidth) sample *= 2
-    val options = BitmapFactory.Options().apply { inSampleSize = sample }
-    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
 }
 
 /** 列表底部：加载更多的转圈、「已到文件末尾」、或**追加失败**的续读入口。 */

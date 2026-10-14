@@ -34,6 +34,15 @@ object MdParser {
      */
     fun parse(text: String): List<MdBlock> = parseBlocks(normalize(text), 0)
 
+    /**
+     * 供 [MdStream] 用的模块内入口：解析**已经归一化**的 [text]，区间按 [base] 平移到外部坐标。
+     *
+     * 与 [parse] 只差两点：不再做一次全文归一化（调用方已经做过，流式场景下每帧省一次
+     * 全文字符串拷贝），以及接受 base 偏移。有了 base，MdStream 就不必先把块解析出来
+     * 再整体 `shift` 一遍——那既是 O(块数) 的对象拷贝，也容易漏掉嵌套块。
+     */
+    internal fun parseNormalized(text: String, base: Int): List<MdBlock> = parseBlocks(text, base)
+
     private fun normalize(text: String): String =
         text.replace("\r\n", "\n").replace('\r', '\n')
 

@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
@@ -40,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +54,7 @@ import com.revxzxcx.remotewebapp.core.session.SessionGrouping
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.workspace.Workspace
 import com.revxzxcx.remotewebapp.ui.common.CacheNotice
+import com.revxzxcx.remotewebapp.ui.common.ConfirmUnpairDialog
 import com.revxzxcx.remotewebapp.ui.common.ConnectionBanner
 import kotlinx.coroutines.launch
 
@@ -71,6 +74,7 @@ fun HomeScreen(
     onUnpair: () -> Unit,
     onOpenSession: ((SessionSummary, Workspace?) -> Unit)? = null,
     onOpenDebug: (() -> Unit)? = null,
+    onOpenSettings: (() -> Unit)? = null,
 ) {
     val state by viewModel.state.collectAsState()
     val carrier by viewModel.carrier.collectAsState()
@@ -78,6 +82,11 @@ fun HomeScreen(
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val now = rememberNow()
+
+    // 「退出」= 擦掉本机凭证。M4 验收时误触过一次（「诊断」与「退出」在顶栏只差 131 px），
+    // 结果得回桌面端重新发起配对才能恢复——配对只能桌面端发起，App 自己无能为力。
+    // 所以这个破坏性动作必须有二次确认（M5-1，T021 记录的 UX 问题）。
+    var showExitConfirm by rememberSaveable { mutableStateOf(false) }
 
     // 抽屉的开合由 `drawerState` 自己持有（`ModalNavigationDrawer` 已经处理了手势与返回键），
     // 不再镜像到 ViewModel —— 早先那个 `drawerOpen` 字段没有任何回写点，恒为 false，
@@ -127,7 +136,10 @@ fun HomeScreen(
                         if (onOpenDebug != null) {
                             TextButton(onClick = onOpenDebug) { Text("诊断") }
                         }
-                        TextButton(onClick = onUnpair) { Text("退出") }
+                        if (onOpenSettings != null) {
+                            TextButton(onClick = onOpenSettings) { Text("设置") }
+                        }
+                        TextButton(onClick = { showExitConfirm = true }) { Text("退出") }
                     },
                 )
             },
@@ -139,10 +151,10 @@ fun HomeScreen(
                     .padding(padding),
             ) {
                 // 全局状态条（FR-4.4）取代了早前的本地文案条：文案来自唯一的载波，
-                // 因此不会与聊天页顶端的同一条打架。
+                // 因此不会与聊天页顶端的同一条打架。时钟由横幅自持（R007d P3-7），
+                // 屏幕顶层不再需要一个每 30 秒变一次的 now。
                 ConnectionBanner(
                     carrier = carrier,
-                    nowMillis = now,
                     onRepair = onUnpair,
                     onRetry = viewModel::retry,
                 )
@@ -242,6 +254,11 @@ fun HomeScreen(
                 }
             }
         }
+    }
+
+    if (showExitConfirm) {
+        // 共享组件（R007 P2-5）：设置页的「解除配对」用的是同一个框。
+        ConfirmUnpairDialog(onConfirm = onUnpair, onDismiss = { showExitConfirm = false })
     }
 }
 
@@ -423,7 +440,16 @@ private fun SessionRowItem(
  * 所以「最近」这一段是主入口（原型 `#home` 的会话抽屉）。
  */
 @Composable
-private fun SessionDrawer(
+/**
+ * 会话抽屉。
+ *
+ * 可见性是 `internal` 而不是 `private`：这个组装的 `LazyColumn` key 唯一性是一个
+ * **反复逃逸**的真实缺陷（R003：同一会话同时出现在两个工作区的 `sessionIds` 里时
+ * 抛 `IllegalArgumentException: Key … was already used`），而它只能靠渲染层测试
+ * 才抓得到——502 项纯逻辑单测全部漏掉了它。测试源码集与 main 同模块，
+ * `internal` 正好够用，不必把实现细节公开成 `public`。
+ */
+internal fun SessionDrawer(
     state: HomeUiState,
     onOpenSession: (SessionSummary, Workspace?) -> Unit,
     onRefreshSessions: () -> Unit,

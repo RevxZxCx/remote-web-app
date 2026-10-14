@@ -13,12 +13,21 @@ androidxJunit = "1.3.0"
 zxing = "4.3.0"
 mockwebserver = "5.4.0"
 highlights = "1.1.0"
+# 图片解码要按 EXIF 方向摆正（R007d P2-2：手机竖拍写 Orientation=6/8，不摆正会旋转 90°）。
+# exifinterface 的版本取独立编号，需按 D18 实测 AAR 元数据（minCompileSdk）。
+exifinterface = "1.4.1"
 # KSP 版本前缀必须与 Kotlin 版本逐字一致（2.2.21），后缀是 KSP 自己的版本号。
 # 2.2.21-2.0.4 与 2.2.21-2.0.5 都存在，取较新的。
 ksp = "2.2.21-2.0.5"
 # Room 2.8.5 的 AAR 声明 minCompileSdk=34 / minAndroidGradlePluginVersion=8.1.1，
 # 与本工程 compileSdk 36 + AGP 8.13.2 兼容（按 D18 实测 AAR 元数据后选定，不取 latest）。
 room = "2.8.5"
+# 真实渲染测试（决策 D22，推翻 D21）。D21 以「离线不可靠」为由不引 Robolectric，
+# 代价是全部单测都只覆盖纯逻辑层：R003 的 LazyColumn 重复 key、R005 的卡片文案分支
+# 都只能在真机上靠肉眼发现。Robolectric 的 android-all jar 首跑联网拉一次，
+# 之后进 F:\gradle-home，--offline 可复现。
+# 4.17 是写这段时的最新稳定版；它自带 API 36（Android 16）的 android-all。
+robolectric = "4.17"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -40,14 +49,25 @@ androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "a
 zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxing" }
 mockwebserver3 = { group = "com.squareup.okhttp3", name = "mockwebserver3", version.ref = "mockwebserver" }
 highlights = { group = "dev.snipme", name = "highlights", version.ref = "highlights" }
+androidx-exifinterface = { group = "androidx.exifinterface", name = "exifinterface", version.ref = "exifinterface" }
 androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+# 真实渲染测试（D22）。版本跟 compose-bom，不单独写版本号。
+androidx-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
+androidx-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+# AppRoot 的导航状态（openSession / openFile）要跨旋转与进程重建存活，用 @Parcelize + rememberSaveable。
+# 不用 navigation-compose：本期屏少、无深链接，少一个依赖（见 AppRoot 注释）。
+# **不写 version**：parcelize 子插件在 Kotlin 2.2.21 里是 `kotlin-gradle-plugin` 自带的
+# （jar 内有 `META-INF/gradle-plugins/org.jetbrains.kotlin.plugin.parcelize.properties`），
+# 单独声明版本会报 "already on the classpath with an unknown version"。
+kotlin-parcelize = { id = "org.jetbrains.kotlin.plugin.parcelize" }
 # Room 用 KSP 而非 kapt（kapt 已进入维护模式，且 KSP 与 Kotlin 2.2.21 的版本前缀必须逐字一致）。
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }

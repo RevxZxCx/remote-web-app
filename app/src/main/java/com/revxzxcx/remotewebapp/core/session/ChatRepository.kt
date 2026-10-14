@@ -56,9 +56,11 @@ class ChatRepository(
     }
 
     /**
-     * 发送一条文本消息。
+     * 发送一条文本消息，可附带图片/文件。
      *
      * @param mode `'queue'` 排到当前轮之后；`'steer'` 插进当前轮（FR-3.5，M3 只用 queue）。
+     * @param attachments 追加在文字后面的内容块；图片是内联 base64，文件必须先经
+     *   [FileUploadRepository.upload] 换成 `receiptId`（见 [PromptAttachment] 的 KDoc）。
      * @param clientTimeZone IANA 时区，服务端用它解释消息里的相对时间。
      * @return 客户端生成的 `requestId`，便于日志关联与失败重试。
      */
@@ -66,12 +68,13 @@ class ChatRepository(
         sessionId: String,
         text: String,
         mode: ChatArgs.PromptMode = ChatArgs.PromptMode.Queue,
+        attachments: List<PromptAttachment> = emptyList(),
         clientTimeZone: String? = null,
     ): String = withContext(Dispatchers.IO) {
         val requestId = UUID.randomUUID().toString()
         connection.typert.callRaw(
             DshEndpoints.SESSION_PROMPT,
-            ChatArgs.prompt(requestId, sessionId, text, mode, clientTimeZone),
+            ChatArgs.prompt(requestId, sessionId, text, mode, attachments, clientTimeZone),
         )
         requestId
     }
@@ -80,6 +83,39 @@ class ChatRepository(
     suspend fun cancel(sessionId: String) = withContext(Dispatchers.IO) {
         connection.typert.callRaw(DshEndpoints.SESSION_CANCEL, ChatArgs.cancel(sessionId))
         Unit
+    }
+
+    /**
+     * 拉取可选模型目录（`session/modelCatalog`）。
+     *
+     * **这个方法没有参数**——源码签名是 `modelCatalog(): Promise<ModelCatalog>`，所以
+     * `payload.args` 是空对象。传任何键都会踩 `assertExactArguments`。
+     */
+    suspend fun modelCatalog(): ModelCatalog = withContext(Dispatchers.IO) {
+        ModelCatalogParser.parseCatalog(
+            connection.typert.callRaw(DshEndpoints.SESSION_MODEL_CATALOG, ChatArgs.emptyArgs),
+        )
+    }
+
+    /**
+     * 切换这个会话的模型（`session/selectModel`）。
+     *
+     * @param reasoningEffort 推理档；该模型没有 `reasoning.efforts` 时必须传 null，
+     *   否则服务端会因为多一个键回 `gateway/arguments-invalid`（`reasoningEffort` 是可选字段，
+     *   传了就一定要是合法档位）。
+     * @return 服务端确认的新选择，UI 用它覆盖本地乐观状态。
+     */
+    suspend fun selectModel(
+        sessionId: String,
+        provider: String,
+        model: String,
+        reasoningEffort: String? = null,
+    ): ModelRef = withContext(Dispatchers.IO) {
+        val raw = connection.typert.callRaw(
+            DshEndpoints.SESSION_SELECT_MODEL,
+            ChatArgs.selectModel(sessionId, provider, model, reasoningEffort),
+        )
+        ModelCatalogParser.parseSelection(raw, which = "selected") ?: ModelRef(provider, model, reasoningEffort)
     }
 
     /** 一次翻页的结果。 */

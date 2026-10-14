@@ -72,6 +72,22 @@ sealed interface ChatFrame {
          * （R006 P3-1）。
          */
         val windowMinSeq: Long? = null,
+        /**
+         * 当前/下一次轮次要用的模型（`projections.values.modelSelection`）。
+         *
+         * 取 `next` 而不是 `lastUsed`：用户改了模型但还没开始下一轮时，`lastUsed` 仍是旧值，
+         * 按钮上显示旧模型会让用户以为「没改上」。为 null 表示这个投影还没到（服务端可能
+         * 在会话还没有任何模型选择时不下发）。
+         */
+        val model: ModelRef? = null,
+        /**
+         * 这一轮消息里图片的硬限制（`projections.values.imageLimits`）。
+         *
+         * 客户端在用户选图时先按它挡一道，给出中文即时反馈；真正的强制校验在服务端
+         * `attachments.admitPromptContent`（`attachmentService.ts:782-829`）。
+         * 为 null 表示该投影还没下发（服务端可能在某些版本不带），此时按「不限制」处理。
+         */
+        val imageLimits: ImageLimits? = null,
     ) : ChatFrame
 
     /**
@@ -247,6 +263,11 @@ class ChatFrameParser(
             windowMinSeq = envelopes
                 .mapNotNull { events.parseEvent(it)?.seq }
                 .minOrNull(),
+            model = ModelCatalogParser.parseSelection(
+                values?.get("modelSelection"),
+                which = "next",
+            ),
+            imageLimits = ImageLimits.of(values?.get("imageLimits")),
         )
     }
 

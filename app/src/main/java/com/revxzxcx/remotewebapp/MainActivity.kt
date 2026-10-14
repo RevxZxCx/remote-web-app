@@ -4,6 +4,8 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import com.revxzxcx.remotewebapp.ui.AppRoot
 
 /**
@@ -19,7 +21,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val container = (application as DshApplication).container
         setContent {
-            DshAssistantTheme {
+            // 主题偏好必须在 setContent 之外同步读一次初值（冷启动第一帧就生效），
+            // 之后交给 StateFlow 驱动重组。M5-9。
+            val themeMode by container.themePreferences.mode.collectAsState()
+            DshAssistantTheme(themeMode = themeMode) {
                 AppRoot(container = container)
             }
         }

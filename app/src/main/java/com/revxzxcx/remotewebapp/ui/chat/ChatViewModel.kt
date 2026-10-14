@@ -17,7 +17,17 @@ import com.revxzxcx.remotewebapp.core.session.ChatItem
 import com.revxzxcx.remotewebapp.core.session.ChatReducer
 import com.revxzxcx.remotewebapp.core.session.ChatRepository
 import com.revxzxcx.remotewebapp.core.session.ChatUiState
+import com.revxzxcx.remotewebapp.core.session.FileUploadRepository
+import com.revxzxcx.remotewebapp.core.session.ImageLimits
+import com.revxzxcx.remotewebapp.core.session.ImageMeasure
+import com.revxzxcx.remotewebapp.core.session.ImageRejection
+import com.revxzxcx.remotewebapp.core.session.message
+import com.revxzxcx.remotewebapp.core.session.ModelRef
+import com.revxzxcx.remotewebapp.core.session.PromptAttachment
+import com.revxzxcx.remotewebapp.core.session.SessionAttachmentRepository
 import com.revxzxcx.remotewebapp.core.session.SessionEventParser
+import com.revxzxcx.remotewebapp.core.session.toBase64
+import com.revxzxcx.remotewebapp.core.session.validateImage
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -45,7 +55,7 @@ import kotlinx.serialization.json.JsonObject
  */
 class ChatViewModel(
     private val connection: DshConnection,
-    private val sessionId: String,
+    val sessionId: String,
     private val cache: DshCache? = null,
     private val ownerId: String = "",
 ) : ViewModel() {
@@ -53,6 +63,17 @@ class ChatViewModel(
     private val repository = ChatRepository(connection)
     private val changesRepository = ChangesRepository(connection)
     private val events = SessionEventParser()
+
+    /**
+     * 附件读取（需求 FR-5 的「图片」）。
+     *
+     * 与 `repository`/`changesRepository` 一样由 [connection] 提供：请求本身走
+     * [DshConnection.typert]，失败时抛 [TypertException]，由 UI 决定显示什么。
+     */
+    val attachments: SessionAttachmentRepository = connection.attachments
+
+    /** 文件上传（发文件前必须先换回执，见 [FileUploadRepository]）。 */
+    private val uploads = connection.uploads
 
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
@@ -71,11 +92,39 @@ class ChatViewModel(
         .map { it.carrier }
         .stateIn(viewModelScope, SharingStarted.Eagerly, connection.mux.stats.value.carrier)
 
-    private var streamJob: Job? = null
     private var pageJob: Job? = null
     private var sendJob: Job? = null
     private var changesJob: Job? = null
     private var cacheJob: Job? = null
+
+    /**
+     * 拉可选模型目录的协程。
+     *
+     * 与 [modelJob] **必须分开**（R007 P1-2）：早先共用一个 `modelJob`，导致
+     * 「目录还在加载」会把用户随后点的模型选择整个挡掉。
+     */
+    private var catalogJob: Job? = null
+
+    /** 切换模型的协程（`session/selectModel`）。 */
+    private var modelJob: Job? = null
+
+    /** 「选文件 → 上传 → 入待发送」整条链的协程。 */
+    private var attachJob: Job? = null
+    private var streamJob: Job? = null
+
+    /**
+     * 附件相关的一次性提示：读文件失败、超出图片上限、上传失败。
+     *
+     * 放 ViewModel 而不是 Composable 的 `remember`（R007 P2-3）：上传跑在
+     * [viewModelScope] 里，旋转屏幕不会取消它；提示若还在 UI 侧，旋转就被重置，
+     * 用户看不到任何反馈。
+     */
+    private val _attachNotice = MutableStateFlow<String?>(null)
+    val attachNotice: StateFlow<String?> = _attachNotice.asStateFlow()
+
+    /** 待发送附件（同样放 ViewModel：旋转屏幕不丢，已上传换到回执的不必重传）。 */
+    private val _pending = MutableStateFlow<List<PromptAttachment>>(emptyList())
+    val pending: StateFlow<List<PromptAttachment>> = _pending.asStateFlow()
 
     init {
         warmStart()
@@ -143,20 +192,32 @@ class ChatViewModel(
      *
      * 成功后清空输入框；失败保留输入内容并把错误挂到状态上（不能让用户白打一遍字）。
      * 发送用 `mode:'queue'`：排到当前轮之后，不会打断正在生成的回复。
+     *
+     * 文字可以为空——只要挂了附件。「只发图不发字」是常见用法，服务端
+     * `hasPromptContent` 明确要求的是「非空白文本**或**一个附件」
+     * （`dsh-api-session-controller/lib/index.js:851`）。这里若在空文本时直接
+     * return，输入区的「发送」按钮是亮的（`draft.isNotBlank() || pending.isNotEmpty()`），
+     * 点下去却毫无反应也不报错——用户在设备上看到的就是「按钮坏了」。
      */
     fun send() {
         val text = _draft.value.trim()
-        if (text.isEmpty()) return
+        val attachments = _pending.value
+        if (text.isEmpty() && attachments.isEmpty()) return
         if (sendJob?.isActive == true) return
         sendJob = viewModelScope.launch {
             try {
+                // 文件附件在上面的 attachFile 里就已经上传换好回执了，这里直接发。
+                // 上传失败时它不会进 _pending，所以 content 数组不会出现残缺块。
                 repository.prompt(
                     sessionId = sessionId,
                     text = text,
                     mode = ChatArgs.PromptMode.Queue,
+                    attachments = attachments,
                     clientTimeZone = java.util.TimeZone.getDefault().id,
                 )
                 _draft.value = ""
+                _pending.value = emptyList()
+                _attachNotice.value = null
                 _state.value = _state.value.copy(error = null, sendError = null)
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 // 取消不是发送失败：`onCleared`/`retry` 会取消在途的发送，此时不该把
@@ -166,6 +227,122 @@ class ChatViewModel(
                 _state.value = _state.value.copy(sendError = describe(cause))
             }
         }
+    }
+
+    // ---------------------------------------------------------------- 附件（需求 FR-5）
+
+    /**
+     * 服务端对这一轮图片的硬限制（`projections.values.imageLimits`）。
+     *
+     * 取自 `session/follow` 快照的投影，随会话变化（换模型会变）。取不到时是
+     * [ImageLimits] 默认值 = 不限制，由服务端自己挡。
+     */
+    var imageLimits: ImageLimits = ImageLimits()
+        private set
+
+    /**
+     * 加入一张待发送的图片。
+     *
+     * @param bytes 原始字节（不是 base64 后）。
+     * @param mediaType MIME 类型。
+     * @param name 文件名，可为 null。
+     * @return 被 [ImageLimits] 挡下时的中文理由；成功加入返回 null。
+     */
+    fun attachImage(
+        bytes: ByteArray,
+        mediaType: String,
+        name: String?,
+        measure: ImageMeasure,
+    ): ImageRejection? {
+        val already = _pending.value.filter { it.kind == PromptAttachment.Kind.IMAGE }
+        // base64 后长度 ≈ 原始 × 4/3，反推已挂图片占用的原始字节。
+        val alreadyBytes = already.sumOf { it.data.length * 3L / 4L }
+        val rejection = imageLimits.validateImage(measure, mediaType, already, alreadyBytes)
+        // 提示一并落到 ViewModel（R007 P2-3）：早先由 UI 侧 `remember` 承载，
+        // 旋转屏幕就没了。成功时清掉上一次的提示。
+        _attachNotice.value = rejection?.message()
+        if (rejection != null) return rejection
+        _pending.value = _pending.value + PromptAttachment(
+            kind = PromptAttachment.Kind.IMAGE,
+            name = name,
+            mediaType = mediaType,
+            data = bytes.toBase64(),
+        )
+        return null
+    }
+
+    /**
+     * 加入一个待发送的文件：先上传换回执，成功才算加入。
+     *
+     * 上传是网络调用，所以这里是 `suspend`；失败由调用方（UI）转成错误文案。
+     *
+     * **不要**用 `runCatching` 包住它（R007 P2-1）：那会连
+     * [kotlinx.coroutines.CancellationException] 一起吞掉，把「旋转屏幕取消上传」
+     * 显示成「附件上传失败（JobCancellationException）」——用户完全看不懂。
+     *
+     * 回执为空时返回失败（R007 P2-2）：`file` 内容块只有一个 `receiptId` 键，
+     * 空回执的附件发不出去。静默丢弃会让用户「选了文件却什么都没有」。
+     */
+    suspend fun attachFile(bytes: ByteArray, name: String?): Result<PromptAttachment> {
+        val attachment = try {
+            val result = uploads.upload(sessionId, bytes.toBase64(), name)
+            PromptAttachment(
+                kind = PromptAttachment.Kind.FILE,
+                name = result.file.name.ifBlank { name.orEmpty() },
+                receiptId = result.receiptId,
+            )
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Exception) {
+            return Result.failure(cause)
+        }
+        if (attachment.receiptId.isNullOrEmpty()) {
+            return Result.failure(
+                IllegalStateException("桌面端没有返回文件回执，附件未添加，请重试"),
+            )
+        }
+        _pending.value = _pending.value + attachment
+        return Result.success(attachment)
+    }
+
+    /**
+     * 「选文件 → 上传 → 入待发送」整条链，跑在 [viewModelScope] 里。
+     *
+     * 早先这条链在 Composer 的 `rememberCoroutineScope` 里：旋转屏幕会取消 composition，
+     * 于是上传被取消、提示被重置，用户既看不到失败也看不到成功（R007 P2-3）。
+     * 挪进来之后旋转不打断上传，提示也由 [attachNotice] 承载、不会丢。
+     */
+    fun attachFileInBackground(bytes: ByteArray, name: String?) {
+        if (attachJob?.isActive == true) return
+        _attachNotice.value = "正在上传${name?.let { " $it" } ?: ""}…"
+        attachJob = viewModelScope.launch {
+            val failure = try {
+                attachFile(bytes, name).exceptionOrNull()
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            }
+            // 上传途中被取消时不要覆盖提示：取消不是失败。
+            if (failure != null) {
+                _attachNotice.value = failure.message
+                    ?: "附件上传失败（${failure::class.java.simpleName}）"
+            }
+        }
+    }
+
+    /** 直接设置附件提示（null = 清掉）。读文件失败这类「还没到上传」的错误走这里。 */
+    fun setAttachNotice(text: String?) {
+        _attachNotice.value = text
+    }
+
+    /** 清掉附件提示（用户点了提示上的关闭，或换了一个会话）。 */
+    fun clearAttachNotice() {
+        _attachNotice.value = null
+    }
+
+    /** 移除一个待发送附件（按在列表里的位置）。 */
+    fun removeAttachment(index: Int) {
+        if (index !in _pending.value.indices) return
+        _pending.value = _pending.value.filterIndexed { i, _ -> i != index }
     }
 
     /** 中止当前生成（`session/cancel`）。 */
@@ -179,6 +356,95 @@ class ChatViewModel(
             } catch (cause: Exception) {
                 _state.value = _state.value.copy(sendError = describe(cause))
             }
+        }
+    }
+
+    /**
+     * 打开模型选择器（拉一次可选目录）。
+     *
+     * 目录是全局的，所以只在第一次打开时拉；之后复用 [ChatUiState.catalog]。
+     * 已在加载中或已拉到结果时直接返回，避免连点打出多个请求。
+     *
+     * 用 [catalogJob] 而不是与切换模型共用的 [modelJob]（R007 P1-2）：共用时
+     * 「目录还在加载」会把用户随后点的模型选择整个挡掉。
+     */
+    fun openModelPicker() {
+        val current = _state.value
+        if (current.catalog != null || current.catalogLoading) return
+        if (catalogJob?.isActive == true) return
+        _state.value = current.copy(catalogLoading = true, modelError = null)
+        catalogJob = viewModelScope.launch {
+            val catalog = try {
+                repository.modelCatalog()
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                _state.value = _state.value.copy(catalogLoading = false)
+                throw cause
+            } catch (cause: Exception) {
+                _state.value = _state.value.copy(
+                    catalogLoading = false,
+                    modelError = describe(cause),
+                )
+                return@launch
+            }
+            _state.value = _state.value.copy(
+                catalog = catalog,
+                catalogLoading = false,
+                modelError = null,
+            )
+        }
+    }
+
+    /**
+     * 切换这个会话的模型（`session/selectModel`）。
+     *
+     * @param reasoningEffort 推理档；模型没有 `reasoning.efforts` 时必须传 null，
+     *   否则服务端会因为多一个键回 `gateway/arguments-invalid`。
+     *
+     * 先乐观更新 [ChatUiState.model] 再发请求：RPC 往返有几百毫秒，期间按钮还显示旧模型
+     * 会让用户以为「没点上」。失败时回滚到快照投影给的值，并给出可重试的错误条。
+     *
+     * **重入处理（R007 P1-2）**：守卫必须放在乐观更新**之前**。早先是
+     * 「先改 UI，再 `if (modelJob?.isActive) return`」，于是一次在途请求会让用户的
+     * 第二次选择被整个吞掉——RPC 从不发出，等前一个返回时又把 UI 覆盖回旧模型，
+     * 界面与桌面端实际模型不一致。
+     *
+     * 现在改成：直接取消在途请求、发新的。`selectModel` 是「设成这个值」的幂等语义，
+     * 最后一次生效即可；排队等待反而让用户多点的那一次迟迟不反映。
+     */
+    fun selectModel(
+        provider: String,
+        model: String,
+        reasoningEffort: String? = null,
+    ) {
+        val previous = _state.value.model
+        val optimistic = ModelRef(provider, model, reasoningEffort)
+        // 取消在途的旧请求再发新的。被取消的那个协程走 CancellationException 分支
+        // 原样上抛，不会回滚状态——否则它会把用户新选的值改回旧值。
+        modelJob?.cancel()
+        _state.value = _state.value.copy(model = optimistic, modelError = null)
+        modelJob = viewModelScope.launch {
+            val selected = try {
+                repository.selectModel(
+                    sessionId = sessionId,
+                    provider = provider,
+                    model = model,
+                    reasoningEffort = reasoningEffort,
+                )
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Exception) {
+                // 只有在没有更新的选择覆盖它时才回滚：用户可能已经又点了别的模型，
+                // 此时把状态改回 previous 会把新选择抹掉。
+                if (_state.value.model == optimistic) {
+                    _state.value = _state.value.copy(
+                        model = previous,
+                        modelError = describe(cause),
+                    )
+                }
+                return@launch
+            }
+            // 以服务端确认的为准：它可能在返回里补齐/规范化我们没传的字段。
+            _state.value = _state.value.copy(model = selected, modelError = null)
         }
     }
 
@@ -272,6 +538,11 @@ class ChatViewModel(
                 }
                 .collect { frame ->
                     _state.value = ChatReducer.reduce(_state.value, frame)
+                    // 图片上限跟着会话投影走（换模型会变）。快照才带这个投影，
+                    // 单条事件帧不带，所以只在 Snapshot 上更新。
+                    if (frame is ChatFrame.Snapshot) {
+                        imageLimits = frame.imageLimits ?: ImageLimits()
+                    }
                     // 写穿缓存：帧里带来的原始信封落盘，供下次冷启动先铺（需求 FR-4.3）。
                     persist(envelopesOf(frame))
                 }
@@ -420,6 +691,9 @@ class ChatViewModel(
         sendJob?.cancel()
         changesJob?.cancel()
         cacheJob?.cancel()
+        catalogJob?.cancel()
+        modelJob?.cancel()
+        attachJob?.cancel()
         super.onCleared()
     }
 

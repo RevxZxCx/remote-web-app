@@ -5,6 +5,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.kotlin.parcelize)
     alias(libs.plugins.ksp)
 }
 
@@ -46,12 +47,29 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    testOptions {
+        unitTests {
+            // Robolectric 需要 merged manifest / 资源才能起 Compose（决策 D22）。
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
     }
+}
+
+// Robolectric 在 API 34+ 上要调 `jdk.internal.access.SharedSecrets` 去摸 FileDescriptor 的
+// 原始 int 值（`ApplicationSharedMemory.create`）。JDK 16+ 默认不导出这个包，于是所有
+// 渲染测试都在 beforeTest 阶段炸：
+//   IllegalAccessException: … cannot access class jdk.internal.access.SharedSecrets
+//     (in module java.base) because module java.base does not export jdk.internal.access
+// 这是 JDK 的模块封装，不是 Robolectric 的 bug——显式开一条 add-opens 即可。
+tasks.withType<Test>().configureEach {
+    jvmArgs("--add-opens=java.base/jdk.internal.access=ALL-UNNAMED")
 }
 
 dependencies {
@@ -77,6 +95,10 @@ dependencies {
     // 代码高亮（决策 D13：轻量高亮库，不用桌面端的 Shiki）。
     implementation(libs.highlights)
 
+    // 图片解码按 EXIF 方向摆正（R007d P2-2）。ui/common/ImageDecoding.kt 是文件查看器
+    // 与聊天图片附件共用的解码收口点，摆正必须在这个收口点做，不能各调用方各做一遍。
+    implementation(libs.androidx.exifinterface)
+
     // 离线缓存（决策 D04）：工作区 / 会话列表 / 最近消息。Room 用 KSP 生成实现。
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
@@ -85,5 +107,15 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.mockwebserver3)
+    // 真实渲染测试（决策 D22，推翻 D21）。Robolectric 让 createComposeRule() 跑在 JVM 上，
+    // 于是 LazyColumn 的 key 唯一性、卡片文案分支、状态标志复位都能被单测钉住，
+    // 不再只能靠真机肉眼（R003 / R005 两轮 P1 都是这么漏过去的）。
+    // ui-test-manifest 必须走 debugImplementation：它往 debug manifest 里塞
+    // androidx.activity.ComponentActivity，供 createComposeRule() 承载。
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.ui.test.junit4)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.junit)
+    debugImplementation(libs.androidx.ui.test.manifest)
     androidTestImplementation(libs.androidx.junit)
 }

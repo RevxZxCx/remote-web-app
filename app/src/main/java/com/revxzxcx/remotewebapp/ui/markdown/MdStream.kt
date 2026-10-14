@@ -13,19 +13,59 @@ package com.revxzxcx.remotewebapp.ui.markdown
  * 1. 找**安全分割点**：最后一个「后面不可能再被追加内容改写」的行边界
  *    ——即不在围栏内的空行之后。没有安全点就整段重解析（短文本无所谓）。
  * 2. 分割点之前的部分一旦稳定就并入冻结区（只解析这一次，之后永久复用）。
- * 3. 只对分割点之后的尾部分调用 [MdParser.parse]。
+ * 3. 只对分割点之后的尾部分调用 [MdParser.parseNormalized]。
  *
  * **不变量**：`update(text)` 的结果永远等于 `MdParser.parse(text)`。
  * 增量只是一个优化，不允许改变输出（单测直接断言这条）。
+ *
+ * ## 增量的三个层次（M5-3，R005 遗留的 O(n²)）
+ *
+ * 早先的实现在**每一帧**都要做四件全量的事，所以是 O(n²)：
+ *
+ * | 早先 | 现在 |
+ * |---|---|
+ * | `text.replace("\r\n","\n")` 无条件拷一份全文 | 先 `indexOf('\r')`，没有 `\r` 就零拷贝 |
+ * | `startsWith(frozenText)` 逐字符比冻结前缀 | 只和**上一帧全文**比一次（`regionMatches`），
+ *    纯追加时冻结前缀必然还有效，不必再比 |
+ * | `safeSplit` 从第 0 行重扫全文，每行一次 `substring` | 有穷状态机，**从上次的扫描游标续扫**，
+ *    只处理新增的行 |
+ * | `normalized.substring(0, split)` 拷一份冻结前缀 | 只记 `frozenLen`（一个 Int），不存冻结原文 |
+ *
+ * 剩下的线性项只有一个：`frozenBlocks + tailBlocks` 每帧重建一次结果列表，代价是
+ * O(块数) 的引用拷贝（不是字符工作）。一篇 2 万字回复约 1000 个块，每帧拷 8 KB，
+ * 对 Android 的年轻代 GC 无压力；真要消除就得把结果改成序列，那会让调用方复杂得多。
  *
  * **非线程安全**：每个正在流式的气泡持有自己的实例，只在 Compose 的组合线程上更新。
  */
 class MdStream {
 
-    private var frozenText: String = ""
     private var frozenBlocks: List<MdBlock> = emptyList()
+
+    /** 冻结区在归一化全文里的长度（取代早先保存的 `frozenText` 副本）。 */
+    private var frozenLen: Int = 0
+
     private var lastText: String? = null
     private var lastResult: List<MdBlock> = emptyList()
+
+    // ---- safeSplit 的增量扫描游标 ----
+    // safeSplit 是一个从左到右的有穷状态机，纯追加时可以只扫新增部分。
+    // 五个量就是它的全部状态：下一个待扫行的行首、围栏字符、未闭合围栏的行首、
+    // 最近一个非空行、以及到目前为止找到的最后一个安全分割点。
+
+    /** 下一个待扫行的行首下标；永远 ≤ 上一帧文本长度。 */
+    private var scanAt: Int = 0
+
+    /** 当前是否在围栏内；null 表示不在。 */
+    private var scanFence: Char? = null
+
+    /** 未闭合围栏的行首；-1 表示没有。 */
+    private var scanFenceStart: Int = -1
+
+    /** 最近一个非空行的内容（`isSafeBoundary` 要用）。 */
+    private var scanPrevLine: String = ""
+
+    /** 到目前为止的最后一个安全分割点。 */
+    private var scanSplit: Int = 0
 
     /**
      * 用最新的全文内容刷新。
@@ -33,33 +73,35 @@ class MdStream {
      * @return 完整的块列表（冻结块 + 重解析的尾部），可直接交给 Compose 渲染。
      */
     fun update(text: String): List<MdBlock> {
-        val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
+        // 没有 '\r' 就完全跳过归一化：流式文本几乎全是 '\n'，这一条省掉每帧一次全文字符串拷贝。
+        val normalized = if (text.indexOf('\r') < 0) text else normalize(text)
 
         // 内容没变（例如这一帧只更新了思考块）：直接复用，一次解析都不做。
-        if (normalized == lastText) return lastResult
+        val prev = lastText
+        if (normalized == prev) return lastResult
 
-        // 文本被改写（重新生成、用户编辑过）→ 整个冻结区作废。
-        if (!normalized.startsWith(frozenText)) {
-            frozenText = ""
-            frozenBlocks = emptyList()
-        }
+        // 纯追加（流式的常态）→ 冻结区与扫描游标全部有效，只处理新增部分。
+        // 任何非追加（重新生成、被改写、变短）都让全部缓存作废，从头再来。
+        val appended = prev != null &&
+            normalized.length > prev.length &&
+            normalized.regionMatches(0, prev, 0, prev.length)
+        if (!appended) resetCache()
 
-        // 把新稳定的前缀并进冻结区。
         val split = safeSplit(normalized)
-        if (split > frozenText.length) {
-            val extensionText = normalized.substring(frozenText.length, split)
+        if (split > frozenLen) {
+            val extensionText = normalized.substring(frozenLen, split)
             if (extensionText.isNotEmpty()) {
-                // 尾部残段的块区间必须整体后移，否则冻结块与尾部块的坐标会对不上。
-                frozenBlocks = frozenBlocks + shift(MdParser.parse(extensionText), frozenText.length)
-                frozenText = normalized.substring(0, split)
+                // 直接用 base = frozenLen 让区间落在全文坐标上，不再需要事后 shift。
+                frozenBlocks = frozenBlocks + MdParser.parseNormalized(extensionText, frozenLen)
+                frozenLen = split
             }
         }
 
-        val tail = normalized.substring(frozenText.length)
+        val tail = normalized.substring(frozenLen)
         val result = if (tail.isEmpty()) {
             frozenBlocks
         } else {
-            frozenBlocks + shift(MdParser.parse(tail), frozenText.length)
+            frozenBlocks + MdParser.parseNormalized(tail, frozenLen)
         }
         lastText = normalized
         lastResult = result
@@ -67,11 +109,18 @@ class MdStream {
     }
 
     /** 丢弃全部缓存（切换会话、重新生成时用）。 */
-    fun reset() {
-        frozenText = ""
+    fun reset() = resetCache()
+
+    private fun resetCache() {
         frozenBlocks = emptyList()
+        frozenLen = 0
         lastText = null
         lastResult = emptyList()
+        scanAt = 0
+        scanFence = null
+        scanFenceStart = -1
+        scanPrevLine = ""
+        scanSplit = 0
     }
 
     /**
@@ -79,17 +128,34 @@ class MdStream {
      *
      * 只有两种位置算安全：**已闭合围栏之后的换行**，以及**不在围栏内的空行之后的换行**。
      * 未闭合的围栏是不安全区——它后面追加的任何一行都会被算进代码块里。
+     *
+     * @param resumed true 表示接着 [scanAt] 续扫（纯追加）；false 表示从第 0 行重扫。
+     *
+     * ## 为什么必须回滚最后一行（M5-3 实测踩到）
+     *
+     * 续扫时 [scanAt] 停在**最后一个可能还没写完的行**的行首，所以那一行会被再处理一次。
+     * 若不回滚，同一行就会应用两次状态转移：`"```"` 先是开围栏，重扫时又变成**闭围栏**，
+     * 于是 `````` 后面紧跟的换行被当成安全边界冻结出去——紧接着到来的 `x` 就成了段落，
+     * 而全文解析里它明明是代码块的内容。表现为 `MdStreamTest` 的两条不变量用例失败
+     * （`无语言代码块` 文档 len=5：期望 1 块，实得 CodeBlock + Paragraph）。
+     * 因此每次处理一行前先快照状态，遇到没有换行符的行就回滚并中断。
      */
-    private fun safeSplit(text: String): Int {
-        var split = 0
-        var fenceChar: Char? = null
-        var openFenceStart = -1
-        var lineStart = 0
-        var prevLine = ""
+    private fun safeSplit(text: String, resumed: Boolean = true): Int {
+        var lineStart = if (resumed) scanAt else 0
+        var fenceChar: Char? = if (resumed) scanFence else null
+        var openFenceStart = if (resumed) scanFenceStart else -1
+        var prevLine = if (resumed) scanPrevLine else ""
+        var split = if (resumed) scanSplit else 0
 
         while (lineStart <= text.length) {
             val nl = text.indexOf('\n', lineStart)
             val lineEnd = if (nl < 0) text.length else nl
+
+            // 处理这一行之前的状态快照（见方法 KDoc 的「为什么必须回滚最后一行」）。
+            val beforeFence = fenceChar
+            val beforeFenceStart = openFenceStart
+            val beforePrevLine = prevLine
+
             val line = text.substring(lineStart, lineEnd)
 
             val fence = fenceAt(line)
@@ -107,9 +173,26 @@ class MdStream {
             }
 
             if (line.isNotBlank()) prevLine = line
-            if (nl < 0) break
+
+            if (nl < 0) {
+                // 这一行还没有换行符，随时可能被追加内容改写 → 回滚并停在它行首。
+                // （`split` 不需要回滚：两条修改它的分支都要求 `lineEnd < text.length`，
+                //  而这里 `lineEnd == text.length`，必然不成立。）
+                fenceChar = beforeFence
+                openFenceStart = beforeFenceStart
+                prevLine = beforePrevLine
+                break
+            }
             lineStart = nl + 1
         }
+
+        // 保存游标：`lineStart` 是最后一个（可能还没写完的）行的行首，
+        // 下一次追加必须重新扫它——它随时可能补上换行符、闭合围栏、或从半行变成整行。
+        scanAt = lineStart
+        scanFence = fenceChar
+        scanFenceStart = openFenceStart
+        scanPrevLine = prevLine
+        scanSplit = split
 
         // 尾部是未闭合围栏：绝不能冻结到它里面去。
         if (fenceChar != null && openFenceStart >= 0) split = minOf(split, openFenceStart)
@@ -152,33 +235,6 @@ class MdStream {
         return if (trimmed.substring(n).isBlank()) c else null
     }
 
-    /**
-     * 把一段块的区间整体后移 [offset]，让它们对齐到全文坐标。
-     *
-     * 引用块里的嵌套块也要一起移——不动的话，引用块内部的坐标会指向尾部局部位置，
-     * 冻结之后就会错位。
-     */
-    private fun shift(blocks: List<MdBlock>, offset: Int): List<MdBlock> {
-        if (offset == 0) return blocks
-        return blocks.map { shiftBlock(it, offset) }
-    }
-
-    private fun shiftBlock(block: MdBlock, offset: Int): MdBlock {
-        val s = block.startOffset + offset
-        val e = block.endOffset + offset
-        return when (block) {
-            is MdBlock.Paragraph -> block.copy(startOffset = s, endOffset = e)
-            is MdBlock.Heading -> block.copy(startOffset = s, endOffset = e)
-            is MdBlock.CodeBlock -> block.copy(startOffset = s, endOffset = e)
-            is MdBlock.BulletList -> block.copy(startOffset = s, endOffset = e)
-            is MdBlock.OrderedList -> block.copy(startOffset = s, endOffset = e)
-            is MdBlock.Table -> block.copy(startOffset = s, endOffset = e)
-            is MdBlock.Rule -> block.copy(startOffset = s, endOffset = e)
-            is MdBlock.Quote -> block.copy(
-                blocks = shift(block.blocks, offset),
-                startOffset = s,
-                endOffset = e,
-            )
-        }
-    }
+    private fun normalize(text: String): String =
+        text.replace("\r\n", "\n").replace('\r', '\n')
 }

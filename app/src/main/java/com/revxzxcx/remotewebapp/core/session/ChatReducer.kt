@@ -77,6 +77,27 @@ data class ChatUiState(
      * 细提示，而不是让用户以为看到的就是最新状态。收到任何一帧后由 reducer 置假。
      */
     val fromCache: Boolean = false,
+    /**
+     * 这个会话下一次轮次要用的模型（`projections.values.modelSelection.next`）。
+     *
+     * 权威来源是快照投影，但用户刚切完模型时服务端要等下一次快照才更新它，所以
+     * `selectModel` 成功后由 ViewModel 直接覆盖（乐观更新）——否则按钮会在几秒内
+     * 继续显示旧模型。
+     */
+    val model: ModelRef? = null,
+    /**
+     * 切换模型失败。重试动作是重新选择，与流/发送/翻页的失败都无关（R006 P3-6 同理由）。
+     */
+    val modelError: String? = null,
+    /**
+     * 可选模型目录；为 null 表示还没拉到（或这个会话拉不到）。
+     *
+     * 与 [ChatUiState.model] 分开：前者是「能选谁」，后者是「现在选的是谁」。
+     * 目录是全局的、几乎不变，所以拉一次就够；但它失败不该影响聊天页的其它功能。
+     */
+    val catalog: ModelCatalog? = null,
+    /** 是否正在拉取可选模型目录。 */
+    val catalogLoading: Boolean = false,
 )
 
 /**
@@ -167,6 +188,8 @@ object ChatReducer {
             committedSeq = -1L,
             changes = state.changes.filterKeys { it in liveSeqs },
             changesLoading = state.changesLoading.filterTo(mutableSetOf()) { it in liveSeqs },
+            fromCache = false,
+            model = frame.model ?: state.model,
         )
         if (frame.baseline.isNotEmpty()) {
             // 重连基线：把断开期间已生成但未落盘的增量回放成一个预览气泡。

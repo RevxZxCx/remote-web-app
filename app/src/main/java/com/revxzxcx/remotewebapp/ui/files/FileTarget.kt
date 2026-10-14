@@ -1,5 +1,8 @@
 package com.revxzxcx.remotewebapp.ui.files
 
+import android.os.Parcelable
+import kotlinx.parcelize.Parcelize
+
 /**
  * 文件查看页的导航目标。
  *
@@ -14,13 +17,17 @@ package com.revxzxcx.remotewebapp.ui.files
  *   已由桌面端裁短，更适合显示）。
  * @param seq `workspace/changes` 事件的 seq；非 null 时可以去取该轮 diff。
  * @param index 该文件在 `changes.summary.files` 里的下标（`changes.diff` 需要）。
+ *
+ * 实现 [Parcelable] 的唯一原因是 `AppRoot` 的导航状态要 `rememberSaveable`：旋转屏幕或
+ * 进程被回收后重建时，正在看的文件应当原样恢复，而不是退回聊天页（M5-2）。
  */
+@Parcelize
 data class FileTarget(
     val path: String,
     val display: String = path,
     val seq: Long? = null,
     val index: Int? = null,
-) {
+) : Parcelable {
     /** 有没有可取的 diff。 */
     val hasDiff: Boolean get() = seq != null && index != null
 }

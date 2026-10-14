@@ -11,6 +11,7 @@ import com.revxzxcx.remotewebapp.core.credentials.KeystoreCredentialStore
 import com.revxzxcx.remotewebapp.core.net.HttpClients
 import com.revxzxcx.remotewebapp.core.pairing.PairingApi
 import com.revxzxcx.remotewebapp.core.pairing.PairingCoordinator
+import com.revxzxcx.remotewebapp.core.prefs.ThemePreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -38,6 +39,7 @@ sealed interface AppState {
  * 生命周期与 `Application` 一致。持有：
  * - [credentialStore]：Keystore 加密的凭证存储（D16）；
  * - [pairing]：配对流程；
+ * - [themePreferences]：主题偏好（M5-9）；
  * - [state]：当前是「未配对 / 已配对」；
  * - 当前 [DshConnection]（配对成功后建立，退出配对时关闭）。
  *
@@ -64,6 +66,12 @@ class AppContainer(context: Context) {
     fun probeHttp(): okhttp3.OkHttpClient = unaryHttp
 
     val pairing: PairingCoordinator = PairingCoordinator(credentialStore, PairingApi(unaryHttp))
+
+    /**
+     * 主题偏好（M5-9）。与容器同寿，构造时同步读一次 SharedPreferences（一个字符串，
+     * 比 Room 建库便宜得多，不违反上面的线程承诺）。
+     */
+    val themePreferences: ThemePreferences = ThemePreferences(appContext)
 
     /**
      * 离线缓存（需求 FR-4.3）。

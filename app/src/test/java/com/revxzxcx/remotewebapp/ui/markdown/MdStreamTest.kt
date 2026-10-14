@@ -118,6 +118,40 @@ class MdStreamTest {
 
     // ------------------------------------------------------------ 缓存路径
 
+    /**
+     * 回归：**开围栏那一行绝不能被当成安全边界**。
+     *
+     * 这是 M5-3 实测抓到的真缺陷。增量续扫会把最后一个「可能还没写完的行」重扫一遍；
+     * 修 bug 前没有回滚状态，于是同一个 `"```"` 先被当开围栏、重扫时又被当**闭**围栏，
+     * 它后面的换行就被登记成安全分割点。于是 `"```\n"` 被冻结成一个空代码块，
+     * 紧接着到来的 `x` 落到了冻结区之外、被解析成段落——而全文解析里 `x` 明明是代码块内容。
+     *
+     * 症状就是「流式输出时代码块的第一行掉出来变成一个独立段落」。
+     * 文档「无语言代码块」在 [documents] 里已覆盖这条路径，这里再钉一个最小用例，
+     * 以免以后精简文档列表时把它顺手删掉。
+     */
+    @Test
+    fun `开围栏后的第一行不会被冻结出去`() {
+        val stream = MdStream()
+        // 逐字符走到 "```\nx"，每一步都与全文解析一致。
+        val doc = "```\nx\n```\n"
+        for (end in 1..doc.length) {
+            val prefix = doc.substring(0, end)
+            assertSameBlocks(
+                expected = MdParser.parse(prefix),
+                actual = stream.update(prefix),
+                where = "开围栏文档 len=$end",
+            )
+        }
+        // 关键节点单独断言：len=5 时必须仍是 1 个未闭合代码块（缺陷时是 2 块）。
+        val at5 = stream.update("```\nx")
+        assertEquals("len=5 时块数", 1, at5.size)
+        val block = at5[0]
+        assertTrue("必须是 CodeBlock，实际 ${block::class.simpleName}", block is MdBlock.CodeBlock)
+        assertEquals("len=5 时代码块内容", "x", (block as MdBlock.CodeBlock).code)
+        assertFalse("尚未闭合", block.closed)
+    }
+
     @Test
     fun `文本不变时返回同一个结果实例`() {
         val stream = MdStream()

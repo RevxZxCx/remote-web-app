@@ -5,6 +5,8 @@ import com.revxzxcx.remotewebapp.core.protocol.DshJson
 import com.revxzxcx.remotewebapp.core.protocol.RemoteRoutesClient
 import com.revxzxcx.remotewebapp.core.protocol.RemoteStreamMux
 import com.revxzxcx.remotewebapp.core.protocol.TypertClient
+import com.revxzxcx.remotewebapp.core.session.FileUploadRepository
+import com.revxzxcx.remotewebapp.core.session.SessionAttachmentRepository
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 
@@ -40,6 +42,18 @@ class DshConnection(
      * 这些不是 Typert RPC，回的是裸 JSON 或纯文本，必须与 [typert] 分开解析。
      */
     val routes: RemoteRoutesClient = RemoteRoutesClient(credential.baseUrl, credential.deviceId, unaryHttp, json)
+
+    /**
+     * 附件读取（`session/attachment`）。
+     *
+     * 之所以挂在连接上而不是每次 new：会话里图片可能很多，共享同一个客户端才能共用
+     * OkHttp 的连接池与线程池（见 [typert] 同理）。
+     */
+    val attachments: SessionAttachmentRepository =
+        SessionAttachmentRepository(typert)
+
+    /** 文件上传（`fileUploads/upload`）——发文件前必须先换回执。 */
+    val uploads: FileUploadRepository = FileUploadRepository(typert)
 
     /** 关闭 mux（unary 是无状态请求，无需关闭）。 */
     suspend fun close() {

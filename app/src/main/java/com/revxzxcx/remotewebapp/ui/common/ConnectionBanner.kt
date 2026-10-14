@@ -1,6 +1,5 @@
 package com.revxzxcx.remotewebapp.ui.common
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,6 +13,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -32,7 +33,39 @@ import com.revxzxcx.remotewebapp.core.protocol.isHealthy
  *
  * [onRepair] 只在配对失效（[CarrierState.Unpaired]，终态）时出现：那是不可能靠重试恢复的
  * 情况，必须给用户一条明确的出路，而不是让他看着「重连中…」等下去（R002 P1-1）。
+ *
+ * ## 时钟自持（R007d P3-7）
+ *
+ * 只有 [CarrierState.Reconnecting] 的文案（「Ns 后重试」）需要 [nowMillis]。早前由调用方
+ * 把 `now` 传进来，于是一个 30 秒一跳的时钟被提到了两个屏幕的顶层 body——横幅自己在
+ * Connected/Idle/Unpaired 下根本不用 now，也照样重组、白算一次 `describe()`。
+ * 现在改成 [ConnectionBanner] 内部按需起时钟：非重连态不起、不重组。
  */
+@Composable
+fun ConnectionBanner(
+    carrier: CarrierState,
+    modifier: Modifier = Modifier,
+    onRepair: (() -> Unit)? = null,
+    onRetry: (() -> Unit)? = null,
+) {
+    val needsClock = carrier is CarrierState.Reconnecting
+    val nowMillis = if (needsClock) rememberBannerClock() else 0L
+    ConnectionBanner(carrier, nowMillis, modifier, onRepair, onRetry)
+}
+
+/** 只在需要倒计时时跑的时钟：1 秒一跳（比重启退避的粒度细，倒计时才不会跳变）。 */
+@Composable
+private fun rememberBannerClock(): Long {
+    val now = produceState(System.currentTimeMillis(), true) {
+        while (true) {
+            value = System.currentTimeMillis()
+            kotlinx.coroutines.delay(1_000L)
+        }
+    }
+    return now.value
+}
+
+/** 带显式时钟的版本：给渲染测试用（测试里不能让真实时钟参与断言）。 */
 @Composable
 fun ConnectionBanner(
     carrier: CarrierState,
@@ -114,7 +147,11 @@ fun CacheNotice(text: String, modifier: Modifier = Modifier) {
 }
 
 /**
- * 调试页与状态条共用的时间格式化：毫秒 → `HH:mm:ss`（**本地时区**）。
+ * 毫秒 → `HH:mm:ss`（**本地时区**）。
+ *
+ * 调试页（[com.revxzxcx.remotewebapp.ui.debug.DebugScreen]）的建连时间/配对时间在用。
+ * 放在这里而不是 `TimeText`：那是 `internal` 且只服务相对时间，这里是绝对时刻，
+ * 两个屏幕的可见性需求不同。
  *
  * 不要写成 `(millis / 1000) % 86_400`：那是 UTC 时刻的时分秒，东八区下会比真实时间早 8
  * 小时，而连接时间、配对时间正是用户拿来对表的基准（R006 P2-2）。

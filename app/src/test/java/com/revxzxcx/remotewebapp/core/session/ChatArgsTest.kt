@@ -106,6 +106,162 @@ class ChatArgsTest {
     }
 
     @Test
+    fun `prompt 带图片附件时 content 追加 image 块`() {
+        // 内联图片：data 是 base64，mediaType 与 name 按桌面端 descriptor 逐字传递。
+        val args = ChatArgs.prompt(
+            requestId = "r",
+            sessionId = "s",
+            text = "看这张",
+            attachments = listOf(
+                PromptAttachment(
+                    kind = PromptAttachment.Kind.IMAGE,
+                    name = "a.png",
+                    mediaType = "image/png",
+                    data = "AAAA",
+                ),
+            ),
+        )
+        val content = args.obj("request").arr("content")
+        assertEquals(2, content.size)
+        val image = content[1] as JsonObject
+        assertEquals("image", image.str("type"))
+        assertEquals("AAAA", image.str("data"))
+        assertEquals("image/png", image.str("mediaType"))
+        assertEquals("a.png", image.str("name"))
+    }
+
+    @Test
+    fun `prompt 带文件附件时 content 追加 file 块且只有 receiptId`() {
+        // 文件是两步：先 `attachment/upload` 换回执，prompt 只带 receiptId。
+        // 多带 name/mediaType 会让服务端 `assertExactArguments` 报 unexpected。
+        val args = ChatArgs.prompt(
+            requestId = "r",
+            sessionId = "s",
+            text = "",
+            attachments = listOf(
+                PromptAttachment(
+                    kind = PromptAttachment.Kind.FILE,
+                    name = "notes.md",
+                    receiptId = "rcpt-1",
+                ),
+            ),
+        )
+        val content = args.obj("request").arr("content")
+        assertEquals(1, content.size)
+        val file = content[0] as JsonObject
+        assertEquals(setOf("type", "receiptId"), file.keys)
+        assertEquals("rcpt-1", file.str("receiptId"))
+    }
+
+    @Test
+    fun `prompt 的图片附件缺 name 时不出现该键`() {
+        // `mediaType` 在 descriptor 里是必需键，所以始终发送；只有 `name` 可缺席
+        // （空白名也按缺席处理，省得服务端收到一个空文件名）。
+        val args = ChatArgs.prompt(
+            requestId = "r",
+            sessionId = "s",
+            text = "",
+            attachments = listOf(
+                PromptAttachment(
+                    kind = PromptAttachment.Kind.IMAGE,
+                    name = null,
+                    mediaType = "image/png",
+                    data = "AAAA",
+                ),
+            ),
+        )
+        val image = args.obj("request").arr("content")[0] as JsonObject
+        assertTrue(image.containsKey("mediaType"))
+        assertEquals("image/png", image.str("mediaType"))
+        assertFalse(image.containsKey("name"))
+        assertEquals("AAAA", image.str("data"))
+    }
+
+    @Test
+    fun `prompt 的图片附件名是空白时也按缺席处理`() {
+        val args = ChatArgs.prompt(
+            requestId = "r",
+            sessionId = "s",
+            text = "",
+            attachments = listOf(
+                PromptAttachment(
+                    kind = PromptAttachment.Kind.IMAGE,
+                    name = "   ",
+                    mediaType = "image/png",
+                    data = "AAAA",
+                ),
+            ),
+        )
+        val image = args.obj("request").arr("content")[0] as JsonObject
+        assertFalse(image.containsKey("name"))
+    }
+
+    @Test
+    fun `prompt 的文件附件缺 receiptId 时整块被跳过`() {
+        // 上传失败时它不会进待发送列表；万一进来了，发一个没有 receiptId 的 file 块
+        // 只会换来服务端报错，不如直接不发。
+        val args = ChatArgs.prompt(
+            requestId = "r",
+            sessionId = "s",
+            text = "",
+            attachments = listOf(
+                PromptAttachment(kind = PromptAttachment.Kind.FILE, receiptId = null),
+                PromptAttachment(
+                    kind = PromptAttachment.Kind.IMAGE,
+                    mediaType = "image/png",
+                    data = "AAAA",
+                ),
+            ),
+        )
+        val content = args.obj("request").arr("content")
+        // 空文本块被省略：服务端 `hasPromptContent` 认「附件」这一条，
+        // 塞一个空 text 只会在用户消息里渲染成空气泡。
+        assertEquals(1, content.size)
+        assertEquals("image", (content[0] as JsonObject).str("type"))
+    }
+
+    @Test
+    fun `prompt 只有附件没有文字时 content 里没有空文本块`() {
+        // 「只发图不发字」是常见用法，服务端 `hasPromptContent`
+        // （dsh-api-session-controller/lib/index.js:649-651）明确接受。
+        val args = ChatArgs.prompt(
+            requestId = "r",
+            sessionId = "s",
+            text = "   ",
+            attachments = listOf(
+                PromptAttachment(
+                    kind = PromptAttachment.Kind.IMAGE,
+                    mediaType = "image/png",
+                    data = "AAAA",
+                ),
+            ),
+        )
+        val content = args.obj("request").arr("content")
+        assertEquals(1, content.size)
+        assertEquals("image", (content[0] as JsonObject).str("type"))
+    }
+
+    @Test
+    fun `prompt 有文字也有附件时文本块仍在最前`() {
+        val args = ChatArgs.prompt(
+            requestId = "r",
+            sessionId = "s",
+            text = "看这张",
+            attachments = listOf(
+                PromptAttachment(
+                    kind = PromptAttachment.Kind.IMAGE,
+                    mediaType = "image/png",
+                    data = "AAAA",
+                ),
+            ),
+        )
+        val content = args.obj("request").arr("content")
+        assertEquals(2, content.size)
+        assertEquals("text", (content[0] as JsonObject).str("type"))
+        assertEquals("image", (content[1] as JsonObject).str("type"))
+    }
+
+    @Test
     fun `cancel 的 request 只有 sessionId`() {
         val args = ChatArgs.cancel("session-xyz")
         assertEquals(setOf("request"), args.keys)
@@ -149,7 +305,62 @@ class ChatArgsTest {
         assertEquals(setOf("kind", "sessionId"), address.keys)
     }
 
+    @Test
+    fun `selectModel 的 request 形状`() {
+        // 实测（F:\bot\_model_probe.mjs）：{sessionId, provider, model, reasoningEffort?}
+        val request = ChatArgs.selectModel(
+            sessionId = "s1",
+            provider = "deepseek",
+            model = "deepseek-reasoner",
+            reasoningEffort = "high",
+        ).obj("request")
+        assertEquals(setOf("sessionId", "provider", "model", "reasoningEffort"), request.keys)
+        assertEquals("s1", request.str("sessionId"))
+        assertEquals("deepseek", request.str("provider"))
+        assertEquals("deepseek-reasoner", request.str("model"))
+        assertEquals("high", request.str("reasoningEffort"))
+    }
+
+    @Test
+    fun `selectModel 不传推理档时整个键都不出现`() {
+        // 服务端是严格 schema：多一个键就是 `unexpected "reasoningEffort"`。
+        // 没有 reasoning.efforts 的模型必须走这条路径。
+        val request = ChatArgs.selectModel("s1", "p", "m").obj("request")
+        assertEquals(setOf("sessionId", "provider", "model"), request.keys)
+        assertFalse(request.containsKey("reasoningEffort"))
+    }
+
+    @Test
+    fun `selectModel 的空白推理档等同于没传`() {
+        // 服务端可能回空字符串；传上去不如不传（省得踩 unexpected）。
+        val request = ChatArgs.selectModel("s1", "p", "m", "  ").obj("request")
+        assertFalse(request.containsKey("reasoningEffort"))
+    }
+
+    @Test
+    fun `modelCatalog 没有任何参数`() {
+        // 源码签名 modelCatalog(): Promise<ModelCatalog> —— args 恒为空对象。
+        assertEquals(emptySet<String>(), ChatArgs.emptyArgs.keys)
+    }
+
+    @Test
+    fun `chat 方法都用 request 包裹`() {
+        listOf(
+            ChatArgs.follow("s"),
+            ChatArgs.page("s", 1, 0),
+            ChatArgs.prompt("r", "s", "x"),
+            ChatArgs.cancel("s"),
+            ChatArgs.selectModel("s", "p", "m"),
+            ChatArgs.selectModel("s", "p", "m", "low"),
+        ).forEach { args ->
+            assertTrue("顶层键应含 request：$args", args.containsKey("request"))
+            assertFalse("不应含 _request：$args", args.containsKey("_request"))
+        }
+    }
+
     private fun JsonObject.obj(key: String): JsonObject = this[key] as JsonObject
+
+    private fun JsonObject.arr(key: String): JsonArray = this[key] as JsonArray
 
     private fun JsonObject.str(key: String): String? =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content

@@ -22,6 +22,10 @@ import kotlinx.serialization.json.buildJsonObject
  * | `session/page` | `request` | `{address, throughSeq, beforeSeq?, maxMessages?, turnWindow?}` |
  * | `session/prompt` | `request` | `{requestId, sessionId, mode:'queue'\|'steer', content, clientTimeZone?}` |
  * | `session/cancel` | `request` | `{sessionId}` |
+ * | `session/selectModel` | `request` | `{sessionId, provider, model, reasoningEffort?}` |
+ * | `session/modelCatalog` | **无参数** | `{}` |
+ * | `session/attachment` | 两个参数 | `{sessionId, attachmentId}` |
+ * | `fileUploads/upload` | `agentId` + `request` | `{agentId, request:{data, name?}}` |
  */
 object ChatArgs {
 
@@ -74,6 +78,8 @@ object ChatArgs {
     /**
      * `session/prompt` 的 args。
      *
+     * @param attachments 追加在文字**之后**的内容块（图片/文件）。为 null 表示不带附件，
+     *   此时 `content` 只含一个 `{type:'text'}` 块；空列表等价于 null。
      * @param clientTimeZone IANA 时区；为 null 时**不发送该键**（未定义的可选参数不能出现，
      *   否则服务端报 `unexpected "clientTimeZone"`）。
      */
@@ -82,28 +88,82 @@ object ChatArgs {
         sessionId: String,
         text: String,
         mode: PromptMode = PromptMode.Queue,
+        attachments: List<PromptAttachment>? = null,
         clientTimeZone: String? = null,
     ): JsonObject = request {
         put("requestId", JsonPrimitive(requestId))
         put("sessionId", JsonPrimitive(sessionId))
         put("mode", JsonPrimitive(mode.wire))
-        put(
-            "content",
-            JsonArray(
-                listOf(
-                    buildJsonObject {
-                        put("type", JsonPrimitive("text"))
-                        put("text", JsonPrimitive(text))
-                    },
-                ),
-            ),
-        )
+        put("content", promptContent(text, attachments))
         if (clientTimeZone != null) put("clientTimeZone", JsonPrimitive(clientTimeZone))
+    }
+
+    /**
+     * `session/prompt` 的 `content` 数组。
+     *
+     * 文字块**在有附件时省略空文本**：服务端 `hasPromptContent`
+     * （`dsh-api-session-controller/lib/index.js:649-651`）要求的是「非空白文本**或**
+     * 一个附件」，所以「只发图不发字」合法；此时再塞一个 `{type:'text',text:""}`
+     * 只会让这条用户消息在聊天里渲染成一个空气泡。附件块按 [attachments] 的顺序跟在后面。
+     * 抽成独立函数是为了让「附件块长什么样」能被单测直接钉住——[PromptAttachment.toBlock]
+     * 的 wire 形状是本项目新引入的出错面。
+     *
+     * 没有 `receiptId` 的文件块被**整块丢掉**：上传失败时它不该进待发送列表（调用方已经
+     * 保证了），万一漏进来，发一个 `{type:'file',receiptId:""}` 只会换来服务端一条
+     * 看不出原因的错误，比不发更糟。
+     */
+    fun promptContent(text: String, attachments: List<PromptAttachment>?): JsonArray {
+        val attachmentBlocks = mutableListOf<JsonObject>()
+        attachments?.forEach { attachment ->
+            if (attachment.kind == PromptAttachment.Kind.FILE &&
+                attachment.receiptId.isNullOrBlank()
+            ) {
+                return@forEach
+            }
+            attachmentBlocks.add(attachment.toBlock())
+        }
+        val blocks = mutableListOf<JsonObject>()
+        // 一个附件都没有时仍然保留（可能为空的）文本块：`content: []` 会被服务端
+        // 以 `gateway/bad-request` 拒掉，而那条路本该由调用方提前挡下。
+        if (text.isNotBlank() || attachmentBlocks.isEmpty()) {
+            blocks.add(
+                buildJsonObject {
+                    put("type", JsonPrimitive("text"))
+                    put("text", JsonPrimitive(text))
+                },
+            )
+        }
+        blocks.addAll(attachmentBlocks)
+        return JsonArray(blocks)
     }
 
     /** `session/cancel` 的 args（参数只有 `sessionId`）。 */
     fun cancel(sessionId: String): JsonObject = request {
         put("sessionId", JsonPrimitive(sessionId))
+    }
+
+    /** 空参数对象：`session/modelCatalog` 不接受任何键。 */
+    val emptyArgs: JsonObject = buildJsonObject { }
+
+    /**
+     * `session/selectModel` 的 args。
+     *
+     * `reasoningEffort` 是**可选**字段，所以为 null 时**不能发送该键**——多一个键服务端
+     * 一样报 `gateway/arguments-invalid: unexpected "reasoningEffort"`。实测形状（真机探针
+     * `F:\bot\_model_probe.mjs`）：`{sessionId, provider, model, reasoningEffort?}`。
+     */
+    fun selectModel(
+        sessionId: String,
+        provider: String,
+        model: String,
+        reasoningEffort: String? = null,
+    ): JsonObject = request {
+        put("sessionId", JsonPrimitive(sessionId))
+        put("provider", JsonPrimitive(provider))
+        put("model", JsonPrimitive(model))
+        if (!reasoningEffort.isNullOrBlank()) {
+            put("reasoningEffort", JsonPrimitive(reasoningEffort))
+        }
     }
 
     /**

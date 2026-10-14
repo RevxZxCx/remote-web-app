@@ -1,0 +1,203 @@
+package com.revxzxcx.remotewebapp.ui.home
+
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.requiredHeight
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.unit.dp
+import com.revxzxcx.remotewebapp.core.session.SessionGrouping
+import com.revxzxcx.remotewebapp.core.session.SessionListResult
+import com.revxzxcx.remotewebapp.core.session.SessionSummary
+import com.revxzxcx.remotewebapp.core.workspace.Workspace
+import com.revxzxcx.remotewebapp.core.workspace.WorkspaceSnapshot
+import org.junit.Assert.assertEquals
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+
+/**
+ * 会话抽屉的渲染层测试。
+ *
+ * 这些用例想守的是一个**反复逃逸**的缺陷类别：纯逻辑单测全绿，但 `LazyColumn`
+ * 在组合期抛异常 / 把内容顶出视口。本工程已经连踩三次——
+ *
+ * 1. **R003（M2）**：同一会话同时出现在两个工作区的 `sessionIds` 里时，
+ *    「按工作区」段只用 `sessionId` 作 key → `IllegalArgumentException: Key … was
+ *    already used`，整个抽屉崩掉。数据层单测甚至**断言过**「两个工作区都显示」，
+ *    但没有任何测试渲染过 `LazyColumn`，于是断言与实现之间没有桥。
+ * 2. **M2/M3 两次**：抽屉先打开、`session/list` 后到，「最近」段被 `LazyColumn`
+ *    的锚点机制整段顶到可视区之上，看起来像没渲染。
+ *
+ * 所以这里**故意**构造跨工作区共享会话的数据，让上面的崩溃路径真的被走到。
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [36])
+class SessionDrawerRenderTest {
+
+    @get:Rule
+    val compose = createComposeRule()
+
+    /**
+     * 两个工作区**共享** `shared-session`，另各有独占会话。
+     *
+     * 这不是臆造的数据：`SessionGroupingTest` 有对应用例（"同一会话出现在两个工作区时
+     * 两边都显示"），实测服务端也确实会这样下发（5 个工作区 27 个 id 全部可解析，
+     * 但组合方式不保证互斥）。
+     */
+    private fun state(): HomeUiState {
+        val shared = session("shared-session", "共享会话", updatedAt = 3_000L)
+        val onlyA = session("only-a", "只在甲工作区", updatedAt = 2_000L)
+        val onlyB = session("only-b", "只在乙工作区", updatedAt = 1_000L)
+        val snapshot = WorkspaceSnapshot(
+            items = listOf(
+                Workspace(workspaceId = "ws-a", path = "F:\\a", title = "甲", sessionIds = listOf("shared-session", "only-a")),
+                Workspace(workspaceId = "ws-b", path = "F:\\b", title = "乙", sessionIds = listOf("shared-session", "only-b")),
+            ),
+        )
+        val sessions = SessionListResult(items = listOf(shared, onlyA, onlyB))
+        return HomeUiState(
+            loading = false,
+            snapshot = snapshot,
+            sessions = sessions,
+            groups = SessionGrouping.group(snapshot, sessions),
+            sessionsLoading = false,
+            networkArrived = true,
+        ).withDerivedLists()
+
+    }
+
+    /**
+     * 补齐 `recent` / `pinned`。
+     *
+     * 这两个是 [HomeUiState] 的**构造属性**（M2 起就从 `get()` 派生改成构造参数），
+     * 直接 `HomeUiState(...)` 的话它们默认是空表，抽屉里「最近」「置顶」两段就什么都不画。
+     */
+    private fun HomeUiState.withDerivedLists(): HomeUiState = copy(
+        recent = SessionGrouping.recentSessions(snapshot, sessions),
+        pinned = SessionGrouping.pinnedSessions(snapshot, sessions),
+    )
+
+    private fun session(sessionId: String, title: String, updatedAt: Long): SessionSummary =
+        SessionSummary(sessionId = sessionId, title = title, updatedAt = updatedAt, agentAvailable = true)
+
+    private fun setDrawer(state: HomeUiState) {
+        compose.setContent {
+            MaterialTheme {
+                // ⚠️ 这里**不能**套 `verticalScroll`：抽屉自身是
+                // `Column(fillMaxSize) { 头部; LazyColumn(fillMaxSize) }`，给外层再加
+                // 竖向滚动会让内层 LazyColumn 拿到无限高度约束，直接抛
+                // `IllegalStateException: Vertically scrollable component was measured
+                // with an infinity maximum height constraints`。
+                //
+                // ⚠️ 而且必须用 `requiredHeight` 而不是 `height`：后者会把高度
+                // **收敛到父约束**内（`constraints.constrainHeight`），于是 4000.dp
+                // 被压回虚拟屏幕的那 ~470dp，`LazyColumn` 只组合视口内的项，
+                // 「只在乙工作区」这类靠下的行根本不在语义树上。`requiredHeight`
+                // 无视父约束，才等于「给一个超高的视口」。
+                Box(modifier = Modifier.requiredHeight(4000.dp)) {
+                    SessionDrawer(
+                        state = state,
+                        onOpenSession = { _, _ -> },
+                        onRefreshSessions = {},
+                        now = 10_000L,
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `同一会话出现在两个工作区时抽屉不崩且两处都渲染`() {
+        setDrawer(state())
+
+        // 组合期不抛 IllegalArgumentException: Key … was already used（R003 P1-1）。
+        // 共享会话出现 **3** 次：1 次在「最近」段（带工作区副标题）+ 2 次在「按工作区」段
+        // （ws-a / ws-b 各一次，key 带 workspaceId 前缀所以不冲突）。
+        compose.onAllNodesWithText("共享会话").assertCountEquals(3)
+        // 独占会话各出现 2 次：「最近」1 次 + 所属工作区 1 次。
+        compose.onAllNodesWithText("只在甲工作区").assertCountEquals(2)
+        compose.onAllNodesWithText("只在乙工作区").assertCountEquals(2)
+        // 三段标题都在。
+        compose.onNodeWithText("最近").assertExists()
+        compose.onNodeWithText("按工作区").assertExists()
+    }
+
+    @Test
+    fun `最近段排除置顶与归档且不重复`() {
+        val base = state()
+        val pinned = session("pinned-session", "置顶会话", updatedAt = 9_000L)
+        val archived = session("archived-session", "归档会话", updatedAt = 8_000L)
+        val snapshot = base.snapshot.copy(
+            pinnedSessionIds = setOf("pinned-session"),
+            archivedSessionIds = setOf("archived-session"),
+        )
+        val sessions = SessionListResult(items = listOf(pinned, archived) + base.sessions.items)
+        val state = base.copy(
+            snapshot = snapshot,
+            sessions = sessions,
+            groups = SessionGrouping.group(snapshot, sessions),
+        ).withDerivedLists()
+        setDrawer(state)
+
+        // 「最近」里既不出现置顶也不出现归档（各段只出现一次）。
+        compose.onAllNodesWithText("置顶会话").assertCountEquals(1)
+        compose.onAllNodesWithText("归档会话").assertCountEquals(0)
+        compose.onAllNodesWithText("共享会话").assertCountEquals(3)
+        // 置顶段自己的标题与会话都在。
+        compose.onNodeWithText("置顶").assertExists()
+        // 抽屉里**没有**「已归档」段（那段在主区 `HomeScreen.kt:364`）：归档会话在抽屉里
+        // 被整段排除，所以「归档会话」一次都不出现。若将来给抽屉加了归档段，这条会失败。
+        // （抽屉标题里那个「已归档 N」是统计数字，不是段标题，所以用 substring 会撞上它。）
+        compose.onAllNodesWithText("归档会话").assertCountEquals(0)
+    }
+
+    @Test
+    fun `读不到会话时抽屉给出可点的重试`() {
+        val base = state()
+        val state = base.copy(
+            sessions = SessionListResult(items = emptyList()),
+            groups = SessionGrouping.group(base.snapshot, SessionListResult(items = emptyList())),
+            sessionsError = "transport：网络请求失败",
+        )
+        setDrawer(state)
+
+        // M3 T009：失败与「真的没有会话」在抽屉里长得一模一样，用户既不知道失败、
+        // 也不知道可以点重试。这里钉住「失败必须可见 + 有重试入口」。
+        compose.onNodeWithText("会话列表读取失败：transport：网络请求失败").assertExists()
+        compose.onNodeWithText("重试").performClick()
+    }
+
+    @Test
+    fun `真的没有会话时不显示失败文案`() {
+        val base = state()
+        val empty = SessionListResult(items = emptyList())
+        val state = base.copy(
+            sessions = empty,
+            groups = SessionGrouping.group(base.snapshot, empty),
+            sessionsError = null,
+        )
+        setDrawer(state)
+
+        compose.onNodeWithText("没有读到会话。下拉主区刷新，或检查连接。").assertExists()
+        compose.onAllNodesWithText("会话列表读取失败", substring = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun `工作区头的 key 不含下标`() {
+        // R006 P3-2：key 里混入下标会让 order 帧重排时全部 key 变化、滚动位置丢失。
+        // 这里只做一次编译期可见性检查，真正的断言在 HomeScreen 源码里（key 用 workspaceId）。
+        val groups = state().groups
+        assertEquals(listOf("ws-a", "ws-b"), groups.map { it.workspace.workspaceId })
+        // 两个工作区都解析出了 2 行（共享会话没被去重吃掉）。
+        assertEquals(listOf(2, 2), groups.map { it.rows.size })
+    }
+}

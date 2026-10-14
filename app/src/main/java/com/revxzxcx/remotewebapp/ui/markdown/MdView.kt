@@ -16,8 +16,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -37,6 +42,23 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 
 /**
+ * 单次组合最多画多少个 [MdBlock]。
+ *
+ * 选中 200 的理由：一行 `bodyMedium` 约 18dp，200 块 ≈ 三四屏内容，一次测量完全无压力；
+ * 而一份两万字的 Markdown 回复 / 文件通常只有几十个块，正常文档永远碰不到这个上限。
+ *
+ * `internal` 而不是 `private`：渲染测试要按同一个数字造超长文档（见 `MdViewRenderTest`），
+ * 写死字面量的话常量一改测试就悄悄失去意义。
+ */
+internal const val MAX_RENDERED_BLOCKS: Int = 200
+
+/** 单个列表最多画多少条。列表条目比段落矮，但每条的测量/组合成本更高。 */
+internal const val MAX_LIST_ITEMS: Int = 200
+
+/** 单个表格最多画多少行。表格每行还要乘列数，所以比列表更早收手。 */
+internal const val MAX_TABLE_ROWS: Int = 100
+
+/**
  * 把 [MdBlock] 列表渲染成 Compose UI（需求 FR-5.1 / FR-5.2）。
  *
  * 设计取舍：
@@ -45,6 +67,11 @@ import androidx.compose.ui.unit.dp
  *  - 代码块**不做自动折行**，而是横向滚动（与桌面端一致）：折行会把缩进结构打乱，
  *    代码反而更难读。
  *  - 表格同样横向滚动；单元格等宽分配，够用且不必引入测量逻辑。
+ *  - **单个气泡内的块数/列表条数/表格行数有上限**（见 [MAX_RENDERED_BLOCKS] 一族常量）：
+ *    助手回复或一个 Markdown 文件完全可能有几千个块，而 [MdBlocks] 外层就是聊天页的
+ *    `LazyColumn` 条目——**不能再套一个 LazyColumn**（父级可竖向滚动，内层
+ *    `LazyColumn` 会因无限高约束直接抛异常），所以唯一的兜底就是「先画一部分，
+ *    剩下的等用户点开」。折叠永远只是性能保护，不会丢内容：点一下就把剩下的全画出来。
  *
  * @param onLinkClick 命中 `[文字](地址)` 里的 http(s) 地址时回调。
  * @param onFilePathClick 命中可点文件路径时回调（需求 FR-5.9）。
@@ -56,8 +83,36 @@ internal fun MdBlocks(
     onFilePathClick: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // 折叠状态按组合位置记忆：滚动出屏再回来会重新折叠（LazyColumn 会丢弃条目的
+    // rememberSaveable 槽位），这是可接受的代价——上限本身就是给病态文档兜底。
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val limit = if (expanded) Int.MAX_VALUE else MAX_RENDERED_BLOCKS
+    val visible = blocks.take(limit)
+    val remaining = blocks.size - visible.size
+
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        blocks.forEach { block -> MdBlockView(block, onLinkClick, onFilePathClick) }
+        visible.forEach { block -> MdBlockView(block, onLinkClick, onFilePathClick) }
+        if (remaining > 0) {
+            OverflowNote(remaining = remaining, unit = "个内容块", expanded = expanded) { expanded = true }
+        }
+    }
+}
+
+/**
+ * 「还有 N 项没画」的提示条。
+ *
+ * @param expanded false 时是「展开其余…」按钮（点了才全画）；true 时折叠按钮不再显示
+ *   （已经全展开了），只在理论上留一个说明位。
+ */
+@Composable
+private fun OverflowNote(remaining: Int, unit: String, expanded: Boolean, onExpand: () -> Unit) {
+    if (expanded) return
+    TextButton(onClick = onExpand, modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "展开其余 $remaining $unit",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+        )
     }
 }
 
@@ -140,6 +195,9 @@ private fun headingStyle(level: Int): TextStyle = when (level.coerceIn(1, 6)) {
  * 列表。任务列表（GFM `- [x]`）渲染成 `☑`/`☐`，其它用 `•` 或递增编号。
  *
  * 嵌套子块（[MdListItem.children]）缩进在条目文字下方。
+ *
+ * 条目数超过 [MAX_LIST_ITEMS] 时只画前一部分，末尾给一个「展开」按钮
+ * —— 内层不能再套 `LazyColumn`（外层就是竖向滚动的 `LazyColumn`，无限高约束会直接抛异常）。
  */
 @Composable
 private fun ListView(
@@ -149,8 +207,13 @@ private fun ListView(
     onLinkClick: (String) -> Unit,
     onFilePathClick: (String) -> Unit,
 ) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val limit = if (expanded) Int.MAX_VALUE else MAX_LIST_ITEMS
+    val visible = items.take(limit)
+    val remaining = items.size - visible.size
+
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        items.forEachIndexed { index, item ->
+        visible.forEachIndexed { index, item ->
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 val marker = when {
                     item.checked == true -> "☑"
@@ -181,6 +244,9 @@ private fun ListView(
                 }
             }
         }
+        if (remaining > 0) {
+            OverflowNote(remaining = remaining, unit = "个列表项", expanded = expanded) { expanded = true }
+        }
     }
 }
 
@@ -188,6 +254,9 @@ private fun ListView(
  * 表格。每行等宽分列，整体可横向滚动。
  *
  * 单元格里的行内元素仍走 [MdText]，所以表格里的代码、链接都能正常显示。
+ *
+ * 行数超过 [MAX_TABLE_ROWS] 时只画前一部分，末尾给一个「展开」按钮
+ * —— 表格每行要乘列数，是最容易把一次组合撑爆的块类型。
  */
 @Composable
 private fun TableView(
@@ -202,6 +271,11 @@ private fun TableView(
     ).coerceAtLeast(1)
     // 每列至少 96dp，内容长的表格靠横向滚动看全。
     val width = (96 * columns).dp
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val limit = if (expanded) Int.MAX_VALUE else MAX_TABLE_ROWS
+    val visible = table.rows.take(limit)
+    val remaining = table.rows.size - visible.size
+
     Surface2 {
         Column(modifier = Modifier.horizontalScroll(scroll)) {
             Row(modifier = Modifier.width(width)) {
@@ -210,7 +284,7 @@ private fun TableView(
                 }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f))
-            table.rows.forEach { row ->
+            visible.forEach { row ->
                 Row(modifier = Modifier.width(width)) {
                     // 行比表头短时补空单元格，避免行内列数与表头不一致导致错位。
                     repeat(columns) { column ->
@@ -218,6 +292,9 @@ private fun TableView(
                         TableCell(cell, header = false, onLinkClick, onFilePathClick, Modifier.weight(1f))
                     }
                 }
+            }
+            if (remaining > 0) {
+                OverflowNote(remaining = remaining, unit = "个数据行", expanded = expanded) { expanded = true }
             }
         }
     }

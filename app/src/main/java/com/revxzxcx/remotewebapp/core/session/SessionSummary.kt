@@ -1,6 +1,8 @@
 package com.revxzxcx.remotewebapp.core.session
 
+import android.os.Parcelable
 import com.revxzxcx.remotewebapp.core.protocol.DshTime
+import kotlinx.parcelize.Parcelize
 
 /**
  * `session/list` 返回的一条会话摘要。
@@ -24,7 +26,12 @@ import com.revxzxcx.remotewebapp.core.protocol.DshTime
  * 3. `session/list` **包含子代理会话**（`origin == 'subagent'`，实测 20/47），而
  *    `workspace.sessionIds` 只列顶层会话。要按工作区分组时必须用后者筛，不能直接把
  *    `session/list` 的结果全塞进去。
+ *
+ * 实现 [Parcelable] 的唯一原因是 `AppRoot` 的导航状态要 `rememberSaveable`：旋转屏幕或
+ * 进程被回收后重建时，正在看的聊天页应当原样恢复，而不是退回工作区页（M5-2）。
+ * 这里没有别的 Android 依赖——`SessionListParser` / `SessionGrouping` 仍是纯 Kotlin。
  */
+@Parcelize
 data class SessionSummary(
     val sessionId: String,
     /** epoch 毫秒；服务端给的是数字，但解析走 [DshTime] 以兼容字符串形态。 */
@@ -47,7 +54,7 @@ data class SessionSummary(
     val lastPromptAt: Long? = null,
     /** `projections.values.modelSelection.lastUsed?.model`，仅用于副标题展示。 */
     val lastModel: String? = null,
-) {
+) : Parcelable {
     /** 是不是子代理会话。子代理不参与工作区列表（`workspace.sessionIds` 里没有它们）。 */
     val isSubagent: Boolean get() = origin == SUBAGENT_ORIGIN
 
