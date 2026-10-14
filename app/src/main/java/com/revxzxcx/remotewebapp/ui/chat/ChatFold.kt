@@ -407,11 +407,14 @@ fun foldChatItems(items: List<ChatItem>): List<ChatRow> {
  *
  * @param counts 各类别的出现次数，按降序。
  * @param detail 进行中时要显示的那一行（非空才占一行高度）。
+ * @param count 组内条目总数（工具调用数；纯思考的分组为 0）。R017 用它做收起态右侧的
+ *     `×N`：不展开也能看出一组里有几条，`counts` 只按类别聚合、看不出总数。
  */
 data class FoldSummary(
     val counts: List<WorkCount>,
     val title: String,
     val detail: String = "",
+    val count: Int = 0,
 )
 
 /**
@@ -457,5 +460,6 @@ fun summarizeGroup(members: List<ChatItem>, running: Boolean): FoldSummary {
         counts = ranked,
         title = foldTitle(ranked),
         detail = detail,
+        count = counts.values.sum(),
     )
 }

@@ -1,6 +1,7 @@
 package com.revxzxcx.remotewebapp.core.protocol
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -88,9 +89,21 @@ class CarrierStateTest {
 
     @Test
     fun `故障记录保留时刻与错误码`() {
-        val error = MuxError(atMillis = now, summary = "握手超时", code = "transport")
+        val error = MuxError(id = 7L, atMillis = now, summary = "握手超时", code = "transport")
 
+        assertEquals(7L, error.id)
         assertEquals(now, error.atMillis)
         assertEquals("transport", error.code)
+    }
+
+    @Test
+    fun `故障记录 id 相同才算同一条`() {
+        // R018 P1-2：调试页的 LazyColumn 用 id 做 key。(atMillis, code, summary)
+        // 三者都不保证唯一——同毫秒的并发失败路径就能产出同值，所以要靠 id 区分。
+        val a = MuxError(id = 1L, atMillis = now, summary = "x", code = "transport")
+        val b = MuxError(id = 2L, atMillis = now, summary = "x", code = "transport")
+
+        assertNotEquals(a, b)
+        assertEquals(a, MuxError(id = 1L, atMillis = now, summary = "x", code = "transport"))
     }
 }

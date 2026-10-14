@@ -8,6 +8,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -17,8 +18,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -28,6 +31,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import com.revxzxcx.remotewebapp.ui.common.IconSizes
+import com.revxzxcx.remotewebapp.ui.theme.Motion
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -425,23 +430,33 @@ internal fun ScrollToBottomFab(
 ) {
     AnimatedVisibility(
         visible = visible,
-        enter = fadeIn(tween(120)) + scaleIn(tween(120), initialScale = 0.85f),
-        exit = fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.85f),
+        // R017：tween(120) 换成 Motion.FAST（200ms）。120ms 是唯一一处裸字面量，
+        // 而 Motion 四件套的意义就是「全 App 动效节奏只有一套刻度」——同一个「淡入」
+        // 在别处 200ms、这里 120ms，用户说不出哪里不对但会觉得界面抖。
+        enter = fadeIn(tween(Motion.FAST)) + scaleIn(tween(Motion.FAST), initialScale = 0.85f),
+        exit = fadeOut(tween(Motion.FAST)) + scaleOut(tween(Motion.FAST), targetScale = 0.85f),
         modifier = modifier,
     ) {
         Box(
             modifier = Modifier
                 .size(36.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.surfaceVariant)
+                // R017：实底 + 1dp 描边，与模型胶囊、工作区卡同一套「消灭半透明叠加」
+                // 的规则。原来只有 surfaceVariant 底，压在浅色气泡上时边缘发糊。
+                .background(MaterialTheme.colorScheme.surface)
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
                 .clickable(onClick = onClick)
                 .semantics { contentDescription = "滚动到底部" },
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                text = "↓",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            // R017：`↓` 字符换成 KeyboardArrowDown 图标。字符的渲染宽度随字体变，
+            // 且读屏软件会念成「向下箭头」而不是「滚动到底部」（contentDescription
+            // 只在 Box 上，字符本身不带描述）。
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowDown,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(IconSizes.fab),
             )
         }
     }

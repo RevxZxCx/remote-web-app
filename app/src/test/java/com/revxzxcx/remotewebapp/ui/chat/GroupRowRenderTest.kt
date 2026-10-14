@@ -36,9 +36,12 @@ private fun androidx.compose.ui.test.SemanticsNodeInteractionCollection.count():
  * ⚠️ 标题里的 chevron 与文字是**两个独立的 Text 节点**（[GroupRow] 把 chevron 单独放）。
  * 所以断言要按文字本身找，点也点在文字上——首跑我把 "▸ 已读取文件" 当一个节点找，7 项全挂。
  *
- * ⚠️ R016 之后 chevron 改成「同一个 `▸` 字形旋转 90°」而不是 `▸`/`▾` 换字符
+ * ⚠️ R016 之后 chevron 改成「同一个字形旋转 90°」而不是 `▸`/`▾` 换字符
  * （两个字形宽度不同，切换时标题会被推着左右跳），所以**展开态不再有 `▾` 文本节点**。
  * 展开/收起的判据统一改成「成员卡片在不在语义树里」——那才是用户关心的东西。
+ *
+ * ⚠️ R017 之后 chevron 又换成 `KeyboardArrowRight` **图标**（`contentDescription = null`），
+ * 语义树里不再有任何 chevron 节点。收起态的判据相应换成右侧的 `×N` 徽标。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -106,7 +109,12 @@ class GroupRowRenderTest {
         setGroup(members, running = false)
 
         compose.onNodeWithText("已读取文件并写入文件").assertExists()
-        compose.onNodeWithText("▸").assertExists()
+        // R017：chevron 从 `▸` 字形换成 `KeyboardArrowRight` 图标（`contentDescription = null`）。
+        // 图标节点不带文本，所以判据换成「摘要右侧的 `×N`」——它同样是收起态独有的
+        // 可见元素，且比字符 chevron 更能表达「这里面有 N 条」。
+        // 组内 3 个 tool/call（read×2 + write×1）+ 1 个 tool/result，
+        // `count` 只数工具调用（桌面端同样只访问 tool-call 节点）→ ×3。
+        compose.onNodeWithText("×3").assertExists()
         // 折叠态下成员的卡片必须完全不在语义树里——TalkBack 与 find 都不该摸到。
         assertEquals(0, compose.onAllNodesWithText("工具 · read", substring = true).count())
         assertEquals(0, compose.onAllNodesWithText("工具 · write", substring = true).count())

@@ -500,4 +500,31 @@ class RemoteStreamMuxTest {
         assertTrue(errors[0].atMillis >= errors[2].atMillis)
         assertTrue(errors.all { it.code == TypertException.CODE_UNPAIRED })
     }
+
+    @Test
+    fun errorRingIdsAreUniqueEvenWhenContentRepeats() = runBlocking {
+        // R018 P1-2 的守护：环形缓冲的 key 是 id。若 id 不唯一（例如改成
+        // atMillis 或 hashCode），调试页的 LazyColumn 会抛
+        // 「Key ... was already used」直接白屏。这里用**完全相同**的失败
+        // 内容连打，逼出内容相同的多条记录。
+        val target = mux()
+
+        repeat(3) {
+            server.enqueue(MockResponse.Builder().code(403).body("forbidden").build())
+        }
+        repeat(3) { index ->
+            val job = collectAsync(target, "workspace/follow")
+            awaitOn(15_000) { target.stats.value.takeIf { it.failures > index } }
+            job.cancel()
+            Thread.sleep(100)
+        }
+
+        val errors = target.errors.value
+        assertEquals(3, errors.size)
+        // 三条失败的内容完全一样（同一响应码、同一路径），靠 id 才区分得开。
+        assertEquals(3, errors.map { it.id }.toSet().size)
+        // 新的在前 ⇒ id 递减。
+        assertTrue(errors[0].id > errors[1].id)
+        assertTrue(errors[1].id > errors[2].id)
+    }
 }

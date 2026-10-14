@@ -40,6 +40,10 @@ androidx-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
 androidx-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
 androidx-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 androidx-material3 = { group = "androidx.compose.material3", name = "material3" }
+# R017：全 App 图标化（顶栏四个文字按钮收成一个溢出菜单）需要图标。
+# 只引 icons-core（约 40 枚内置矢量图标、无 extended 的几千枚），
+# 与 material3 同源、走同一个 compose-bom 版本，不单独写版本号。
+androidx-material-icons-core = { group = "androidx.compose.material", name = "material-icons-core" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "serialization" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }

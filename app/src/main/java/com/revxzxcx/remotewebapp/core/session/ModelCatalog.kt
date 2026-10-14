@@ -17,7 +17,18 @@ data class ModelRef(
     val model: String,
     val reasoningEffort: String? = null,
 ) {
-    /** 顶栏/按钮上的一行展示：`provider/model`，带推理档时追加 `·high`。 */
+    /**
+     * 纯文本一行展示：`provider/model`，带推理档时追加 `·high`。
+     *
+     * 注意：聊天页的模型胶囊（`ModelBar`，R017）**不用这个 getter** —— 它把推理档拆成
+     * 独立徽标，需要自己拼 `${provider}/${model}`。
+     *
+     * R018 P3-3：KDoc 原来写「留给日志、无障碍描述」，但**那两个场景都不存在**——
+     * grep 全 main 源集，`ModelRef.label` 零调用，只有 `ModelCatalogParserTest` 钉着。
+     * 现在如实标注为「暂无生产调用方」。若将来给 `ModelBar` 补 `contentDescription`
+     * （读屏用户现在听到的是两个独立文本节点「provider/model」与「high」，拼不成
+     * 一句完整的话），就在这里用——那时它才真的有调用方。
+     */
     val label: String
         get() = if (reasoningEffort.isNullOrBlank()) {
             "$provider/$model"

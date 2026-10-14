@@ -21,7 +21,7 @@ import org.robolectric.annotation.Config
  *
  * 为什么值得写：附件是 M5 新功能，而它最脆的地方全在 UI 与参数的接缝上——
  * ① 只有附件没有文字时「发送」还能不能点（`draft.isNotBlank() || pending.isNotEmpty()`）；
- * ② 「＋」点开是不是真的给出两个选择器；
+ * ② 「＋」点开是不是真的给出两个选择器（R017 后「＋」换成 Add 图标 + contentDescription）；
  * ③ 待发送 chips 的「×」删的是不是点的那一个。
  * 这三件事纯逻辑层测不到，因为它们编码在 Composable 的入参组合上。
  *
@@ -127,9 +127,28 @@ class ComposerAttachmentTest {
     }
 
     @Test
+    fun `生成中发送键变成排队并且仍然可点`() {
+        // R017：生成中点发送的按钮文案从「发送」改成「排队」。这不是文案洁癖——
+        // 按钮是用户唯一能提前知道「这条不会马上发出」的地方，写「发送」会让人
+        // 以为消息已经出去了（用户 m21177 第 4 条反馈的配套修正）。
+        setComposer(draft = "第二条", generating = true)
+        compose.onNodeWithText("排队").assertExists()
+        assertEquals(0, compose.onAllNodesWithText("发送").fetchSemanticsNodes().size)
+    }
+
+    @Test
+    fun `非生成中发送键仍是发送`() {
+        setComposer(draft = "第一条", generating = false)
+        compose.onNodeWithText("发送").assertIsEnabled()
+        assertEquals(0, compose.onAllNodesWithText("排队").fetchSemanticsNodes().size)
+    }
+
+    @Test
     fun `点加号给出选图片与选文件两个入口`() {
         setComposer()
-        compose.onNodeWithText("＋").performClick()
+        // R017：「＋」字符换成 `Icons.Default.Add` 图标，带 contentDescription「添加附件」。
+        // 判据从文本换成 contentDescription——这也更接近真实用户（读屏用户）的路径。
+        compose.onNodeWithContentDescription("添加附件").performClick()
         compose.waitForIdle()
         compose.onNodeWithText("添加附件").assertIsDisplayed()
         compose.onNodeWithText("选图片").assertIsDisplayed()

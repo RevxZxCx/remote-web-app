@@ -16,7 +16,6 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-
 /**
  * 设置页的渲染测试（M5-9）。
  *
@@ -62,7 +61,7 @@ class SettingsScreenRenderTest {
     }
 
     @Test
-    fun 解除配对按钮先问一次再触发回调() {
+    fun 解除配对按钮把动作交给AppRoot层的确认框() {
         val prefs = prefs()
         var unpairCalls = 0
         compose.setContent {
@@ -73,28 +72,15 @@ class SettingsScreenRenderTest {
         // 落在视口外的节点上什么都不会发生（M5-5 踩过同一个坑），必须先滚过去。
         compose.onNodeWithText("解除配对").performScrollTo().performClick()
 
-        // R007 P2-5：这个动作必须二次确认。早先设置页直接执行，与工作区页顶栏的
-        // 「退出」保护强度不一致——M5-1 的确认框被整条绕过。
-        compose.onNodeWithText("退出配对？").assertExists()
-        assertEquals("还没确认，不该解除配对", 0, unpairCalls)
-
-        // 对话框是独立窗口，节点在语义树的另一棵树上，直接按文本找即可。
-        compose.onNodeWithText("退出配对").performClick()
+        // R018 P1-1：确认框已上移到 AppRoot 层，本屏**不再自己弹**。这里断言的是
+        // 「本屏点下去就调 onUnpair」——真实 App 里 onUnpair = { pendingUnpair = true }，
+        // 对话框随后由 AppRoot 渲染。早前本屏自己弹框、而错误横幅与 ConnectionBanner
+        // 的「重新配对」传的是不带确认的同一个 onUnpair，五个入口只有两处有防护。
+        //
+        // 反过来说：如果哪天有人把确认框搬回本屏，这个测试会立刻失败——
+        // 那时 onUnpair 会被本屏的 showUnpairConfirm 拦住，unpairCalls 仍是 0。
         assertEquals(1, unpairCalls)
-    }
-
-    @Test
-    fun 解除配对对话框可以取消() {
-        val prefs = prefs()
-        var unpairCalls = 0
-        compose.setContent {
-            SettingsScreen(themePreferences = prefs, onBack = {}, onUnpair = { unpairCalls++ })
-        }
-
-        compose.onNodeWithText("解除配对").performScrollTo().performClick()
-        compose.onNodeWithText("取消").performClick()
-
-        assertEquals(0, unpairCalls)
+        // 本屏不该再出现自己的对话框。
         compose.onNodeWithText("退出配对？").assertDoesNotExist()
     }
 

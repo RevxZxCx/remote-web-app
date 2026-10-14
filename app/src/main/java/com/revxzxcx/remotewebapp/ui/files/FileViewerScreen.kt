@@ -20,6 +20,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -31,6 +33,7 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -53,6 +56,7 @@ import com.revxzxcx.remotewebapp.core.changes.DiffHunk
 import com.revxzxcx.remotewebapp.core.files.FileKind
 import com.revxzxcx.remotewebapp.ui.chat.ADDED_COLOR
 import com.revxzxcx.remotewebapp.ui.chat.DELETED_COLOR
+import com.revxzxcx.remotewebapp.ui.common.AppIconButton
 import com.revxzxcx.remotewebapp.ui.common.decodeScaled
 import com.revxzxcx.remotewebapp.ui.markdown.MdBlocks
 import com.revxzxcx.remotewebapp.ui.markdown.MdParser
@@ -123,8 +127,17 @@ fun FileViewerScreen(
                         }
                     }
                 },
-                navigationIcon = { TextButton(onClick = onBack) { Text("返回") } },
+                navigationIcon = {
+                    // R017：与其它屏幕统一成图标钮。原来这里是 TextButton("返回")，
+                    // 在「整体美观协调」的目标下是全 App 唯一一个文字返回钮。
+                    AppIconButton(onClick = onBack, contentDescription = "返回") {
+                        Icon(Icons.Default.ArrowBack, contentDescription = null)
+                    }
+                },
                 actions = {
+                    // 「在电脑上打开」保留为文字按钮：它是这一屏唯一的功能动作，
+                    // 且带外部副作用（唤起桌面端），R017 的底线要求「破坏性/外部副作用
+                    // 动作保留文字标签」——这条不在「收拢成图标」的范围内。
                     if (state.canShowDiff) {
                         TextButton(
                             onClick = viewModel::openOnDesktop,

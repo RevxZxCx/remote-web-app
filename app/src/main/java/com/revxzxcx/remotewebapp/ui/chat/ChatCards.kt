@@ -1,6 +1,9 @@
 package com.revxzxcx.remotewebapp.ui.chat
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -8,10 +11,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -22,6 +30,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -32,6 +41,8 @@ import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
 import com.revxzxcx.remotewebapp.core.changes.ChangesLimitations
 import com.revxzxcx.remotewebapp.core.session.ChatItem
 import com.revxzxcx.remotewebapp.core.session.ToolFilePaths
+import com.revxzxcx.remotewebapp.ui.theme.Motion
+import com.revxzxcx.remotewebapp.ui.theme.groupShape
 
 /**
  * 工具调用卡片（需求 FR-5.3）。
@@ -55,48 +66,62 @@ internal fun ToolCallCard(
     var expanded by rememberSaveable(item.seq) { mutableStateOf(false) }
     val path = remember(item.name, item.arguments) { ToolFilePaths.extract(item.name, item.arguments) }
 
-    Column(modifier = Modifier.fillMaxWidth()) {
-        CardHeader(
-            label = "工具 · ${item.name}",
-            detail = path,
-            expanded = expanded,
-            onToggle = { expanded = !expanded },
-        )
-        if (path != null) {
-            FileRowMarker(
-                path = path,
-                label = if (ToolFilePaths.isMutating(item.name)) "已编辑" else "已读取",
-                onClick = { onOpenFile(path) },
+    // R017 / D47：工具卡是「实底 + 1dp 描边」的卡。调用处
+    // （`ChatItemRow` 的 `ChatItem.ToolCall` 分支）的注释一直这么写，但实现只是
+    // 一个裸 `Column`——注释与代码不符（D45 那类问题），且与「助手气泡无底色」
+    // 的形态没有区分度。现在补上。
+    //
+    // 折叠态只占一行高，所以在分组展开区里几十张卡叠起来也不会变成一面色块；
+    // 描边用 `outlineVariant` 而不是 `outline`：后者在浅色主题下约 1.2:1 近乎不可见。
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = groupShape,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)) {
+            CardHeader(
+                label = "工具 · ${item.name}",
+                detail = path,
+                expanded = expanded,
+                onToggle = { expanded = !expanded },
             )
-        }
-        AnimatedVisibility(visible = expanded) {
-            Column {
-                if (item.arguments.isNotBlank()) {
-                    HorizontalDivider(
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f),
-                    )
-                    Text(
-                        text = item.arguments.take(MAX_ARGUMENTS_CHARS),
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 6.dp),
-                    )
-                    if (item.arguments.length > MAX_ARGUMENTS_CHARS) {
+            if (path != null) {
+                FileRowMarker(
+                    path = path,
+                    label = if (ToolFilePaths.isMutating(item.name)) "已编辑" else "已读取",
+                    onClick = { onOpenFile(path) },
+                )
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column {
+                    if (item.arguments.isNotBlank()) {
+                        HorizontalDivider(
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f),
+                        )
                         Text(
-                            text = "（参数过长，已截断；完整内容请看文件查看页）",
+                            text = item.arguments.take(MAX_ARGUMENTS_CHARS),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                        if (item.arguments.length > MAX_ARGUMENTS_CHARS) {
+                            Text(
+                                text = "（参数过长，已截断；完整内容请看文件查看页）",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = "（无参数）",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 4.dp),
                         )
                     }
-                } else {
-                    Text(
-                        text = "（无参数）",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 4.dp),
-                    )
                 }
             }
         }
@@ -113,37 +138,49 @@ internal fun ToolResultCard(item: ChatItem.ToolResult) {
     var expanded by rememberSaveable(item.seq) { mutableStateOf(false) }
     val summary = remember(item.text) { summarize(item.text) }
 
-    Column(modifier = Modifier.fillMaxWidth()) {
-        CardHeader(
-            label = if (item.isError) "工具出错" else "工具结果",
-            detail = summary,
-            expanded = expanded,
-            onToggle = { expanded = !expanded },
-            accent = if (item.isError) MaterialTheme.colorScheme.error else null,
-        )
-        AnimatedVisibility(visible = expanded) {
-            Column {
-                HorizontalDivider(
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f),
-                )
-                Text(
-                    text = item.text.ifBlank { "（无输出）" }.take(MAX_RESULT_CHARS),
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = if (item.isError) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    modifier = Modifier.padding(top = 6.dp),
-                )
-                if (item.text.length > MAX_RESULT_CHARS) {
-                    Text(
-                        text = "（输出过长，已截断）",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 4.dp),
+    // 同 [ToolCallCard]：R017 / D47 补上「实底 + 1dp 描边」。
+    // 失败的描边跟着走 error 色——一条失败在几十张卡里必须一眼可见。
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = groupShape,
+        border = BorderStroke(
+            1.dp,
+            if (item.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outlineVariant,
+        ),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)) {
+            CardHeader(
+                label = if (item.isError) "工具出错" else "工具结果",
+                detail = summary,
+                expanded = expanded,
+                onToggle = { expanded = !expanded },
+                accent = if (item.isError) MaterialTheme.colorScheme.error else null,
+            )
+            AnimatedVisibility(visible = expanded) {
+                Column {
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f),
                     )
+                    Text(
+                        text = item.text.ifBlank { "（无输出）" }.take(MAX_RESULT_CHARS),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = if (item.isError) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                    if (item.text.length > MAX_RESULT_CHARS) {
+                        Text(
+                            text = "（输出过长，已截断）",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
                 }
             }
         }
@@ -332,6 +369,13 @@ private fun CardHeader(
     onToggle: () -> Unit,
     accent: Color? = null,
 ) {
+    // chevron 用图标旋转而不是 `▸`/`▾` 字符（R016/R017）：两个字形宽度不同，
+    // 切换时会把右侧摘要顶跳；图标恒定居中，只转 90°。
+    val chevron by animateFloatAsState(
+        targetValue = if (expanded) 90f else 0f,
+        animationSpec = tween(durationMillis = Motion.FAST, easing = Motion.Emphasized),
+        label = "card-chevron",
+    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -339,11 +383,11 @@ private fun CardHeader(
             .padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = if (expanded) "▾" else "▸",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(16.dp),
+        Icon(
+            imageVector = Icons.Filled.KeyboardArrowRight,
+            contentDescription = if (expanded) "收起" else "展开",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(16.dp).rotate(chevron),
         )
         Text(
             text = label,

@@ -1,17 +1,17 @@
 package com.revxzxcx.remotewebapp.ui.home
 
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,14 +28,23 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ExitToApp
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -58,22 +68,33 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.sp
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.workspace.Workspace
+import com.revxzxcx.remotewebapp.ui.common.AppIconButton
 import com.revxzxcx.remotewebapp.ui.common.CacheNotice
-import com.revxzxcx.remotewebapp.ui.common.ConfirmUnpairDialog
 import com.revxzxcx.remotewebapp.ui.common.ConnectionBanner
+import com.revxzxcx.remotewebapp.ui.common.GeneratingGlyph
+import com.revxzxcx.remotewebapp.ui.common.GlyphSize
+import com.revxzxcx.remotewebapp.ui.common.OverflowItem
+import com.revxzxcx.remotewebapp.ui.common.OverflowMenuIconButton
+import com.revxzxcx.remotewebapp.ui.common.OverflowMenuDivider
+import com.revxzxcx.remotewebapp.ui.common.rememberPressScale
+import com.revxzxcx.remotewebapp.ui.common.rememberPressTint
+import com.revxzxcx.remotewebapp.ui.theme.LocalStatusRunning
 import com.revxzxcx.remotewebapp.ui.theme.Motion
 import com.revxzxcx.remotewebapp.ui.theme.bubbleShape
 import com.revxzxcx.remotewebapp.ui.theme.groupShape
+import com.revxzxcx.remotewebapp.ui.theme.pillShape
 import kotlinx.coroutines.launch
 
 /**
@@ -103,10 +124,15 @@ fun HomeScreen(
     val snackbar = remember { SnackbarHostState() }
     val now = rememberNow()
 
-    // 「退出」= 擦掉本机凭证。M4 验收时误触过一次（「诊断」与「退出」在顶栏只差 131 px），
-    // 结果得回桌面端重新发起配对才能恢复——配对只能桌面端发起，App 自己无能为力。
-    // 所以这个破坏性动作必须有二次确认（M5-1，T021 记录的 UX 问题）。
-    var showExitConfirm by rememberSaveable { mutableStateOf(false) }
+    // 「退出」= 擦掉本机凭证。M4 验收时误触过一次（当时「诊断」与「退出」在顶栏
+    // 只差 131 px），结果得回桌面端重新发起配对才能恢复——配对只能桌面端发起，
+    // App 自己无能为力。R017 把四个文字按钮收成一个溢出菜单之后，破坏性动作靠
+    // **四层**防护：① 不与常用项相邻；② 分隔线隔开；③ error 色；④ 二次确认框。
+    // ④ 现在由 AppRoot 统一渲染（R018 P1-1），本屏只负责调 onUnpair。
+    //
+    // rememberSaveable（R018 P3-4）：旋屏时菜单收起只是要重开一次，
+    // 但若确认框的可见性挂在 remember 上，旋屏会让它静默消失 = 防护被绕过。
+    var menuOpen by rememberSaveable { mutableStateOf(false) }
 
     // 抽屉的开合由 `drawerState` 自己持有（`ModalNavigationDrawer` 已经处理了手势与返回键），
     // 不再镜像到 ViewModel —— 早先那个 `drawerOpen` 字段没有任何回写点，恒为 false，
@@ -149,24 +175,101 @@ fun HomeScreen(
     ) {
         Scaffold(
             topBar = {
-                TopAppBar(
-                    title = { Text("工作区") },
-                    navigationIcon = {
-                        TextButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Text("会话")
-                        }
-                    },
-                    actions = {
-                        TextButton(onClick = viewModel::retry) { Text("刷新") }
-                        if (onOpenDebug != null) {
-                            TextButton(onClick = onOpenDebug) { Text("诊断") }
-                        }
-                        if (onOpenSettings != null) {
-                            TextButton(onClick = onOpenSettings) { Text("设置") }
-                        }
-                        TextButton(onClick = { showExitConfirm = true }) { Text("退出") }
-                    },
-                )
+                Column {
+                    TopAppBar(
+                        navigationIcon = {
+                            AppIconButton(
+                                onClick = { scope.launch { drawerState.open() } },
+                                contentDescription = "会话列表",
+                            ) {
+                                Icon(Icons.Default.Menu, contentDescription = null)
+                            }
+                        },
+                        title = {
+                            // 两行：App 名 + 副标题。原来顶栏横排的「已连接 5 · 会话 58」
+                            // 与「刷新/诊断/设置/退出」四个文字按钮都收进来——顶栏从
+                            // 4 个文字 + 1 个文字导航挤成 2 个图标 + 1 个菜单。
+                            Column {
+                                Text(
+                                    "远程 Web",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                val subtitle = when {
+                                    state.loading -> "连接中…"
+                                    state.error != null -> state.error.orEmpty()
+                                    state.fromCache -> "缓存内容 · 工作区 ${state.snapshot?.items?.size ?: 0}"
+                                    else -> "已连接 · 工作区 ${state.snapshot?.items?.size ?: 0}"
+                                }
+                                Text(
+                                    subtitle,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        },
+                        actions = {
+                            // R017 ①：actions **只准一个**图标按钮。刷新曾是一个独立的
+                            // Refresh 图标钮，与 MoreVert 并排——那样顶栏右端有两个图标，
+                            // 既违反规范也让「刷新」离「退出配对」只差几十像素（误触风险）。
+                            // 现在刷新收进溢出菜单，放在第一项（最高频）。
+                            OverflowMenuIconButton(
+                                expanded = menuOpen,
+                                onExpandedChange = { menuOpen = it },
+                                contentDescription = "更多",
+                                icon = { Icon(Icons.Default.MoreVert, contentDescription = null) },
+                            ) {
+                                OverflowItem(
+                                    text = "刷新",
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Refresh, contentDescription = null)
+                                    },
+                                ) { viewModel.retry() }
+                                if (onOpenDebug != null) {
+                                    OverflowItem(
+                                        text = "诊断",
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Info, contentDescription = null)
+                                        },
+                                    ) { onOpenDebug() }
+                                }
+                                if (onOpenSettings != null) {
+                                    OverflowItem(
+                                        text = "设置",
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Settings, contentDescription = null)
+                                        },
+                                    ) { onOpenSettings() }
+                                }
+                                // 分隔线 + error 色：破坏性动作不与常用项相邻，
+                                // 也不会和「刷新」只差几十像素。
+                                OverflowMenuDivider()
+                                OverflowItem(
+                                    text = "退出配对",
+                                    leadingIcon = {
+                                        Icon(Icons.Default.ExitToApp, contentDescription = null)
+                                    },
+                                    destructive = true,
+                                ) { onUnpair() }
+                            }
+                        },
+                    )
+                    ConnectionBanner(
+                        carrier = carrier,
+                        // 「重新配对」= 退出配对 + 重新配对，是破坏性操作（会擦凭证）。
+                        // AppRoot 层的 onUnpair 现在只置位 pendingUnpair，确认框由
+                        // AppRoot 统一渲染（R018 P1-1）。
+                        onRepairRequest = onUnpair,
+                        onRetry = viewModel::retry,
+                    )
+
+                    if (state.fromCache) {
+                        CacheNotice("正在同步：当前显示的是上次的缓存内容。")
+                    }
+                }
             },
             snackbarHost = { SnackbarHost(snackbar) },
         ) { padding ->
@@ -175,19 +278,6 @@ fun HomeScreen(
                     .fillMaxSize()
                     .padding(padding),
             ) {
-                // 全局状态条（FR-4.4）取代了早前的本地文案条：文案来自唯一的载波，
-                // 因此不会与聊天页顶端的同一条打架。时钟由横幅自持（R007d P3-7），
-                // 屏幕顶层不再需要一个每 30 秒变一次的 now。
-                ConnectionBanner(
-                    carrier = carrier,
-                    onRepair = onUnpair,
-                    onRetry = viewModel::retry,
-                )
-
-                if (state.fromCache) {
-                    CacheNotice("正在同步：当前显示的是上次的缓存内容。")
-                }
-
                 state.error?.let { error ->
                     // 配色跟随主题（早先是硬编码深红底 + 亮红字，浅色主题下与整个界面不协调）。
                     Surface(
@@ -306,20 +396,15 @@ fun HomeScreen(
                                 onPin = viewModel::pinSession,
                                 onUnpin = viewModel::unpinSession,
                             )
-                            HorizontalDivider(
-                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.08f),
-                            )
                         }
                     }
                 }
             }
         }
     }
-
-    if (showExitConfirm) {
-        // 共享组件（R007 P2-5）：设置页的「解除配对」用的是同一个框。
-        ConfirmUnpairDialog(onConfirm = onUnpair, onDismiss = { showExitConfirm = false })
-    }
+    // 退出配对的确认框已上移到 AppRoot 层统一渲染（R018 P1-1）：本屏的「退出」、
+    // 错误横幅与 ConnectionBanner 的「重新配对」走的是同一个 onUnpair，
+    // 而 AppRoot 层的框是三屏共用的唯一一处。这里只留 onUnpair 的直接调用。
 }
 
 /**
@@ -342,53 +427,53 @@ private fun WorkspaceRow(
     onUnpin: (String) -> Unit = {},
 ) {
     val workspace = group.workspace
-    // 整行按下时轻微内缩（0.98）：比单纯换个背景色更像「按到了」，而且不改变行高。
-    var pressed by remember { mutableStateOf(false) }
-    val interactionSource = remember { MutableInteractionSource() }
-    LaunchedEffect(interactionSource) {
-        interactionSource.interactions.collect { interaction ->
-            pressed = interaction is PressInteraction.Press ||
-                interaction is PressInteraction.Release
-        }
-    }
-    val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.98f else 1f,
-        animationSpec = tween(Motion.FAST),
-        label = "workspaceRowScale",
-    )
+    val scale = rememberPressScale()
+    // 实底 + 1dp 描边替代半透明底色（R017）：半透明色叠在滚动内容上会把
+    // 「这是卡片」和「这是背景」混在一起，而描边在深浅两套主题下都稳定。
+    val rowShape = RoundedCornerShape(16.dp)
+    val borderColor = MaterialTheme.colorScheme.outline.copy(alpha = if (expanded) 0.5f else 0.22f)
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .padding(horizontal = 12.dp, vertical = 5.dp)
             .graphicsLayer(scaleX = scale, scaleY = scale)
-            .clip(groupShape)
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
-            .clickable(interactionSource = interactionSource, indication = ripple(), onClick = onToggle)
-            .padding(horizontal = 12.dp, vertical = 12.dp),
+            .clip(rowShape)
+            .background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, borderColor, rowShape)
+            .clickable(onClick = onToggle)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // 左侧文件夹图标：纯文字的层级要靠缩进和字号区分，加一个图形锚点后
-            // 「工作区 → 会话」的两级关系一眼可见（R016）。
+            // 左侧圆角方块放方向箭头：34dp 方块比 34dp 圆更像「可展开的容器」，
+            // 展开时箭头旋转 90°，用 Motion 的曲线而不是硬切。
             Box(
                 modifier = Modifier
                     .size(34.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = if (expanded) 0.22f else 0.13f)),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    text = if (expanded) "▾" else "▸",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.primary,
+                val rotation by animateFloatAsState(
+                    targetValue = if (expanded) 90f else 0f,
+                    animationSpec = tween(Motion.FAST, easing = Motion.Emphasized),
+                    label = "workspaceChevron",
+                )
+                Icon(
+                    Icons.Default.KeyboardArrowRight,
+                    contentDescription = if (expanded) "收起" else "展开",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .size(20.dp)
+                        .rotate(rotation),
                 )
             }
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(12.dp))
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -400,103 +485,136 @@ private fun WorkspaceRow(
                     )
                     if (group.hasRunning) {
                         Spacer(Modifier.width(8.dp))
-                        // 呼吸圆点：正在生成中的工作区。用 alpha 动画而不是静态色块，
-                        // 远看也能注意到（R016）。
-                        val transition = rememberInfiniteTransition(label = "runningDot")
-                        val alpha by transition.animateFloat(
-                            initialValue = 0.35f,
-                            targetValue = 1f,
-                            animationSpec = infiniteRepeatable(
-                                animation = tween(durationMillis = 900),
-                                repeatMode = RepeatMode.Reverse,
-                            ),
-                            label = "runningDotAlpha",
+                        // R017：呼吸圆点换成均衡器（总原则 ②）。这是原本的第五处手写
+                        // 呼吸动画，现在全 App 只剩 `GeneratingGlyph` 一个实现。
+                        GeneratingGlyph(
+                            size = GlyphSize.SM,
+                            tint = LocalStatusRunning.current,
                         )
-                        Surface(
-                            color = Color(0xFF4ADE80).copy(alpha = alpha),
-                            shape = RoundedCornerShape(50),
-                            modifier = Modifier.size(8.dp),
-                        ) {}
                     }
                 }
                 Text(
                     text = workspace.path,
-                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    text = buildString {
-                        append("${group.activeCount} 个会话")
-                        if (group.archivedCount > 0) append(" · ${group.archivedCount} 个已归档")
-                        if (group.missingIds.isNotEmpty()) append(" · ${group.missingIds.size} 个读取不到")
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                )
+                // 计数改成胶囊而不是一行纯文字（R017）：「3 · 1 归档」比
+                // 「3 个会话 · 1 个已归档」短一半，且多个胶囊并列时天然对齐。
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    StatPill("${group.activeCount}", "会话")
+                    if (group.archivedCount > 0) StatPill("${group.archivedCount}", "归档")
+                    if (group.missingIds.isNotEmpty()) {
+                        StatPill("${group.missingIds.size}", "读不到", warn = true)
+                    }
+                }
             }
         }
 
-        if (expanded) {
-            val pinned = group.pinnedRows
-            val archived = group.rows.filter { it.isArchived }
-            val recent = group.rows.filter { it.isArchived.not() && it.isPinned.not() }
+                // 展开动画（R017）：早先是 `if (expanded)` 硬切，行高突变很生硬。
+                // 容器形变属于 [Motion] 的「慢」档，颜色/位移才用快档。
+                AnimatedVisibility(
+                    visible = expanded,
+                    enter = expandVertically(animationSpec = tween(Motion.SLOW, easing = Motion.Emphasized)) +
+                        fadeIn(Motion.fade()),
+                    exit = shrinkVertically(animationSpec = tween(Motion.SLOW, easing = Motion.Emphasized)) +
+                        fadeOut(Motion.fade(Motion.FAST)),
+                ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                val pinned = group.pinnedRows
+                val archived = group.rows.filter { it.isArchived }
+                val recent = group.rows.filter { it.isArchived.not() && it.isPinned.not() }
 
-            if (pinned.isNotEmpty()) {
-                SectionLabel("置顶")
-                pinned.forEach {
-                    SessionRowItem(
-                        row = it,
-                        onOpenSession = onOpenSession,
-                        now = now,
-                        busy = it.summary.sessionId in busySessionIds,
-                        onArchive = onArchive,
-                        onUnarchive = onUnarchive,
-                        onPin = onPin,
-                        onUnpin = onUnpin,
+                if (pinned.isNotEmpty()) {
+                    SectionLabel("置顶")
+                    pinned.forEach {
+                        SessionRowItem(
+                            row = it,
+                            onOpenSession = onOpenSession,
+                            now = now,
+                            busy = it.summary.sessionId in busySessionIds,
+                            onArchive = onArchive,
+                            onUnarchive = onUnarchive,
+                            onPin = onPin,
+                            onUnpin = onUnpin,
+                        )
+                    }
+                }
+                if (recent.isNotEmpty()) {
+                    if (pinned.isNotEmpty()) SectionLabel("会话")
+                    recent.forEach {
+                        SessionRowItem(
+                            row = it,
+                            onOpenSession = onOpenSession,
+                            now = now,
+                            busy = it.summary.sessionId in busySessionIds,
+                            onArchive = onArchive,
+                            onUnarchive = onUnarchive,
+                            onPin = onPin,
+                            onUnpin = onUnpin,
+                        )
+                    }
+                }
+                if (archived.isNotEmpty()) {
+                    SectionLabel("已归档 ${archived.size}")
+                    archived.forEach {
+                        SessionRowItem(
+                            row = it,
+                            onOpenSession = onOpenSession,
+                            now = now,
+                            busy = it.summary.sessionId in busySessionIds,
+                            onArchive = onArchive,
+                            onUnarchive = onUnarchive,
+                            onPin = onPin,
+                            onUnpin = onUnpin,
+                        )
+                    }
+                }
+                if (group.rows.isEmpty()) {
+                    Text(
+                        text = "这个工作区还没有会话。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        modifier = Modifier.padding(start = 46.dp, end = 16.dp, top = 8.dp, bottom = 12.dp),
                     )
                 }
-            }
-            if (recent.isNotEmpty()) {
-                if (pinned.isNotEmpty()) SectionLabel("会话")
-                recent.forEach {
-                    SessionRowItem(
-                        row = it,
-                        onOpenSession = onOpenSession,
-                        now = now,
-                        busy = it.summary.sessionId in busySessionIds,
-                        onArchive = onArchive,
-                        onUnarchive = onUnarchive,
-                        onPin = onPin,
-                        onUnpin = onUnpin,
-                    )
-                }
-            }
-            if (archived.isNotEmpty()) {
-                SectionLabel("已归档 ${archived.size}")
-                archived.forEach {
-                    SessionRowItem(
-                        row = it,
-                        onOpenSession = onOpenSession,
-                        now = now,
-                        busy = it.summary.sessionId in busySessionIds,
-                        onArchive = onArchive,
-                        onUnarchive = onUnarchive,
-                        onPin = onPin,
-                        onUnpin = onUnpin,
-                    )
-                }
-            }
-            if (group.rows.isEmpty()) {
-                Text(
-                    text = "这个工作区还没有会话。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                    modifier = Modifier.padding(start = 56.dp, end = 16.dp, bottom = 12.dp),
-                )
             }
         }
+    }
+}
+
+/** 计数胶囊：大数字 + 小单位，一眼看清数量关系（R017）。 */
+@Composable
+private fun StatPill(value: String, unit: String, warn: Boolean = false) {
+    val bg = if (warn) {
+        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f)
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f)
+    }
+    val fg = if (warn) {
+        MaterialTheme.colorScheme.onErrorContainer
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Row(
+        modifier = Modifier
+            .clip(pillShape)
+            .background(bg)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Text(
+            text = value,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = fg,
+        )
+        Text(text = unit, style = MaterialTheme.typography.labelSmall, color = fg.copy(alpha = 0.75f))
     }
 }
 
@@ -506,8 +624,9 @@ private fun SectionLabel(text: String) {
         text = text,
         style = MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.Medium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-        modifier = Modifier.padding(start = 56.dp, top = 8.dp, bottom = 2.dp),
+        letterSpacing = 0.6.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+        modifier = Modifier.padding(start = 46.dp, top = 10.dp, bottom = 4.dp),
     )
 }
 
@@ -527,36 +646,38 @@ private fun SessionRowItem(
     // `rememberSaveable` 而不是 `remember`：旋屏会让 `remember` 复位、菜单弹到一半消失
     // （R012 P3-2）。与全工程其它 menuOpen（`HomeScreen.kt:385`）保持一致。
     var menuOpen by rememberSaveable { mutableStateOf(false) }
-    var pressed by remember { mutableStateOf(false) }
-    val interactionSource = remember { MutableInteractionSource() }
-    LaunchedEffect(interactionSource) {
-        interactionSource.interactions.collect { interaction ->
-            pressed = interaction is PressInteraction.Press ||
-                interaction is PressInteraction.Release
-        }
-    }
-    val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.98f else 1f,
-        animationSpec = tween(Motion.FAST),
-        label = "sessionRowScale",
-    )
+    val scale = rememberPressScale()
+    val pressTint = rememberPressTint()
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 56.dp, end = 12.dp, top = 3.dp, bottom = 3.dp)
+            .padding(start = 46.dp, end = 12.dp, top = 3.dp, bottom = 3.dp)
             .graphicsLayer(scaleX = scale, scaleY = scale)
             .clip(bubbleShape)
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+            .background(pressTint)
             .combinedClickable(
-                interactionSource = interactionSource,
-                indication = ripple(),
                 onClick = { onOpenSession(summary) },
                 onLongClick = { menuOpen = true },
             )
             .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        // 2dp 左侧轨道：会话是工作区的子节点，用小色条替代原来的半透明底色
+        // （R017），视觉重量从「又一个卡片」降为「卡片里的一行」。
+        Box(
+            modifier = Modifier
+                .padding(end = 10.dp)
+                .size(width = 2.dp, height = 28.dp)
+                .clip(RoundedCornerShape(1.dp))
+                .background(
+                    if (row.isPinned) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+                    } else {
+                        MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                    },
+                ),
+        )
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(
                 text = summary.displayName,
                 style = MaterialTheme.typography.bodyMedium,
@@ -573,7 +694,7 @@ private fun SessionRowItem(
                     Text(
                         text = model,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f),
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.45f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.widthIn(max = 140.dp),
@@ -583,16 +704,12 @@ private fun SessionRowItem(
                 Text(
                     text = TimeText.relative(summary.updatedAt, now),
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f),
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.45f),
                 )
             }
         }
         if (summary.running) {
-            Surface(
-                color = Color(0xFF4ADE80),
-                shape = RoundedCornerShape(50),
-                modifier = Modifier.size(6.dp),
-            ) {}
+            GeneratingGlyph(size = GlyphSize.SM)
         } else if (row.isArchived) {
             Text(
                 text = "归档",
@@ -746,7 +863,8 @@ internal fun SessionDrawer(
                 // key 里**不能带下标**（R006 P3-2）：工作区顺序由 `order` 帧决定，插入/重排会
                 // 让所有下标位移，于是全部 key 变化、LazyColumn 无法复用项，滚动位置直接丢失。
                 // workspaceId 已是稳定唯一标识。
-                item(key = "ws-${group.workspace.workspaceId}") {                    Text(
+                item(key = "ws-${group.workspace.workspaceId}") {
+                    Text(
                         text = "${group.workspace.displayName} · ${group.activeCount}",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Medium,
@@ -861,11 +979,13 @@ private fun DrawerSessionRow(
             )
         }
         if (summary.running) {
-            Surface(
-                color = Color(0xFF4ADE80),
-                shape = RoundedCornerShape(50),
-                modifier = Modifier.size(6.dp),
-            ) {}
+            // R017：静态绿点换成均衡器。这是最后一处「运行中」指示——原先三处
+            // （折叠分组 / 会话行 / 连接横幅）是呼吸动画，会话行这里反而是个静止点，
+            // 同一语义三种视觉，用户根本记不住哪个是哪个。
+            //
+            // 顺带修掉硬编码 `Color(0xFF4ADE80)`：R017 的 `statusRunning` token 让
+            // 它在浅色主题下也能保持 ≥3:1 对比度（原绿在白底上会发灰）。
+            GeneratingGlyph(size = GlyphSize.SM, tint = LocalStatusRunning.current)
         }
         // 抽屉里没有独立的「已归档」段（归档会话只在工作区展开段出现），所以
         // archived / pinned 从 `state.snapshot` 推导而不是写死——写死会在主区与抽屉

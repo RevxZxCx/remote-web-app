@@ -1,10 +1,5 @@
 package com.revxzxcx.remotewebapp.ui.common
 
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -22,7 +17,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.produceState
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -40,8 +34,17 @@ import com.revxzxcx.remotewebapp.core.protocol.isHealthy
  * 出现「聊天说已连接、工作区说重连中」这种自相矛盾的界面。让唯一的载波持有状态、
  * 由发起重试的一方汇报回来，两个页面就永远不会打架。
  *
- * [onRepair] 只在配对失效（[CarrierState.Unpaired]，终态）时出现：那是不可能靠重试恢复的
+ * [onRepairRequest] 只在配对失效（[CarrierState.Unpaired]，终态）时出现：那是不可能靠重试恢复的
  * 情况，必须给用户一条明确的出路，而不是让他看着「重连中…」等下去（R002 P1-1）。
+ *
+ * ## `onRepairRequest` 与 `onRetry` 不是一回事（R018 P1-1）
+ *
+ * - `onRetry` = 重连，同一个凭证再试一次，无破坏性；
+ * - `onRepairRequest` = **退出配对并重新配对**，会擦掉本机凭证，是破坏性操作。
+ *
+ * 早前它叫 `onRepair`，两个屏幕都传了不带二次确认的 `onUnpair` 进来——用户看到
+ * 「重新配对」四个字会以为是重连，点一下凭证就没了。现在名字里带 `Request`，
+ * 且确认框由 AppRoot 统一渲染，调用方传进来的 `onRepairRequest` 已经是确认后的动作。
  *
  * ## 时钟自持（R007d P3-7）
  *
@@ -54,17 +57,27 @@ import com.revxzxcx.remotewebapp.core.protocol.isHealthy
 fun ConnectionBanner(
     carrier: CarrierState,
     modifier: Modifier = Modifier,
-    onRepair: (() -> Unit)? = null,
+    onRepairRequest: (() -> Unit)? = null,
     onRetry: (() -> Unit)? = null,
 ) {
     val needsClock = carrier is CarrierState.Reconnecting
     val nowMillis = if (needsClock) rememberBannerClock() else 0L
-    ConnectionBanner(carrier, nowMillis, modifier, onRepair, onRetry)
+    ConnectionBanner(carrier, nowMillis, modifier, onRepairRequest, onRetry)
 }
 
-/** 只在需要倒计时时跑的时钟：1 秒一跳（比重启退避的粒度细，倒计时才不会跳变）。 */
+/**
+ * 秒级时钟（R018 P2-3）。
+ *
+ * 与 `ui/home/TimeText.kt` 的 `rememberNow()` 是**两个不同粒度**的工具，不能混用：
+ * - `rememberNow()` 30 秒一跳，为「X 分钟前」设计；
+ * - 本函数 1 秒一跳，为「Ns 前 / Ns 后重试」设计。
+ *
+ * 诊断页原来复用 `rememberNow()`，于是「已连上（12s 前）」最多滞后 30 秒才更新，
+ * 中间 29 秒显示的是过期数字——而调试页的定位是「每个数字都对应一个真实排查过的
+ * 问题」，数值本身不可信就等于这个页面对用户说谎。横幅的「Ns 后重试」倒计时同理。
+ */
 @Composable
-private fun rememberBannerClock(): Long {
+fun rememberSecondClock(): Long {
     val now = produceState(System.currentTimeMillis(), true) {
         while (true) {
             value = System.currentTimeMillis()
@@ -74,13 +87,17 @@ private fun rememberBannerClock(): Long {
     return now.value
 }
 
+/** 只在需要倒计时时跑的时钟：1 秒一跳（比重启退避的粒度细，倒计时才不会跳变）。 */
+@Composable
+private fun rememberBannerClock(): Long = rememberSecondClock()
+
 /** 带显式时钟的版本：给渲染测试用（测试里不能让真实时钟参与断言）。 */
 @Composable
 fun ConnectionBanner(
     carrier: CarrierState,
     nowMillis: Long,
     modifier: Modifier = Modifier,
-    onRepair: (() -> Unit)? = null,
+    onRepairRequest: (() -> Unit)? = null,
     onRetry: (() -> Unit)? = null,
 ) {
     val healthy = carrier.isHealthy
@@ -90,28 +107,22 @@ fun ConnectionBanner(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // 状态点带一圈呼吸：正在重连时用户能隔着屏幕感觉到「它还在试」，
-            // 而不是一条静止的黄条（R016）。
-            val dotAlpha by if (carrier is CarrierState.Reconnecting) {
-                val transition = rememberInfiniteTransition(label = "bannerDot")
-                transition.animateFloat(
-                    initialValue = 0.35f,
-                    targetValue = 1f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(durationMillis = 900),
-                        repeatMode = RepeatMode.Reverse,
-                    ),
-                    label = "bannerDotAlpha",
-                )
+            // R017：状态点的呼吸动画换成 `GeneratingGlyph(SM)`。原来这里是第四处
+            // 手写的 `rememberInfiniteTransition` 呼吸点（另三处：折叠分组、会话行
+            // 运行指示、流式占位）。R017 总原则 ② 要求全 App「正在运行」只由一个
+            // 组件表达，于是全部收敛到均衡器上。横幅行高只有 ~28dp，用 7dp 圆点换
+            // 16dp 均衡器不会挤到文案。
+            if (carrier is CarrierState.Reconnecting) {
+                GeneratingGlyph(size = GlyphSize.SM, tint = tone.foreground)
+                Spacer(Modifier.size(8.dp))
             } else {
-                remember { mutableFloatStateOf(1f) }
+                Surface(
+                    color = tone.dot,
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier.size(7.dp),
+                ) {}
+                Spacer(Modifier.size(8.dp))
             }
-            Surface(
-                color = tone.dot.copy(alpha = dotAlpha),
-                shape = RoundedCornerShape(50),
-                modifier = Modifier.size(7.dp),
-            ) {}
-            Spacer(Modifier.size(8.dp))
             Text(
                 text = carrier.describe(nowMillis),
                 style = MaterialTheme.typography.labelSmall,
@@ -122,9 +133,9 @@ fun ConnectionBanner(
             // 只在需要用户介入时才给按钮：健康的连接不需要「重试」。
             if (!healthy) {
                 when (carrier) {
-                    is CarrierState.Unpaired -> if (onRepair != null) {
+                    is CarrierState.Unpaired -> if (onRepairRequest != null) {
                         TextButton(
-                            onClick = onRepair,
+                            onClick = onRepairRequest,
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
                         ) {
                             Text("重新配对", color = tone.foreground, style = MaterialTheme.typography.labelSmall)

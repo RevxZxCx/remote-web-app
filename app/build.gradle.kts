@@ -40,6 +40,9 @@ android {
 
     buildFeatures {
         compose = true
+        // 设置页「高级」段的版本号读 BuildConfig.VERSION_NAME / VERSION_CODE（R017）。
+        // 不打开这个开关时 AGP 不生成 BuildConfig，编译期直接 Unresolved reference。
+        buildConfig = true
     }
 
     packaging {
@@ -83,6 +86,10 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
+    // R017：全 App 图标化（顶栏四个文字按钮收成一个溢出菜单）需要图标。
+    // 只引 icons-core（约 40 枚内置矢量图标，不是 extended 那几千枚），
+    // 与 material3 同源、走同一个 compose-bom，不单独写版本号。
+    implementation(libs.androidx.material.icons.core)
     debugImplementation(libs.androidx.ui.tooling)
 
     implementation(libs.okhttp)

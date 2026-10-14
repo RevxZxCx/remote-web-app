@@ -69,8 +69,18 @@ data class MuxStats(
     val consecutiveFailures: Long = 0L,
 )
 
-/** 一条故障记录（调试页按时间倒序展示）。 */
+/**
+ * 一条故障记录（调试页按时间倒序展示）。
+ *
+ * @param id 单调递增序号（见 [RemoteStreamMux.recordFailure]）。**不能省**：
+ *   早前 `LazyColumn` 用 `"err-$atMillis-$code-${summary.hashCode()}"` 做 key，
+ *   而 `(atMillis, code, summary)` 三者都不保证唯一——同一毫秒内两条并发失败
+ *   路径（非法帧 `failCarrier` 与 `onClosed`）就能产出同 key，`LazyColumn`
+ *   随即抛 `IllegalArgumentException("Key ... was already used")`，诊断页白屏
+ *   （R018 P1-2）。`String.hashCode()` 碰撞更是非零概率。id 顺带让错误列表可稳定 diff。
+ */
 data class MuxError(
+    val id: Long,
     val atMillis: Long,
     val summary: String,
     /** `unpaired` / `transport` / … 与 [TypertException.code] 同义，便于分组。 */

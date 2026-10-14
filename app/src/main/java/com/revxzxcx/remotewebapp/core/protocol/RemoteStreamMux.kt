@@ -98,6 +98,14 @@ class RemoteStreamMux(
     /** 当前是否有可用连接（调试页用）。 */
     val isConnected: Boolean get() = socket != null
 
+    /**
+     * 故障记录的自增序号（R018 P1-2）。
+     *
+     * `AtomicLong` 而不是 `Long`：`recordFailure` 可能被 WebSocket 回调线程与
+     * 订阅方协程同时调用。进程内单调即可，不需要持久化。
+     */
+    private val errorSeq = java.util.concurrent.atomic.AtomicLong(0L)
+
     private val _stats = MutableStateFlow(MuxStats())
     private val _errors = MutableStateFlow<List<MuxError>>(emptyList())
 
@@ -239,7 +247,12 @@ class RemoteStreamMux(
                 },
             )
         }
-        _errors.update { previous -> (listOf(MuxError(now, summary, code)) + previous).take(ERROR_RING_SIZE) }
+        // id 单调递增（R018 P1-2）：`(atMillis, code, summary)` 不保证唯一，
+        // 同毫秒的并发失败路径能产出重复项 → LazyColumn 抛「Key was already used」。
+        _errors.update { previous ->
+            (listOf(MuxError(id = errorSeq.incrementAndGet(), atMillis = now, summary = summary, code = code)) + previous)
+                .take(ERROR_RING_SIZE)
+        }
     }
 
     /**

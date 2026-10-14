@@ -7,9 +7,9 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -18,6 +18,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.MutatePriority
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -29,8 +30,11 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -52,8 +56,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
@@ -63,6 +73,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -113,7 +124,11 @@ import com.revxzxcx.remotewebapp.core.session.fromBase64
 import com.revxzxcx.remotewebapp.core.session.message
 import com.revxzxcx.remotewebapp.core.session.visibleAssistantBlocks
 import com.revxzxcx.remotewebapp.ui.common.CacheNotice
+import com.revxzxcx.remotewebapp.ui.common.AppIconButton
 import com.revxzxcx.remotewebapp.ui.common.ConnectionBanner
+import com.revxzxcx.remotewebapp.ui.common.GeneratingGlyph
+import com.revxzxcx.remotewebapp.ui.common.GlyphSize
+import com.revxzxcx.remotewebapp.ui.common.IconSizes
 import com.revxzxcx.remotewebapp.ui.common.decodeScaled
 import com.revxzxcx.remotewebapp.ui.files.FileTarget
 import com.revxzxcx.remotewebapp.ui.home.TimeText
@@ -232,10 +247,22 @@ fun ChatScreen(
                         }
                     }
                 },
-                navigationIcon = { TextButton(onClick = onBack) { Text("返回") } },
+                // R017：「返回」与「中止」都从文字按钮改成图标按钮。顶栏原本在生成时
+                // 会多出一个文字「中止」，把标题挤成半行；现在两个位置都是固定图标，
+                // 标题宽度不再随生成状态跳动。
+                navigationIcon = {
+                    AppIconButton(onClick = onBack, contentDescription = "返回") {
+                        Icon(Icons.Default.ArrowBack, contentDescription = null)
+                    }
+                },
                 actions = {
                     if (state.generating) {
-                        TextButton(onClick = viewModel::cancel) { Text("中止") }
+                        AppIconButton(
+                            onClick = viewModel::cancel,
+                            contentDescription = "中止生成",
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = null)
+                        }
                     }
                 },
             )
@@ -291,7 +318,9 @@ fun ChatScreen(
             if (!carrier.isHealthy) {
                 ConnectionBanner(
                     carrier = carrier,
-                    onRepair = onUnpair,
+                    // 「重新配对」= 退出配对 + 重新配对，是破坏性操作（会擦凭证）。
+                    // 确认框由 AppRoot 统一渲染（R018 P1-1）。
+                    onRepairRequest = onUnpair,
                     onRetry = viewModel::retry,
                 )
             }
@@ -487,7 +516,7 @@ fun ChatScreen(
  * 但也不能让他以为「这个 App 没有模型切换功能」。
  */
 @Composable
-private fun ModelBar(
+internal fun ModelBar(
     model: ModelRef?,
     loading: Boolean,
     error: String?,
@@ -500,24 +529,76 @@ private fun ModelBar(
                 .padding(horizontal = 4.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = onOpen, enabled = !loading) {
-                Text(
-                    text = when {
-                        loading -> "正在读取模型列表…"
-                        model != null -> "模型 · ${model.label}"
-                        else -> "模型 · 桌面端默认"
-                    },
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1,
-                )
+            // R017：从 TextButton 改成胶囊徽标。TextButton 自带 48dp 最小触控高度和
+            // 内边距，在这条 ~30dp 的窄行里会把输入区整体撑高；胶囊显式给定 32dp，
+            // 并且「实底 + 1dp 描边」的形态与工作区统计徽标、排队条操作钮同源。
+            //
+            // leading 6dp 圆点用 primary：这是当前唯一在用户打字前需要被看到的
+            // 「发送上下文」，但它是静态的（不参与 GeneratingGlyph 的运行中语义）。
+            Surface(
+                onClick = onOpen,
+                enabled = !loading,
+                shape = pillShape,
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier.height(32.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                ) {
+                    if (model != null) {
+                        Box(
+                            Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(
+                        text = when {
+                            loading -> "正在读取模型列表…"
+                            model != null -> "${model.provider}/${model.model}"
+                            else -> "桌面端默认模型"
+                        },
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (model?.reasoningEffort != null) {
+                        Spacer(Modifier.width(6.dp))
+                        // 推理档做成更小的一枚内嵌徽标而不是拼进同一串文字：
+                        // `provider/model` 与 `high` 是两个不同维度的信息，混在一行
+                        // 等宽字体里用户得自己断开读。
+                        Surface(
+                            shape = pillShape,
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                        ) {
+                            Text(
+                                text = model.reasoningEffort,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 5.dp),
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
             }
             if (error != null) {
                 Text(
                     text = error,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.weight(1f).padding(end = 12.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 12.dp),
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
@@ -728,7 +809,14 @@ internal fun Composer(
         }
     }
 
-    Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+    // R017：输入区与消息列表原本同为 surfaceVariant 实底，两块糊成一片，分界只能靠
+    // 消息气泡的圆角猜。加一道 1dp 顶描边之后，「上面是对话、下面是输入」不再需要
+    // 用户自己去理解。描边走 outlineVariant 而不是 primary：输入区不是当前焦点元素，
+    // 用强调色会把注意力从真正在生成的消息上抢走。
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             if (pending.isNotEmpty()) {
                 PendingAttachmentsRow(pending = pending, onRemove = onRemoveAttachment)
@@ -764,6 +852,8 @@ internal fun Composer(
             ) {
                 // 「＋」做成小圆钮而不是 TextButton：TextButton 自带 48dp 最小触控区与
                 // 内边距，在只有两行高的输入区里会把整行撑高，而且字重和「发送」不一致。
+                // 图标用 `Icons.Default.Add` 而不是字符「＋」（R017）：全角加号的字形宽度
+                // 与 ± 一样随字体变化，居中永远差一两像素，图标则恒等。
                 Box(
                     modifier = Modifier
                         .padding(bottom = 4.dp)
@@ -773,10 +863,11 @@ internal fun Composer(
                         .clickable { showAttachSheet = true },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        text = "＋",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "添加附件",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(IconSizes.composer),
                     )
                 }
                 OutlinedTextField(
@@ -823,7 +914,10 @@ internal fun Composer(
                                 color = MaterialTheme.colorScheme.onPrimary,
                             )
                         } else {
-                            Text("发送")
+                            // 生成中点发送 = 排队（用户 m21177 第 4 条反馈）。按钮文案是
+                            // 用户唯一能提前知道「这条不会马上发出」的地方，写「发送」
+                            // 会让人以为消息已经出去了。
+                            Text(if (generating) "排队" else "发送")
                         }
                     }
                 }
@@ -1073,9 +1167,14 @@ internal fun GroupRow(
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     val summary = remember(members, running) { summarizeGroup(members, running) }
+    // R017 / D47：折叠卡改「实底 + 1dp 描边」。原来是
+    // `surfaceVariant.copy(alpha = 0.45f)`——半透明叠加在消息列表的 surface 上，
+    // 深色浅色两套主题各自糊成不同灰度，且与「助手气泡无底色」的形态没有区分度。
+    // 实底 + outlineVariant 描边在两套主题下都是同一个「卡片」语义。
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        color = MaterialTheme.colorScheme.surfaceVariant,
         shape = groupShape,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = modifier.fillMaxWidth(),
     ) {
         Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
@@ -1087,16 +1186,20 @@ internal fun GroupRow(
             ) {
                 // chevron 旋转而不是换字符（R016）：`▸`/`▾` 两个字形宽度不同，
                 // 切换时标题会被推着左右跳一下；旋转是纯 transform，位置不动。
+                // R017 把字形换成 `KeyboardArrowRight` 图标：字形的基线位置随字体
+                // 变，图标恒定居中，且能与工作区行的箭头用同一个视觉语言。
                 val rotation by animateFloatAsState(
                     targetValue = if (expanded) 90f else 0f,
                     animationSpec = tween(Motion.FAST, easing = Motion.Emphasized),
                     label = "groupChevron",
                 )
-                Text(
-                    text = "▸",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.rotate(rotation),
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .rotate(rotation),
                 )
                 Text(
                     text = summary.title,
@@ -1111,24 +1214,12 @@ internal fun GroupRow(
                 // 早期版本另有一个 `FoldSummary.running = running && detail.isNotEmpty()`，
                 // 但没有任何消费方，是死字段（R015 审查 P3-1），已删。
                 if (running) {
-                    // 「进行中」做一个呼吸点：静止的文字徽标在几十条折叠卡片里不显眼，
-                    // 而用户需要立刻知道「现在跑的是这一组」。
-                    val alpha by rememberInfiniteTransition(label = "groupRunning").animateFloat(
-                        initialValue = 0.45f,
-                        targetValue = 1f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(900, easing = Motion.Decelerate),
-                            repeatMode = RepeatMode.Reverse,
-                        ),
-                        label = "groupRunningAlpha",
-                    )
+                    // R017：原来这里是「呼吸圆点 + 进行中」两件手写动画。全 App 的
+                    // 「正在运行」改由 `GeneratingGlyph` 一个组件表达（R017 总原则 ②），
+                    // 所以这里换成三柱均衡器。SM 尺寸 16dp，与 6dp 圆点同数量级但
+                    // 视觉权重更高——折叠卡通常一次有好几条，用户扫一眼就知道哪条在跑。
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primary.copy(alpha = alpha)),
-                        )
+                        GeneratingGlyph(size = GlyphSize.SM, tint = MaterialTheme.colorScheme.primary)
                         Text(
                             text = "进行中",
                             style = MaterialTheme.typography.labelSmall,
@@ -1136,6 +1227,19 @@ internal fun GroupRow(
                             modifier = Modifier.padding(start = 5.dp),
                         )
                     }
+                }
+                // R017：收起态右侧的 `×N`。原来折叠卡只告诉用户「这有一组工具」，
+                // 展开才知道里面有几条；一条执行了 12 个命令的分组和一条只有 1 个的
+                // 分组看起来完全一样。等宽数字保证 1/10/100 位时宽度不跳。
+                if (summary.count > 1) {
+                    Text(
+                        text = "×${summary.count}",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
                 }
             }
             // 进行中的那一行细节（`liveToolDetail`）。只在真有内容时才占一行高度，
@@ -1169,24 +1273,37 @@ internal fun GroupRow(
                 // LazyColumn item 里同时建数百个气泡会让测量/布局卡顿，而且巨型行高还会
                 // 扭曲 [ChatScrollbar] 「未量行用平均值补」的高度估算模型（R015 审查 P2-2）。
                 // 限高让这一行始终有界，内层 lazy 保证同时只有可见成员被组合。
-                LazyColumn(
-                    modifier = Modifier
-                        .padding(top = 10.dp)
-                        .heightIn(max = 360.dp)
-                        .fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    itemsIndexed(members, key = { _, member -> member.seq }) { _, item ->
-                        ChatItemRow(
-                            item = item,
-                            now = now,
-                            changes = changes[item.seq],
-                            changesLoading = item.seq in changesLoading,
-                            onOpenFile = onOpenFile,
-                            onRetryChanges = onRetryChanges,
-                            attachments = attachments,
-                            sessionId = sessionId,
-                        )
+                //
+                // R017：左边那道 1dp 竖线是「层级导轨」。展开区里的每个成员自己已经是
+                // 一张卡/一条带导轨的气泡，外面再套一条线是为了回答「这些是从哪儿展开
+                // 来的」——没有它，展开区看起来像平白多出来的一堆卡片。
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    Box(
+                        Modifier
+                            .padding(top = 4.dp, bottom = 4.dp)
+                            .width(1.dp)
+                            .fillMaxHeight()
+                            .background(MaterialTheme.colorScheme.outlineVariant),
+                    )
+                    LazyColumn(
+                        modifier = Modifier
+                            .padding(start = 10.dp, top = 10.dp)
+                            .heightIn(max = 360.dp)
+                            .fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        itemsIndexed(members, key = { _, member -> member.seq }) { _, item ->
+                            ChatItemRow(
+                                item = item,
+                                now = now,
+                                changes = changes[item.seq],
+                                changesLoading = item.seq in changesLoading,
+                                onOpenFile = onOpenFile,
+                                onRetryChanges = onRetryChanges,
+                                attachments = attachments,
+                                sessionId = sessionId,
+                            )
+                        }
                     }
                 }
             }
@@ -1273,6 +1390,9 @@ private fun ChatItemRow(
             time = item.time,
             now = now,
             modifier = modifier,
+            // 工具卡自己就是「实底 + 1dp 描边」的卡（R017），再画一条导轨会和卡的
+            // 左描边叠成 3dp，且让「卡」读起来像「行」。导轨只给纯内容气泡。
+            railColor = null,
         ) {
             ToolCallCard(item, onOpenFile = { path -> onOpenFile(FileTarget(path)) })
         }
@@ -1283,6 +1403,7 @@ private fun ChatItemRow(
             time = item.time,
             now = now,
             modifier = modifier,
+            railColor = null,
         ) {
             ToolResultCard(item)
         }
@@ -1411,9 +1532,11 @@ private fun BlockView(
 internal fun ReasoningBlock(text: String) {
     if (text.isBlank()) return
     var expanded by rememberSaveable { mutableStateOf(false) }
+    // 同 [GroupRow]：R017 / D47 改实底 + 1dp 描边（原来是 surfaceVariant@0.45f）。
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        color = MaterialTheme.colorScheme.surfaceVariant,
         shape = groupShape,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(modifier = Modifier.padding(vertical = 4.dp)) {
@@ -1425,17 +1548,19 @@ internal fun ReasoningBlock(text: String) {
                 horizontalArrangement = Arrangement.Start,
             ) {
                 // chevron 旋转而不是换字符，同 [GroupRow]：`▸`/`▾` 字形宽度不同，
-                // 切换时后面的标题会被推着跳一下。
+                // 切换时后面的标题会被推着跳一下。R017 同样换成图标。
                 val rotation by animateFloatAsState(
                     targetValue = if (expanded) 90f else 0f,
                     animationSpec = tween(Motion.FAST, easing = Motion.Emphasized),
                     label = "reasoningChevron",
                 )
-                Text(
-                    text = "▸",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.rotate(rotation),
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .rotate(rotation),
                 )
                 Text(
                     text = "思考过程 · ${text.length} 字",
@@ -1520,12 +1645,17 @@ private fun LiveRow(live: LiveAttempt) {
     // `surfaceVariant`，用户看到的画面是「正在生成的那条带底色、生成完底色消失」，
     // 等于每一次回复结束都闪一下。桌面端同样把两者渲染成同一种形态，「正在生成」
     // 由 composer 的「生成中…」占位与顶栏「中止」表达，不靠气泡底色。
+    //
+    // R017：两者改用**导轨颜色**区分——已落盘用 outline（沉），流式用 primary@35%
+    // （浮），再加 token 脉冲。底色同构这条铁律不变：变的只是那条 2dp 的线。
     Bubble(
         alignEnd = false,
         background = null,
         time = 0L,
         now = 0L,
         wide = true,
+        railColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
+        pulseKey = live.text.length,
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             if (live.reasoning.isNotEmpty()) {
@@ -1553,14 +1683,28 @@ private fun LiveRow(live: LiveAttempt) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    // 与左侧导轨对齐：Bubble 的无底色分支在内容前插了 2dp 导轨 + 8dp
+                    // 间距，这里补 2dp 让等宽字与导轨左缘对齐（R017）。
+                    modifier = Modifier.padding(start = 2.dp),
                 )
             }
             if (live.text.isEmpty() && live.reasoning.isEmpty() && live.toolArgs.isEmpty()) {
-                Text(
-                    text = "正在生成…",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                // R017：流式占位从纯文字「正在生成…」换成均衡器 + 文字。用户 m26446
+                // 明确要求「流式对话可以用动态图标以及动效表示实际的生成交互」——一个
+                // 会动的三柱图标比静止的省略号更能表达「正在吐字」，且与折叠分组、
+                // 连接横幅共用同一个组件，全 App 只有一种「运行中」的视觉语言。
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    GeneratingGlyph(
+                        size = GlyphSize.SM,
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        text = "正在生成…",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 5.dp),
+                    )
+                }
             }
         }
     }
@@ -1673,11 +1817,26 @@ internal fun QueuedRow(
                 )
             }
             if (actionable) {
+                // R017：三个 TextButton 收紧成 labelSmall + 小 contentPadding。
+                // TextButton 默认 48dp 触控高度，三个并排要吃掉 144dp 宽——排队气泡
+                // 的正文通常也只有一两行，操作行比内容行还高。收紧后行高回到 28dp，
+                // 三条排队消息也能塞进 composer 上方的 168dp 上限里。
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = { editing = true }) { Text("编辑") }
+                    val actionStyle = MaterialTheme.typography.labelSmall
+                    val actionPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    TextButton(
+                        onClick = { editing = true },
+                        contentPadding = actionPadding,
+                    ) { Text("编辑", style = actionStyle) }
                     // `steer` 只在生成中给（见 KDoc）。
-                    if (generating) TextButton(onClick = onSteer) { Text("插队") }
-                    TextButton(onClick = onRemove) { Text("删除") }
+                    if (generating) {
+                        TextButton(onClick = onSteer, contentPadding = actionPadding) {
+                            Text("插队", style = actionStyle)
+                        }
+                    }
+                    TextButton(onClick = onRemove, contentPadding = actionPadding) {
+                        Text("删除", style = actionStyle)
+                    }
                 }
             } else {
                 // 还没拿到服务端 id：告诉用户为什么没有按钮，而不是让人以为坏了。
@@ -1749,6 +1908,17 @@ private fun Bubble(
     footer: String? = null,
     /** 助手气泡里有代码块/表格时需要更宽，否则 320dp 会把它们挤成一条条。 */
     wide: Boolean = false,
+    /**
+     * 无底色形态下左侧导轨的颜色（R017）。
+     *
+     * 传 null = 不画导轨；默认 `outline`。已落盘的助手消息用 outline（沉下去，
+     * 不抢注意力），流式预览用 `primary@35%`（浮起来，让用户知道这一条正在长）。
+     *
+     * @param pulseKey 变值时让导轨弹一下宽（2dp → 3dp → 2dp），用于流式 token 脉冲。
+     *     只在 [railColor] 非 null 时有意义。
+     */
+    railColor: Color? = MaterialTheme.colorScheme.outline,
+    pulseKey: Any? = null,
     content: @Composable () -> Unit,
 ) {
     val caption = buildString {
@@ -1763,20 +1933,49 @@ private fun Bubble(
         horizontalArrangement = if (alignEnd) Arrangement.End else Arrangement.Start,
     ) {
         if (background == null) {
-            // 无底色：直接铺开，只留让内容呼吸的横向 2dp 与脚注间距。
-            Column(
-                modifier = Modifier
-                    .then(if (wide) Modifier.fillMaxWidth() else Modifier.widthIn(max = 340.dp))
-                    .padding(horizontal = 2.dp, vertical = 2.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                content()
-                if (caption.isNotBlank()) {
-                    Text(
-                        text = caption,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+            // R017：无底色形态加一道 2dp 左侧导轨。助手消息去掉底色之后（R016），
+            // 靠左的内容与列表背景之间只剩 2dp 间距，在一屏几十条里「这一条从哪儿
+            // 开始」需要用户自己扫。导轨是 2dp 圆角实线，比再套回一层半透明底轻得
+            // 多，也保留了 R016 的层次。
+            //
+            // 为什么不是每行都画：用户气泡有底色 + 非对称圆角，已经自带边界；
+            // 只有助手侧需要这条线。所以导轨挂在 `background == null` 分支里。
+            //
+            // token 脉冲（[pulseKey]）：导轨宽度 2dp → 3dp → 2dp。走 `Animatable`
+            // 而不是 `animateDpAsState`，因为要在每次脉冲时先 snapTo 再 animateTo，
+            // 而 animateDpAsState 只有「目标值变了才动」一种触发方式——连续两个
+            // token 间隔短于动画时长时它会把第二次变化直接吞掉。
+            val railPulse = remember { Animatable(2f) }
+            LaunchedEffect(pulseKey) {
+                if (pulseKey != null && railColor != null) {
+                    railPulse.snapTo(3f)
+                    railPulse.animateTo(2f, tween(300, easing = Motion.Emphasized))
+                }
+            }
+            Row(modifier = Modifier.then(if (wide) Modifier.fillMaxWidth() else Modifier.widthIn(max = 340.dp))) {
+                if (railColor != null) {
+                    Box(
+                        Modifier
+                            .padding(top = 3.dp, bottom = 3.dp)
+                            .width(railPulse.value.dp)
+                            .heightIn(min = 14.dp)
+                            .clip(RoundedCornerShape(1.dp))
+                            .background(railColor),
                     )
+                }
+                Column(
+                    modifier = Modifier
+                        .padding(start = 8.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    content()
+                    if (caption.isNotBlank()) {
+                        Text(
+                            text = caption,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                        )
+                    }
                 }
             }
         } else {

@@ -33,6 +33,7 @@ import com.revxzxcx.remotewebapp.core.AppState
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.ui.chat.ChatScreen
 import com.revxzxcx.remotewebapp.ui.chat.ChatViewModel
+import com.revxzxcx.remotewebapp.ui.common.ConfirmUnpairDialog
 import com.revxzxcx.remotewebapp.ui.debug.DebugScreen
 import com.revxzxcx.remotewebapp.ui.debug.DebugViewModel
 import com.revxzxcx.remotewebapp.ui.files.FileTarget
@@ -63,7 +64,10 @@ import kotlinx.coroutines.launch
  *
  * 只给**持有长连接或大内存**的屏用：ChatViewModel（follow 流）与 FileViewerViewModel
  * （`media` 最大 32 MiB）。工作区页的 HomeViewModel 是常驻订阅方（FR-4.1），调试页
- * 只读无流，配对页转瞬即逝——它们保持挂在 Activity 上即可。
+ * 读的是 app 级 `StateFlow`（mux 的 stats / errors，`DebugViewModel.init` 里那条
+ * `combine(...).collect`），不持有长连接、不占大内存，因此可以不进 scoped owner——
+ * **但 key 仍必须带 deviceId**（R018 P2-2：换设备不换 VM 会显示上一个连接的诊断数据）。
+ * 配对页转瞬即逝——它保持挂在 Activity 上即可。
  */
 @Composable
 private fun rememberScopedViewModelStoreOwner(): ViewModelStoreOwner {
@@ -152,6 +156,23 @@ fun AppRoot(container: AppContainer) {
     /** 是否停在设置页（M5-9 主题切换的入口）。 */
     var openSettings by rememberSaveable { mutableStateOf(false) }
 
+    /**
+     * 「退出配对」的统一出口（R018 P1-1）。
+     *
+     * 早前 `AppRoot` 把 `onUnpair = { scope.launch { container.unpair() } }` 直连给
+     * Home / Chat / Settings 三屏。HomeScreen 与 SettingsScreen 自己套了
+     * [ConfirmUnpairDialog]，但 **Home 错误横幅与 ConnectionBanner 的「重新配对」按钮
+     * 传的是同一个 onUnpair**，那两处没有任何确认——误触一次就清掉本机凭证，
+     * 而配对只能由桌面端重新发起。且它们只在异常状态出现，用户注意力在错误信息上、
+     * 最容易误触。
+     *
+     * 现在 `onUnpair` 只置位这一个状态，确认框在 [AppRoot] 层渲染**一次**，
+     * 三屏共用。顺带让「重新配对」与「退出配对」这两个语义分开：
+     * `ConnectionBanner` 的 `onRepair` 参数改名为 `onRepairRequest`，它现在是
+     * 「请求退出配对并重新配对」，与「重连」(`onRetry`) 不是一回事。
+     */
+    var pendingUnpair by rememberSaveable { mutableStateOf(false) }
+
     LaunchedEffect(Unit) {
         // 幂等：重复调用只是重读一次凭证。
         container.bootstrap()
@@ -208,8 +229,13 @@ fun AppRoot(container: AppContainer) {
                     val file = openFile
                     when {
                         openDebug -> {
+                            // key 带 deviceId（R018 P2-2）：DebugViewModel 构造时捕获
+                            // connection / cache / ownerId，换设备后这些全指向旧对象。
+                            // 早前 key 是裸 "debug"，重新配对后进诊断页看到的是上一个
+                            // 连接的地址、设备 id、帧计数与缓存行数——调试页的唯一目的
+                            // 就是「界面说错话时能立刻找到为什么」，这里反而给出误导数据。
                             val vm: DebugViewModel = viewModel(
-                                key = "debug",
+                                key = "debug-${current.credential.deviceId}",
                                 factory = DebugViewModel.factory(
                                     connection = connection,
                                     cache = container.cache,
@@ -229,10 +255,10 @@ fun AppRoot(container: AppContainer) {
                                 SettingsScreen(
                                     themePreferences = container.themePreferences,
                                     onBack = { openSettings = false },
-                                    onUnpair = { scope.launch { container.unpair() } },
+                                    onUnpair = { pendingUnpair = true },
+                                    onOpenDebug = { openDebug = true },
                                 )
-                            }
-                        }
+                            }                        }
 
                         session == null -> {
                             val vm: HomeViewModel = viewModel(
@@ -246,7 +272,7 @@ fun AppRoot(container: AppContainer) {
                             ScreenTransition(route = "home") {
                                 HomeScreen(
                                     viewModel = vm,
-                                    onUnpair = { scope.launch { container.unpair() } },
+                                    onUnpair = { pendingUnpair = true },
                                     onOpenSession = { summary, _ ->
                                         openSession = summary
                                         openFile = null
@@ -312,13 +338,27 @@ fun AppRoot(container: AppContainer) {
                                     title = session.displayName,
                                     onBack = { openSession = null },
                                     onOpenFile = { target -> openFile = target },
-                                    onUnpair = { scope.launch { container.unpair() } },
+                                    onUnpair = { pendingUnpair = true },
                                 )
                             }
                         }
                     }
                 }
             }
+        }
+
+        // 退出配对的二次确认框：渲染在 AppRoot 层，三屏共用（R018 P1-1）。
+        // 放在 `when` 外面而不是 HomeScreen / SettingsScreen 内部：那两处自己渲染时，
+        // Home 错误横幅与 ConnectionBanner 的「重新配对」按钮传的是**不带确认**的
+        // onUnpair，于是同一个破坏性操作有五处入口、只有两处有防护。
+        if (pendingUnpair) {
+            ConfirmUnpairDialog(
+                onConfirm = {
+                    pendingUnpair = false
+                    scope.launch { container.unpair() }
+                },
+                onDismiss = { pendingUnpair = false },
+            )
         }
     }
 }

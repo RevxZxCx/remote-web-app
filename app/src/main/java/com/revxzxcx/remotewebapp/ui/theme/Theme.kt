@@ -5,7 +5,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -33,7 +35,24 @@ private val DarkColors = darkColorScheme(
     onError = Color(0xFF3A0F0C),
     errorContainer = Color(0xFF48211F),
     onErrorContainer = Color(0xFFFFDAD6),
+    // R017：见 LightColors 的同名注释。琥珀 = 重连等待。
+    tertiary = Color(0xFFF2C14E),
+    onTertiary = Color(0xFF3A2A00),
+    tertiaryContainer = Color(0xFF4A3A12),
+    onTertiaryContainer = Color(0xFFFFE7B0),
 )
+
+/**
+ * 「正在生成」的语义色（R017）。
+ *
+ * 之前三处手写 `Color(0xFF4ADE80)`（HomeScreen 的工作区徽标、会话行状态点、
+ * 抽屉行状态点），浅色主题下这个绿压在 #FFFFFF 上偏灰、不够「活着」。
+ * 收成一个 [CompositionLocal]，深浅两套各取各的值，全 App 只有一种「运行绿」。
+ *
+ * 用 CompositionLocal 而不是 `MaterialTheme.colorScheme`：`ColorScheme` 是
+ * material3 的固定结构，加自定义字段得包一层子类，反而更难维护。
+ */
+internal val LocalStatusRunning = staticCompositionLocalOf { Color(0xFF4ADE80) }
 
 private val LightColors = lightColorScheme(
     primary = Color(0xFF1F6FEB),
@@ -56,6 +75,13 @@ private val LightColors = lightColorScheme(
     onError = Color(0xFFFFFFFF),
     errorContainer = Color(0xFFF9DEDC),
     onErrorContainer = Color(0xFF410E0B),
+    // R017：tertiary 两个主题都没设置过，落到 Material 默认紫（深色 #EFB8FF /
+    // 浅色 #7D5260），与整套蓝灰 palette 相撞。现在语义明确：
+    // tertiary = 「等待 / 进行中」的琥珀色，ConnectionBanner 的重连态用它。
+    tertiary = Color(0xFFF2C14E),
+    onTertiary = Color(0xFF3A2A00),
+    tertiaryContainer = Color(0xFF4A3A12),
+    onTertiaryContainer = Color(0xFFFFE7B0),
 )
 
 /**
@@ -102,6 +128,11 @@ fun DshAssistantTheme(
         colorScheme = if (darkTheme) DarkColors else LightColors,
         typography = AppTypography,
         shapes = AppShapes,
-        content = content,
-    )
+    ) {
+        CompositionLocalProvider(
+            LocalStatusRunning provides if (darkTheme) Color(0xFF4ADE80) else Color(0xFF15803D),
+        ) {
+            content()
+        }
+    }
 }

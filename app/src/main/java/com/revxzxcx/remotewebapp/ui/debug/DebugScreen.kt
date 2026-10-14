@@ -11,8 +11,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -24,14 +28,14 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.core.cache.DshCache
 import com.revxzxcx.remotewebapp.core.protocol.CarrierState
 import com.revxzxcx.remotewebapp.core.protocol.MuxError
-import com.revxzxcx.remotewebapp.ui.home.rememberNow
+import com.revxzxcx.remotewebapp.ui.common.AppIconButton
 import com.revxzxcx.remotewebapp.ui.common.formatWallClock
+import com.revxzxcx.remotewebapp.ui.common.rememberSecondClock
 
 /**
  * 调试页（需求文档非功能需求「可观测」）。
@@ -47,15 +51,24 @@ fun DebugScreen(viewModel: DebugViewModel, onBack: () -> Unit) {
     val state by viewModel.state.collectAsState()
     // 「已连上（53s 前）」必须自己走秒：读普通的 `System.currentTimeMillis()` 只在重组时
     // 求值，而调试页静止时没有任何状态变化会触发重组，那个秒数会一直冻在打开页面的那一刻
-    // （R006 P3-5）。
-    val now = rememberNow()
+    // （R006 P3-5）。且必须是**秒级**时钟（R018 P2-3）：`ui/home/TimeText.kt` 的
+    // `rememberNow()` 是 30 秒一跳（为「X 分钟前」设计），复用它会让这个数字最多滞后 30 秒。
+    val now = rememberSecondClock()
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("连接与缓存诊断") },
-                navigationIcon = { TextButton(onClick = onBack) { Text("返回") } },
-                actions = { TextButton(onClick = viewModel::refresh) { Text("刷新") } },
+                navigationIcon = {
+                    AppIconButton(onClick = onBack, contentDescription = "返回") {
+                        Icon(Icons.Default.ArrowBack, contentDescription = null)
+                    }
+                },
+                actions = {
+                    AppIconButton(onClick = viewModel::refresh, contentDescription = "刷新") {
+                        Icon(Icons.Default.Refresh, contentDescription = null)
+                    }
+                },
             )
         },
     ) { padding ->
@@ -142,7 +155,10 @@ fun DebugScreen(viewModel: DebugViewModel, onBack: () -> Unit) {
                     )
                 }
             } else {
-                items(state.errors, key = { "err-${it.atMillis}-${it.code}-${it.summary.hashCode()}" }) { error ->
+                // key 用 recordFailure 分配的自增 id（R018 P1-2）：(atMillis, code,
+                // summary) 三者都不保证唯一，同毫秒的并发失败路径能产出重复 key，
+                // LazyColumn 随即抛「Key ... was already used」——诊断页白屏。
+                items(state.errors, key = { "err-${it.id}" }) { error ->
                     ErrorRow(error)
                 }
             }
