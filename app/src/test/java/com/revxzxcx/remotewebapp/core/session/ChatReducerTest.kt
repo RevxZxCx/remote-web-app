@@ -813,4 +813,115 @@ class ChatReducerTest {
         state,
         ChatFrame.Live(ChatFrame.LiveFrame.Chunk(attemptId, index, 1L, delta)),
     )
+
+    // ------------------------------------------------ 排队回声（用户 m20380 的缺口）
+
+    /**
+     * 造一帧任意类型的事件信封。
+     *
+     * 排队回声的摘除规则要看 `type`，所以这里必须能自由指定类型，不能复用
+     * [event]（那个写死了 `user/message`）。
+     */
+    private fun rawEvent(seq: Long, type: String, text: String = "x"): ChatFrame.Event =
+        parse(
+            """
+            {"type":"$type","seq":$seq,"time":${seq * 1000},
+             "data":{"content":[{"type":"text","text":"$text"}]}}
+            """.trimIndent(),
+        )
+
+    private fun echo(id: Long, text: String = "排队的话") = QueuedMessage(
+        id = id,
+        text = text,
+        enqueuedAt = 1_000L * id,
+    )
+
+    @Test
+    fun `排队回声不会混进 items 也没有 seq 字段`() {
+        // 回声没有 seq 是刻意的：进了 items 就会污染 `session/page` 的游标语义和
+        // `distinctBy{seq}`，而 `ChatScreen` 用 `key = { it.seq }` 渲染 `LazyColumn`，
+        // 给回声编一个假 seq 会直接抛 `Key was already used`。
+        // 这条断言把「两条时间轴必须分开」钉住：回声既不在 items 里，也不共享 seq 空间。
+        val state = ChatUiState(queued = listOf(echo(1L), echo(2L)))
+        assertTrue(state.items.isEmpty())
+        assertTrue(state.queued.all { it !is ChatItem })
+        assertEquals(2, state.queued.size)
+    }
+
+    @Test
+    fun `新的用户消息到达时摘掉最老的一条排队回声`() {
+        val state = ChatUiState(queued = listOf(echo(1L, "第一句"), echo(2L, "第二句")))
+        val next = ChatReducer.reduce(state, event(seq = 5L, text = "第一句"))
+
+        // FIFO：服务端按入队顺序出队，所以摘最老的那条。
+        assertEquals(listOf(echo(2L, "第二句")), next.queued)
+        // 同时真消息要正常进列表。
+        assertEquals(1, next.items.size)
+        assertEquals(5L, next.items.single().seq)
+    }
+
+    @Test
+    fun `新的轮次开始时会摘掉全部排队回声`() {
+        // 自愈规则：`turn/start` 说明新一轮已经开始。若我们的排队消息是它的触发者，
+        // `user/message` 会先到、回声已被摘掉；若没有先到，说明这批回声已经过期
+        // （服务端没取我们的消息就开了新一轮），全部摘掉才不会永久残留。
+        val state = ChatUiState(queued = listOf(echo(1L), echo(2L), echo(3L)))
+        val next = ChatReducer.reduce(state, rawEvent(seq = 9L, type = "turn/start"))
+
+        assertTrue(next.queued.isEmpty())
+        assertTrue(next.generating)
+    }
+
+    @Test
+    fun `同 seq 事件被重新投递时不会消耗排队回声`() {
+        // 重连时服务端会重发已覆盖区间的事件（R006 P3-13 的场景）。那是内容更新，
+        // 不是新的用户消息，不该把回声吃掉。
+        val first = ChatReducer.reduce(ChatUiState(), event(seq = 5L, text = "旧内容"))
+        val state = first.copy(queued = listOf(echo(1L)))
+        val next = ChatReducer.reduce(state, event(seq = 5L, text = "新内容"))
+
+        assertEquals(listOf(echo(1L)), next.queued)
+        assertEquals("新内容", (next.items.single() as ChatItem.User).text)
+    }
+
+    @Test
+    fun `噪声事件不会摘掉排队回声`() {
+        val state = ChatUiState(queued = listOf(echo(1L)))
+        val next = ChatReducer.reduce(state, rawEvent(seq = 6L, type = "step/end"))
+
+        assertEquals(listOf(echo(1L)), next.queued)
+    }
+
+    @Test
+    fun `快照合并不清掉排队回声`() {
+        // 重连不该让用户正在排队的消息从眼前消失——服务端队列与本地回声无关。
+        val state = ChatUiState(queued = listOf(echo(1L)))
+        val snapshot = ChatFrame.Snapshot(
+            items = listOf(requireNotNull(SessionEventParser().toChatItem(
+                SessionEventParser().parseEvent(obj("""{"type":"user/message","seq":3,"time":3000,
+                    "data":{"content":[{"type":"text","text":"旧消息"}]}}"""))!!,
+            ))),
+            cursor = 3L,
+            hasMore = false,
+            title = null,
+            cwd = null,
+            baseline = emptyList(),
+        )
+        val next = ChatReducer.reduce(state, snapshot)
+
+        assertEquals(listOf(echo(1L)), next.queued)
+        assertEquals(1, next.items.size)
+    }
+
+    @Test
+    fun `回声摘除后普通事件照旧推进游标`() {
+        // 摘回声不能顺手把别的事件处理逻辑短路掉（R006 P3-15 的同族风险）。
+        val state = ChatUiState(queued = listOf(echo(1L)))
+        val next = ChatReducer.reduce(state, event(seq = 7L))
+
+        assertTrue(next.queued.isEmpty())
+        assertEquals(7L, next.cursor)
+        assertTrue(next.ready)
+        assertFalse(next.loading)
+    }
 }

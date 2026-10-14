@@ -78,6 +78,7 @@ import com.revxzxcx.remotewebapp.core.session.LiveAttempt
 import com.revxzxcx.remotewebapp.core.session.ModelCatalog
 import com.revxzxcx.remotewebapp.core.session.ModelRef
 import com.revxzxcx.remotewebapp.core.session.PromptAttachment
+import com.revxzxcx.remotewebapp.core.session.QueuedMessage
 import com.revxzxcx.remotewebapp.core.session.SessionAttachmentRepository
 import com.revxzxcx.remotewebapp.core.session.ToolFilePaths
 import com.revxzxcx.remotewebapp.core.session.fromBase64
@@ -165,7 +166,8 @@ fun ChatScreen(
     val itemCount = state.items.size
     val lastIndex = itemCount +
         (if (state.loadingMore) 1 else 0) +
-        (if (state.live != null) 1 else 0) - 1
+        (if (state.live != null) 1 else 0) +
+        state.queued.size - 1
     LaunchedEffect(listState, lastIndex) {
         if (lastIndex < 0) return@LaunchedEffect
         snapshotFlow { state.live?.text?.length ?: 0 }
@@ -316,7 +318,11 @@ fun ChatScreen(
                     contentAlignment = Alignment.Center,
                 ) { CircularProgressIndicator() }
 
-                state.ready && state.items.isEmpty() && state.live == null -> Box(
+                // `queued.isEmpty()` 必须一起判：全新会话里第一句话发出去时 items 还是空的、
+                // live 也还没到（服务端要先出队才开轮），此刻若走进这个空态分支，
+                // 刚发出去的那条回声就被「这个会话还没有消息」盖掉了——正是 m20380 的缺口。
+                state.ready && state.items.isEmpty() && state.live == null &&
+                    state.queued.isEmpty() -> Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -354,6 +360,11 @@ fun ChatScreen(
                     }
                     state.live?.let { live ->
                         item(key = "live") { LiveRow(live) }
+                    }
+                    // 排队回声排在最后：它们的时间戳本来就晚于所有已落盘条目
+                    // （`mode:'queue'` 的消息要等当前轮结束才写进日志）。
+                    items(state.queued, key = { "queued-${it.id}" }) { echo ->
+                        QueuedRow(echo = echo, now = now)
                     }
                 }
             }
@@ -1102,6 +1113,49 @@ private fun LiveRow(live: LiveAttempt) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+    }
+}
+
+/**
+ * 排队中的用户消息（[QueuedMessage]）。
+ *
+ * 刻意做得比真消息淡：它还没有 `seq`、还没有被服务端写进会话日志，用户需要能一眼
+ * 看出「这条还没生效」。这条幽灵气泡正是用户 m20380 反馈的缺口——修复前发送后
+ * 输入框被清空、列表里什么都不出现，用户无法判断消息发没发出去。
+ *
+ * 不做「撤回」按钮：`session/updateQueue` 必须要服务端 `itemId`，而 `session/prompt`
+ * 只回 `{accepted:true}`、快照投影里也没有 queue 项（`typert.remote-client.js:222-341`），
+ * 远程客户端拿不到那个 id。做个撤不掉的撤回按钮比不做更糟。
+ *
+ * `internal` 而不是 `private`：同 `Composer`/`SessionDrawer` 的理由——这条气泡是
+ * 「用户 m20380 反馈的缺口」的修复本体，必须有渲染测试盯住它真的会被组合出来。
+ */
+@Composable
+internal fun QueuedRow(echo: QueuedMessage, now: Long) {
+    Bubble(
+        alignEnd = true,
+        background = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+        time = echo.enqueuedAt,
+        now = now,
+        footer = buildString {
+            append("排队中")
+            if (echo.attachmentCount > 0) append(" · 含 ${echo.attachmentCount} 个附件")
+            append(" · 等当前轮结束后发出")
+        },
+    ) {
+        when {
+            echo.text.isNotBlank() -> MdBlocks(
+                blocks = rememberMarkdown(echo.text),
+                onLinkClick = {},
+                onFilePathClick = {},
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            echo.attachmentCount > 0 -> Text(
+                text = "（${echo.attachmentCount} 个附件）",
+                style = MaterialTheme.typography.bodyMedium,
+            )
         }
     }
 }

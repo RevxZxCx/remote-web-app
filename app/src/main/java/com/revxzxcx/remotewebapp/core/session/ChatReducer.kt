@@ -8,12 +8,24 @@ import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
  * [items] 是**已持久化**的条目，按 `seq` 升序；[live] 是正在生成、尚未落盘的预览。
  * 两者分开存是刻意的：落盘条目是权威的、可翻页的；预览是易失的，收到同 `(turn, step)`
  * 的 `assistant/message` 后整块丢弃。这样就不会出现「同一句话显示两遍」。
+ *
+ * [queued] 是第三种时间轴：已经发给服务端、但服务端还没写进会话日志的消息
+ * （`mode:'queue'` 的产物）。它和 [items]/[live] 都不重叠，因此渲染顺序固定为
+ * `loadingMore → items → live → queued`，见 `ui/chat/ChatScreen.kt`。
  */
 data class ChatUiState(
     /** 按 seq 升序的持久化条目。 */
     val items: List<ChatItem> = emptyList(),
     /** 正在生成的预览；为 null 表示当前没有活跃生成。 */
     val live: LiveAttempt? = null,
+    /**
+     * 已发送但服务端尚未写进日志的消息（排队回声）。
+     *
+     * 纯本地乐观状态，没有 `seq`，因此**不参与 [items] 的任何运算**（游标、翻页、
+     * `distinctBy{seq}`）。只由 [ChatViewModel.send] 追加、由 [reduce] 收到
+     * `user/message` / `turn/start` 时摘掉，绝不写进 Room 缓存。
+     */
+    val queued: List<QueuedMessage> = emptyList(),
     /** 是否正在拉第一帧快照。 */
     val loading: Boolean = true,
     /** 是否正在加载更早的历史。 */
@@ -268,6 +280,26 @@ object ChatReducer {
             state.model
         }
 
+        // 3) 排队回声的摘除。服务端把排队消息写进日志时会先追加一条 `user/message`
+        //    再开下一轮（`client.js:1686` 的 placement 只在 running 时才是 queued，
+        //    所以出队必然伴随新一轮），因此「来了新的 user/message 就摘掉最老的一条回声」
+        //    与「来了 turn/start 就摘掉全部回声」两条规则合起来覆盖全部出队路径，
+        //    且都是**自愈**的：回声永远不会永久残留（用户 m20380 的缺口）。
+        //
+        //    ⚠️ `turn/start` 必须排在 `item == null` **之前**：轮次事件不占行、解析不出
+        //    卡片，`item` 恒为 null。顺序写反了这条分支就永远走不到（首跑测试即此错）。
+        //
+        //    只在新条目上摘（`isNewItem`）：同 seq 事件被重新投递时内容会更新，
+        //    但那不是新的用户消息，不该消耗回声。
+        val isNewItem = state.items.none { it.seq == item?.seq }
+        val queued = when {
+            type == "turn/start" -> emptyList()
+            item == null -> state.queued
+            type == "user/message" && isNewItem && state.queued.isNotEmpty() ->
+                state.queued.drop(1)
+            else -> state.queued
+        }
+
         if (item == null || item.isInvisible()) {
             // 不占行的东西：纯噪声事件（`step/end` 等），或「只承载工具调用」的助手消息。
             //
@@ -286,6 +318,7 @@ object ChatReducer {
                 ready = true,
                 loading = false,
                 model = model,
+                queued = queued,
             )
         }
 
@@ -303,6 +336,7 @@ object ChatReducer {
             cursor = if (seq >= 0L) maxOf(state.cursor, seq) else state.cursor,
             generating = generating,
             model = model,
+            queued = queued,
             // 真的渲染出内容了才清错误条；否则会把重连提示一并抹掉。
             error = null,
         )

@@ -187,6 +187,36 @@ fun visibleAssistantBlocks(blocks: List<ContentBlock>, interrupted: Boolean): Li
     if (interrupted) blocks else blocks.filterNot { it is ContentBlock.ToolCall }
 
 /**
+ * 一条**本地排队回声**：消息已经发给服务端、但还没进会话日志。
+ *
+ * 为什么需要它（用户 m20380 的亲身观察）：会话正在生成时发送，`session/prompt` 用
+ * `mode:'queue'` 把消息挂到服务端队列，**只有 `{accepted:true}` 回来**
+ * （`typert.host.js:803-805`），不带 itemId；`session/follow` 快照的投影白名单里
+ * **没有任何 queue 投影**（`typert.remote-client.js:222-341` 逐行读完），也没有
+ * queue 事件。SDK 里的 `pendingSubmissions` 是**进程内**客户端的本地回声
+ * （`client.js:1684-1707` `beginSubmission`，桌面 UI 靠它乐观上屏），走 wire 的
+ * 远程客户端拿不到。`session/updateQueue` 又必须要 `itemId` 才能删/改/插队
+ * （`typert.host.js:843-862`）——**对纯远程客户端实际上不可用**。
+ *
+ * 结论：排队期间这条消息在 App 里完全不可见，用户只看到输入框被清空，无法判断
+ * 发没发出去。所以这里复刻桌面端的本地回声思路：发送成功即上屏，服务端的
+ * `user/message` 到达时由 [ChatReducer] 换掉。
+ *
+ * ⚠️ 这是**纯本地乐观状态**：没有 `seq`（服务端还没给它编号），所以绝不能进
+ * `state.items`（那会让 `session/page` 的游标语义和 `distinctBy{seq}` 全部错乱），
+ * 也不能写进 Room 缓存——冷启动后它本来就该消失（服务端队列与它无关）。
+ *
+ * @param id 本地单调计数，只用作 Compose 的 `key` 与失败回滚的身份。
+ */
+data class QueuedMessage(
+    val id: Long,
+    val text: String,
+    val attachmentCount: Int = 0,
+    /** 本地发送时刻（epoch 毫秒），仅用于气泡脚注。 */
+    val enqueuedAt: Long = 0L,
+)
+
+/**
  * 正在流式生成的一轮（瞬时状态，不来自持久化日志）。
  *
  * 对应 `session/follow` 的 `assistant-stream` 帧序列。按 `(turn, step)` 索引：

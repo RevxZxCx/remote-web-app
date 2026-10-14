@@ -24,6 +24,7 @@ import com.revxzxcx.remotewebapp.core.session.ImageRejection
 import com.revxzxcx.remotewebapp.core.session.message
 import com.revxzxcx.remotewebapp.core.session.ModelRef
 import com.revxzxcx.remotewebapp.core.session.PromptAttachment
+import com.revxzxcx.remotewebapp.core.session.QueuedMessage
 import com.revxzxcx.remotewebapp.core.session.SessionAttachmentRepository
 import com.revxzxcx.remotewebapp.core.session.SessionEventParser
 import com.revxzxcx.remotewebapp.core.session.SniffedImage
@@ -98,6 +99,15 @@ class ChatViewModel(
     private var sendJob: Job? = null
     private var changesJob: Job? = null
     private var cacheJob: Job? = null
+
+    /**
+     * 排队回声的本地序号源。
+     *
+     * 只用进程内单调递增：回声没有服务端 id（`session/prompt` 只回 `{accepted:true}`），
+     * 这个数字只做 Compose 的 `key` 与「RPC 失败时摘掉哪一条」的身份，重启即失效
+     * ——那时回声本就该消失（服务端队列与本地状态无关）。
+     */
+    private var queuedEchoSeq = 0L
 
     /**
      * 拉可选模型目录的协程。
@@ -200,6 +210,12 @@ class ChatViewModel(
      * （`dsh-api-session-controller/lib/index.js:851`）。这里若在空文本时直接
      * return，输入区的「发送」按钮是亮的（`draft.isNotBlank() || pending.isNotEmpty()`），
      * 点下去却毫无反应也不报错——用户在设备上看到的就是「按钮坏了」。
+     *
+     * 排队回声（用户 m20380 的缺口）：`mode:'queue'` 的消息要等当前轮结束才进会话日志，
+     * 而 `session/prompt` 只回 `{accepted:true}`、快照里没有 queue 投影、`updateQueue`
+     * 又要 itemId——**远程客户端拿不到任何服务端确认**。所以这里在发送前就先挂一条
+     * 本地回声（[QueuedMessage]），让用户立刻看到「我的话在排队」；RPC 失败时摘掉它。
+     * 摘除的正式路径在 [ChatReducer.onEvent]（`user/message` / `turn/start`）。
      */
     fun send() {
         val text = _draft.value.trim()
@@ -209,6 +225,14 @@ class ChatViewModel(
         // T5 设备验收：发送是网络调用，期间「发送」按钮必须进入不可点的加载态。
         // 否则用户看到按钮一直亮着，会反复点（每次都白跑一次 RPC）。
         _state.value = _state.value.copy(sending = true)
+        val echoId = ++queuedEchoSeq
+        val echo = QueuedMessage(
+            id = echoId,
+            text = text,
+            attachmentCount = attachments.size,
+            enqueuedAt = System.currentTimeMillis(),
+        )
+        _state.value = _state.value.copy(queued = _state.value.queued + echo)
         sendJob = viewModelScope.launch {
             try {
                 // 文件附件在上面的 attachFile 里就已经上传换好回执了，这里直接发。
@@ -227,9 +251,15 @@ class ChatViewModel(
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 // 取消不是发送失败：`onCleared`/`retry` 会取消在途的发送，此时不该把
                 // 「已取消」写成错误横幅（`CancellationException` 是 `Exception` 的子类）。
+                // 回声也不动——服务端可能已经收下了，摘掉反而让用户以为没发出去。
                 throw cause
             } catch (cause: Exception) {
-                _state.value = _state.value.copy(sendError = describe(cause))
+                // 回声要摘掉：这条消息没有进服务端队列，留着就是一个永远不会被
+                // `user/message` 换掉的幽灵气泡（只能等冷启动才消失）。
+                _state.value = _state.value.copy(
+                    queued = _state.value.queued.filterNot { it.id == echoId },
+                    sendError = describe(cause),
+                )
             } finally {
                 _state.value = _state.value.copy(sending = false)
             }
