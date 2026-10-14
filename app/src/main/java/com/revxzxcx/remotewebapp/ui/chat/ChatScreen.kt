@@ -304,67 +304,20 @@ fun ChatScreen(
             // 错误条上那个「重试」也去重启整条 follow 流——比失败本身重得多，还不会重新
             // 发送那条消息。用户点了按钮发现什么都没发生。
             //
-            // 三条横幅同形，配色跟随主题的 errorContainer 角色（早先是硬编码深红底 +
-            // 亮红字，浅色主题下变成「白底上贴一块深红」，与整个界面不协调）——R016。
-            state.error?.let { error ->
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Row(
-                        Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = error,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = viewModel::retry) { Text("重试") }
-                    }
-                }
-            }
-
-            state.sendError?.let { error ->
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Row(
-                        Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = error,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = viewModel::retrySend) { Text("重试") }
-                    }
-                }
-            }
-
-            state.pageError?.let { error ->
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Row(
-                        Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = error,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = viewModel::retryLoadMore) { Text("重试") }
-                    }
-                }
-            }
+            // 三条横幅同形（R016 抽成 [ChatErrorBanner]：早先是三段逐字复制的代码，
+            // 改一处漏两处只是时间问题），配色跟随主题的 errorContainer 角色，
+            // 进出带竖向展开动画——没有动画时横幅是硬切出来的，列表内容被猛地顶一下。
+            ChatErrorBanner(text = state.error, actionLabel = "重试", onAction = viewModel::retry)
+            ChatErrorBanner(
+                text = state.sendError,
+                actionLabel = "重试",
+                onAction = viewModel::retrySend,
+            )
+            ChatErrorBanner(
+                text = state.pageError,
+                actionLabel = "重试",
+                onAction = viewModel::retryLoadMore,
+            )
 
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when {
@@ -1509,6 +1462,45 @@ internal fun ReasoningBlock(text: String) {
 }
 
 /**
+ * 聊天页的错误横幅。三类错误（连接 / 发送 / 翻页）共用这一个形态，区别只在
+ * [actionLabel] 与 [onAction]——它们的重试动作必须分开，见调用处注释。
+ *
+ * 用 `AnimatedVisibility` 而不是 `if (text != null)`：横幅出现在列表**上方**，
+ * 硬切出现会把列表内容猛地顶下去一截；竖向展开让「多了一行」这件事有过程。
+ * [text] 为 null 时整条不占位（`AnimatedVisibility` 的 visible=false 不留高度）。
+ */
+@Composable
+private fun ChatErrorBanner(
+    text: String?,
+    actionLabel: String,
+    onAction: () -> Unit,
+) {
+    AnimatedVisibility(
+        visible = text != null,
+        enter = fadeIn(tween(Motion.FAST)) + expandVertically(tween(Motion.FAST)),
+        exit = fadeOut(tween(Motion.FAST)) + shrinkVertically(tween(Motion.FAST)),
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.errorContainer,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = text.orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onAction) { Text(actionLabel) }
+            }
+        }
+    }
+}
+
+/**
  * 把一段 Markdown 文本解析成块，并按文本记忆。
  *
  * 用 [MdStream] 而不是每次直接 `MdParser.parse`：流式生成时文本每几十毫秒就变一次，
@@ -1524,9 +1516,13 @@ private fun rememberMarkdown(text: String): List<com.revxzxcx.remotewebapp.ui.ma
 /** 正在流式生成的预览气泡。 */
 @Composable
 private fun LiveRow(live: LiveAttempt) {
+    // background = null：流式预览与已落盘的助手消息**必须同构**。早先这里给了
+    // `surfaceVariant`，用户看到的画面是「正在生成的那条带底色、生成完底色消失」，
+    // 等于每一次回复结束都闪一下。桌面端同样把两者渲染成同一种形态，「正在生成」
+    // 由 composer 的「生成中…」占位与顶栏「中止」表达，不靠气泡底色。
     Bubble(
         alignEnd = false,
-        background = MaterialTheme.colorScheme.surfaceVariant,
+        background = null,
         time = 0L,
         now = 0L,
         wide = true,
@@ -1594,19 +1590,29 @@ internal fun QueuedStrip(
     onRemove: (QueuedMessage) -> Unit,
     onSteer: (QueuedMessage) -> Unit,
 ) {
-    if (messages.isEmpty()) return
-    Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
-        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
-            Text(
-                text = if (messages.size == 1) "排队中 1 条" else "排队中 ${messages.size} 条",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            LazyColumn(modifier = Modifier.heightIn(max = 168.dp)) {
-                items(messages, key = { "queued-${it.id}" }) { message ->
-                    QueuedRow(
-                        echo = message,
-                        now = now,
+    // 整条带竖向展开动画：排队条在 composer **上方**，`if (messages.isEmpty()) return`
+    // 的硬切会让输入区被猛地顶上去/放下来一截。用户点「发送」后期望看到队列长出来，
+    // 不是看到界面跳一下。
+    //
+    // `surfaceVariant` 底色保留（与助手气泡「无底色」不冲突）：这一块不是对话内容，
+    // 是「待发送区」，需要和消息列表有明确分界。
+    AnimatedVisibility(
+        visible = messages.isNotEmpty(),
+        enter = fadeIn(tween(Motion.MEDIUM)) + expandVertically(tween(Motion.MEDIUM)),
+        exit = fadeOut(tween(Motion.FAST)) + shrinkVertically(tween(Motion.FAST)),
+    ) {
+        Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                Text(
+                    text = if (messages.size == 1) "排队中 1 条" else "排队中 ${messages.size} 条",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                LazyColumn(modifier = Modifier.heightIn(max = 168.dp)) {
+                    items(messages, key = { "queued-${it.id}" }) { message ->
+                        QueuedRow(
+                            echo = message,
+                            now = now,
                         generating = generating,
                         onEdit = { text -> onEdit(message, text) },
                         onRemove = { onRemove(message) },
@@ -1616,6 +1622,7 @@ internal fun QueuedStrip(
             }
         }
     }
+}
 }
 
 /**
