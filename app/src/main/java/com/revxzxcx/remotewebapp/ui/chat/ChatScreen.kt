@@ -116,10 +116,12 @@ fun ChatScreen(
 
     // 用户是否贴在底部。用 snapshotFlow 观察而不是每次重组都读，避免无谓重组。
     //
-    // 必须是 `rememberSaveable`（R007 P2-4）：`listState` 本身经 rememberSaveable 恢复成
-    // 新实例，`LaunchedEffect(listState, lastIndex)` 随之重启、snapshotFlow 立即发射当前值；
-    // 若 `atBottom` 也是普通 `remember`，旋转后它重置成 true，于是用户正在上翻历史时
-    // 一转屏就被拉回底部。
+    // 必须是 `rememberSaveable`（R007 P2-4）：`listState` 本身是普通 `remember`，旋转后会
+    // 得到新实例（滚动位置归零、从头开始），`LaunchedEffect(listState, lastIndex)` 随之重启、
+    // snapshotFlow 立即发射当前值；若 `atBottom` 也是普通 `remember`，旋转后它重置成 true，
+    // 于是用户正在上翻历史时一转屏就被拉回底部。保存 `atBottom` 至少保证「不强行跟随」。
+    // （要连滚动位置一起恢复，得给 `listState` 套 `rememberSaveable(saver = LazyListState.Saver)`，
+    //  本期没做：滚动位置恢复与「重连后跳到窗口尾巴」的交互还没在设备上验证过。）
     var atBottom by rememberSaveable { mutableStateOf(true) }
 
     LaunchedEffect(listState) {

@@ -148,18 +148,16 @@ class AppContainer(context: Context) {
 
         // 换地址 / 换设备时先把旧连接关掉，避免旧 mux 一直挂着。
         current?.close()
-        connection = DshConnection(
-            credential = credential,
-            unaryHttp = unaryHttp,
-            streamHttp = streamHttp,
-        )
-        // 先把缓存库在 IO 线程上建好，**再**把状态切成 `Paired`：`cache` 的 getter 是普通
-        // （非挂起）函数，任何 Composable 都可能在第一帧读它，若那时 `lazy` 还没被初始化，
-        // `build()` 就会在那个线程上打开数据库文件（R006 P2-6）。这里预热后，之后所有读取
-        // 都只是读一个已初始化的字段。
+        // 先把缓存库在 IO 线程上建好，**再**建连接、把状态切成 `Paired`：`cache` 的 getter
+        // 是普通（非挂起）函数，任何 Composable 都可能在第一帧读它，若那时 `lazy` 还没被
+        // 初始化，`build()` 就会在那个线程上打开数据库文件（R006 P2-6）。这里预热后，之后
+        // 所有读取都只是读一个已初始化的字段。
+        //
+        // **建连接只有一次**：早先为了插这段预热把 `current?.close()` + `connection = ...`
+        // 写了两遍，第一个 DshConnection 建出来即被丢弃（从不 close，也不会有 socket，但
+        // 它是死代码且让人以为换连接要建两个对象）。`current` 在上面已经 close 过，再 close
+        // 一次是幂等的空转，同样删掉。
         withContext(Dispatchers.IO) { cacheLazy }
-
-        current?.close()
         connection = DshConnection(
             credential = credential,
             unaryHttp = unaryHttp,

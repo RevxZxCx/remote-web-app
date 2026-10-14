@@ -196,10 +196,10 @@ fun AppRoot(container: AppContainer) {
                             //
                             // 再套一层 scoped owner（R007 P1-1）：离开文件页时 composition
                             // 销毁，ViewModel 随之 clear，32 MiB 的 `media` 不会钉到 Activity
-                            // 销毁才放。
+                            // 销毁才放。key 同样带 deviceId（理由同聊天分支：换设备必须换 VM）。
                             val owner = rememberScopedViewModelStoreOwner()
                             val vm: FileViewerViewModel = viewModel(
-                                key = "file-${session.sessionId}",
+                                key = "file-${current.credential.deviceId}-${session.sessionId}",
                                 factory = FileViewerViewModel.factory(
                                     connection = connection,
                                     sessionId = session.sessionId,
@@ -214,13 +214,17 @@ fun AppRoot(container: AppContainer) {
                         else -> {
                             // key 带上 sessionId：切换会话时拿到的是新 ViewModel（新流、新状态）。
                             //
-                            // scoped owner 是必需的（R007 P1-1）：ChatViewModel 持有
-                            // `session/follow` 长连接流。挂在 Activity 上时，返回工作区页
-                            // 只是让本屏离开组合，流还在跑——开过几个会话就有几条并发流，
-                            // 旧会话还会继续写 DshCache。
+                            // **key 还必须带上 deviceId**：解绑 → 重新配对会换一个新设备，
+                            // 而 scoped owner 是 `remember` 在分支里的——万一某条路径上分支
+                            // 没有离开组合（例如解绑与重连发生在同一帧内），旧 owner 的 store
+                            // 里那个绑定着**旧连接**的 ChatViewModel 会被原样交回来，于是聊天页
+                            // 一直显示着旧的 `unpaired` 错误与已取消的流，直到冷启动才恢复
+                            // （设备实测复现：解绑重配后打开会话，三条 unpaired 错误条常驻；
+                            // `am force-stop` 冷启动后同一会话完全正常）。deviceId 进 key 后，
+                            // 换设备必然换 VM，与 owner 是否被回收无关。
                             val owner = rememberScopedViewModelStoreOwner()
                             val vm: ChatViewModel = viewModel(
-                                key = "chat-${session.sessionId}",
+                                key = "chat-${current.credential.deviceId}-${session.sessionId}",
                                 factory = ChatViewModel.factory(
                                     connection = connection,
                                     sessionId = session.sessionId,
