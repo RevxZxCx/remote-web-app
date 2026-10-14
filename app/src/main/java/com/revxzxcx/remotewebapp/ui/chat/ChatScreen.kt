@@ -59,7 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.MonotonicFrameClock
 import androidx.compose.runtime.withFrameNanos
 import kotlin.coroutines.coroutineContext
-import androidx.compose.runtime.collectAsState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -72,6 +72,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
 import com.revxzxcx.remotewebapp.core.protocol.isHealthy
@@ -130,6 +131,22 @@ fun ChatScreen(
     val attachNotice by viewModel.attachNotice.collectAsState()
     val pending by viewModel.pending.collectAsState()
 
+    // 桌面端「标准模式」的折叠分组（用户 m24940）。一整段过程（工具调用 + 工具结果 +
+    // 只含思考的助手消息）折成一行摘要，用户消息与含正文的助手消息仍然单独成行。
+    // 行模型是 scrollbar / 滚动跟随 / 历史自动加载三处共用的下标基准，所以必须由
+    // [foldChatItems] 单一真相源产出，不能在各自的位置上重算。
+    //
+    // ⚠️ 必须是 State（`by derivedStateOf`），不能是普通 `remember` val。下面三个 lambda
+    // （[ChatScrollFollow] 的 lastIndex / [ChatScrollbar] 的 itemKeys / userItemIndices）
+    // 都被 `LaunchedEffect(listState)` 与 `pointerInput(Unit)` 这类**永不重启**的 effect
+    // 持有，协程里留的是首次组合创建的那个 lambda。普通 val 会被**按值**捕获 → `rows`
+    // 冻在首帧（开会话时 items 通常为空 → 0）→ `scrollToBottom(0)` 把列表跳到顶部、
+    // 流式永久不跟随（m21177-2.3 复发）；scrollbar 的 prefixes 与 resolve() 同样拿到
+    // 首帧 rows → 标记逐个消失、滑块与点击定位整体偏移。
+    // 这正是 ChatScrollFollow.kt 与 ChatScrollbar.kt 两份 KDoc 明文警告过的「冻住」，
+    // R015 自己又踩了一次（审查报告 P1-1/P1-2）。
+    val rows by remember { derivedStateOf { foldChatItems(state.items) } }
+
     // 「贴底跟随」的完整逻辑（含 R010m 修掉的首帧 latch、T7 的 scrollToBottom）在
     // [ChatScrollFollow]，抽成独立 Composable 是为了能被 Robolectric 渲染测试直接驱动——
     // 这段逻辑的缺陷只在真实渲染时现形，纯逻辑单测一条也抓不到。
@@ -142,7 +159,7 @@ fun ChatScreen(
     // 抽成局部 val 而不是内联两遍：[ChatScrollFollow] 与「滚到底部」浮动按钮
     // （用户 m24150）必须按同一个下标滚，两处各写一遍算式必然漂移。
     val lastIndex: () -> Int = {
-        state.items.size +
+        rows.size +
             (if (state.loadingMore) 1 else 0) +
             (if (state.live != null) 1 else 0) - 1
     }
@@ -349,17 +366,31 @@ fun ChatScreen(
                                 }
                             }
                         }
-                        items(state.items, key = { it.seq }) { item ->
-                            ChatItemRow(
-                                item = item,
-                                now = now,
-                                changes = state.changes[item.seq],
-                                changesLoading = item.seq in state.changesLoading,
-                                onOpenFile = onOpenFile,
-                                onRetryChanges = viewModel::retryChanges,
-                                attachments = viewModel.attachments,
-                                sessionId = viewModel.sessionId,
-                            )
+                        itemsIndexed(rows, key = { _, row -> row.key }) { index, row ->
+                            when (row) {
+                                is ChatRow.Single -> ChatItemRow(
+                                    item = row.item,
+                                    now = now,
+                                    changes = state.changes[row.item.seq],
+                                    changesLoading = row.item.seq in state.changesLoading,
+                                    onOpenFile = onOpenFile,
+                                    onRetryChanges = viewModel::retryChanges,
+                                    attachments = viewModel.attachments,
+                                    sessionId = viewModel.sessionId,
+                                )
+
+                                is ChatRow.Group -> GroupRow(
+                                    members = row.members,
+                                    running = index == rows.lastIndex && state.generating,
+                                    now = now,
+                                    changes = state.changes,
+                                    changesLoading = state.changesLoading,
+                                    onOpenFile = onOpenFile,
+                                    onRetryChanges = viewModel::retryChanges,
+                                    attachments = viewModel.attachments,
+                                    sessionId = viewModel.sessionId,
+                                )
+                            }
                         }
                         state.live?.let { live ->
                             item(key = CHAT_LIVE_KEY) { LiveRow(live) }
@@ -378,14 +409,18 @@ fun ChatScreen(
                     itemKeys = {
                         buildList {
                             if (state.loadingMore) add(CHAT_LOADING_MORE_KEY)
-                            state.items.forEach { add(it.seq) }
+                            rows.forEach { add(it.key) }
                             if (state.live != null) add(CHAT_LIVE_KEY)
                         }
                     },
                     userItemIndices = {
                         val base = if (state.loadingMore) 1 else 0
-                        state.items.mapIndexedNotNull { index, item ->
-                            if (item is ChatItem.User) base + index else null
+                        rows.mapIndexedNotNull { index, row ->
+                            if (row is ChatRow.Single && row.item is ChatItem.User) {
+                                base + index
+                            } else {
+                                null
+                            }
                         }
                     },
                     // 会话长度系数。不乘它时每个会话刚打开都恰好量到 50 行
@@ -924,9 +959,16 @@ internal suspend fun loadUriBytes(
     mediaType: String?,
     displayName: String?,
 ): Triple<ByteArray, String, String?>? = withContext(Dispatchers.IO) {
-    val bytes = runCatching {
+    // 取消必须原样上抛：`runCatching` 会连 `CancellationException` 一起吞掉，而它发生在
+    // `withContext(Dispatchers.IO)` 里——用户旋转屏幕或返回时 `withContext` 取消这个块，
+    // 吞掉之后调用方看到的是「读不出来」而不是静默取消（R015 审查 P3-2）。
+    val bytes = try {
         open()?.use { it.readBytes() }
-    }.getOrNull() ?: return@withContext null
+    } catch (cause: CancellationException) {
+        throw cause
+    } catch (_: Exception) {
+        null
+    } ?: return@withContext null
     if (bytes.isEmpty()) return@withContext null
     Triple(bytes, mediaType ?: "application/octet-stream", displayName)
 }
@@ -935,7 +977,9 @@ internal suspend fun loadUriBytes(
  * 从 content Uri 取出 `(输入流工厂, MIME, 展示名)`。
  *
  * 单独一层而不是塞进 [loadUriBytes]：查询 `OpenableColumns` 与 `getType` 都是会抛的
- * 系统调用，包在 `runCatching` 里各管各的失败，读字节那段则完全不被它们影响。
+ * 系统调用，各自 `runCatching` 各管各的失败，读字节那段则完全不被它们影响。
+ * 这里的 `runCatching` 同样吞取消，但两处都在**主线程同步段**里、块内没有挂起函数，
+ * 所以不存在「取消被吞」的窗口（与 [loadUriBytes] 的 `withContext(IO)` 不同）。
  */
 private fun queryUri(context: android.content.Context, uri: android.net.Uri): Triple<() -> java.io.InputStream?, String?, String?> {
     val resolver = context.contentResolver
@@ -949,6 +993,116 @@ private fun queryUri(context: android.content.Context, uri: android.net.Uri): Tr
 }
 
 /** 一条持久化条目。 */
+/**
+ * 折叠分组的一行（用户 m24940，桌面端「标准模式」的 `ProcessGroup`）。
+ *
+ * 收起时只显示 [summarizeGroup] 算出的一行摘要（「已读取文件并写入文件」这类），
+ * 点一下才把组内成员按原来的样子逐条铺开。**默认收起**——这一条就是需求本体：
+ * 用户原话「自动折叠各种操作比如思考、命令、读文件，折叠成『已思考、执行命令、
+ * 读取文件等』」。
+ *
+ * 展开态用 `rememberSaveable` 而不带输入键：状态绑定到**组合槽位**，而外层
+ * `items(key = …)` 给每条消息稳定槽位，所以流式过程中组内成员增加也不会把展开态
+ * 重置掉（[ReasoningBlock] 踩过同一个坑，见那里的 KDoc）。
+ *
+ * @param running 这一组是否属于正在进行的那一轮。只有进行中的分组才显示实时细节
+ *   （桌面端 `POLICIES.standard.liveProcessDetail`）。
+ */
+@Composable
+internal fun GroupRow(
+    members: List<ChatItem>,
+    running: Boolean,
+    now: Long,
+    changes: Map<Long, ChangesEntry>,
+    changesLoading: Set<Long>,
+    onOpenFile: (FileTarget) -> Unit,
+    onRetryChanges: (Long) -> Unit,
+    attachments: SessionAttachmentRepository,
+    sessionId: String,
+) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val summary = remember(members, running) { summarizeGroup(members, running) }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = if (expanded) "▾" else "▸",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = summary.title,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 6.dp),
+                )
+                // 徽标用参数 `running`（「这一组就是正在生成的那一组」）而不是细节行是否为空：
+                // 纯思考的分组即使暂时没有可显示的细节，用户也该知道它还在跑。
+                // 早期版本另有一个 `FoldSummary.running = running && detail.isNotEmpty()`，
+                // 但没有任何消费方，是死字段（R015 审查 P3-1），已删。
+                if (running) {
+                    Text(
+                        text = "进行中",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            // 进行中的那一行细节（`liveToolDetail`）。只在真有内容时才占一行高度，
+            // 否则纯思考的分组会在摘要下面多出一条空白。
+            if (summary.detail.isNotEmpty()) {
+                Text(
+                    text = summary.detail,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            if (expanded) {
+                // 展开内容必须是**内层 lazy + 限高**，不能 `members.forEach` 一次性全渲染。
+                // `MESSAGE_CACHE_LIMIT = 600` 之下一个轮次的分组可含数百个成员，在单个
+                // LazyColumn item 里同时建数百个气泡会让测量/布局卡顿，而且巨型行高还会
+                // 扭曲 [ChatScrollbar] 「未量行用平均值补」的高度估算模型（R015 审查 P2-2）。
+                // 限高让这一行始终有界，内层 lazy 保证同时只有可见成员被组合。
+                LazyColumn(
+                    modifier = Modifier
+                        .padding(top = 8.dp)
+                        .heightIn(max = 360.dp)
+                        .fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    itemsIndexed(members, key = { _, member -> member.seq }) { _, item ->
+                        ChatItemRow(
+                            item = item,
+                            now = now,
+                            changes = changes[item.seq],
+                            changesLoading = item.seq in changesLoading,
+                            onOpenFile = onOpenFile,
+                            onRetryChanges = onRetryChanges,
+                            attachments = attachments,
+                            sessionId = sessionId,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ChatItemRow(
     item: ChatItem,
@@ -980,6 +1134,7 @@ private fun ChatItemRow(
                 item.blocks.forEach { block ->
                     when (block) {
                         is ContentBlock.Text -> Unit // 文字统一走下面的 MdBlocks
+                        // （空分支是刻意的：这个 when 只处理非文字块，文字走 MdStream）
                         else -> BlockView(block, onOpenFile, attachments, sessionId)
                     }
                 }
@@ -1233,11 +1388,16 @@ private fun LiveRow(live: LiveAttempt) {
                 )
             }
             live.toolArgs.forEach { (id, args) ->
+                // 与折叠分组用同一个函数（桌面端 `liveToolDetail`）：进行中的工具只显示
+                // 一行「文件名 / 命令 / 搜索词」，而不是把半截 JSON 参数原样倒出来。
+                // 流式过程中 `args` 常常是未闭合的 JSON，倒出来用户根本读不了。
                 Text(
-                    text = "工具 ${live.toolNames[id] ?: id.take(8)} · $args",
-                    style = MaterialTheme.typography.bodySmall,
+                    text = liveToolDetail(live.toolNames[id] ?: id.take(8), args),
+                    style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             if (live.text.isEmpty() && live.reasoning.isEmpty() && live.toolArgs.isEmpty()) {
