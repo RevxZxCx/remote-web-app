@@ -280,20 +280,24 @@ object ChatReducer {
             state.model
         }
 
-        // 3) 排队回声的摘除。服务端把排队消息写进日志时会先追加一条 `user/message`
-        //    再开下一轮（`client.js:1686` 的 placement 只在 running 时才是 queued，
-        //    所以出队必然伴随新一轮），因此「来了新的 user/message 就摘掉最老的一条回声」
-        //    与「来了 turn/start 就摘掉全部回声」两条规则合起来覆盖全部出队路径，
-        //    且都是**自愈**的：回声永远不会永久残留（用户 m20380 的缺口）。
+        // 3) 排队回声的摘除。回声是**服务端队列的本地镜像**：`send()` 只在服务端回了
+        //    `{accepted:true}` 之后才挂它，所以每一条回声都对应一个确实进了队列的消息。
+        //    于是唯一的权威摘除信号就是「服务端把这条消息写进日志」——也就是一条我们
+        //    还没有的 `user/message`。队列是 FIFO 的，摘最老的一条即可。
         //
-        //    ⚠️ `turn/start` 必须排在 `item == null` **之前**：轮次事件不占行、解析不出
-        //    卡片，`item` 恒为 null。顺序写反了这条分支就永远走不到（首跑测试即此错）。
+        //    ⚠️ **不要**在 `turn/start` 上清空全部回声。服务端是一条一清的
+        //    （用户 m20729/m20733 实测：连着发两条，序列是
+        //    `user/message(A) → turn/start → … → turn/end → user/message(B) → turn/start`），
+        //    所以 `turn/start` 到达时**后面的消息还在队列里**，清空就等于让它们重新变成
+        //    看不见的消息——正是用户 m20380 反馈的缺口，只是窗口短一些。
+        //    回声因此可能在一个角落情形里残留：另一个客户端（桌面端）用 `updateQueue`
+        //    `remove` 把条目撤掉，此时不会有 `user/message`。代价是一条不会自愈的
+        //    「排队中」气泡，远好过把真实还排着队的消息吞掉。
         //
         //    只在新条目上摘（`isNewItem`）：同 seq 事件被重新投递时内容会更新，
         //    但那不是新的用户消息，不该消耗回声。
         val isNewItem = state.items.none { it.seq == item?.seq }
         val queued = when {
-            type == "turn/start" -> emptyList()
             item == null -> state.queued
             type == "user/message" && isNewItem && state.queued.isNotEmpty() ->
                 state.queued.drop(1)

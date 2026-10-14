@@ -861,15 +861,53 @@ class ChatReducerTest {
     }
 
     @Test
-    fun `新的轮次开始时会摘掉全部排队回声`() {
-        // 自愈规则：`turn/start` 说明新一轮已经开始。若我们的排队消息是它的触发者，
-        // `user/message` 会先到、回声已被摘掉；若没有先到，说明这批回声已经过期
-        // （服务端没取我们的消息就开了新一轮），全部摘掉才不会永久残留。
-        val state = ChatUiState(queued = listOf(echo(1L), echo(2L), echo(3L)))
+    fun `新的轮次开始不会摘掉还在排队的回声`() {
+        // ⚠️ 这条断言是用户 m20729/m20733 的实测数据逼出来的反例。
+        //
+        // 早先的实现在 `turn/start` 上清空全部回声，理由的是「自愈」：新一轮开始了，
+        // 若我们的消息是它的触发者，`user/message` 会先到、回声已摘掉；没先到就说明
+        // 这批回声过期了。**这个推理错了**——服务端是一条一清的，不是一次清完：
+        // 连着发两条排队消息时，序列是
+        //     user/message(A) → turn/start → … → turn/end → user/message(B) → turn/start
+        // 所以第一个 `turn/start` 到达时，B 还在服务端队列里。此时清空全部回声，
+        // 就等于让 B 重新变成看不见的消息——正是用户 m20380 反馈的缺口，只是窗口短一些。
+        //
+        // 回声是服务端队列的本地镜像，唯一的权威摘除信号就是 `user/message`。
+        val state = ChatUiState(queued = listOf(echo(1L, "第一句"), echo(2L, "第二句")))
         val next = ChatReducer.reduce(state, rawEvent(seq = 9L, type = "turn/start"))
 
-        assertTrue(next.queued.isEmpty())
+        assertEquals(listOf(echo(1L, "第一句"), echo(2L, "第二句")), next.queued)
         assertTrue(next.generating)
+    }
+
+    @Test
+    fun `连着发两条排队消息时回声按服务端出队顺序一条一条被换掉`() {
+        // 用户 m20729/m20733 在设备上真实跑出来的序列（两条消息都在生成期发出）。
+        // 这条把整条时间轴钉住：回声数量必须始终等于「已 accepted 但还没进日志」的条数。
+        var state = ChatUiState(generating = true, queued = listOf(echo(1L, "one"), echo(2L, "two")))
+        assertEquals(2, state.queued.size)
+
+        // 服务端取出第一条：先写日志，再开新一轮。
+        state = ChatReducer.reduce(state, event(seq = 10L, text = "one"))
+        assertEquals(listOf(echo(2L, "two")), state.queued)
+        assertEquals(1, state.items.size)
+
+        state = ChatReducer.reduce(state, rawEvent(seq = 11L, type = "turn/start"))
+        // 关键：新一轮开始了，但 two 还在队列里，回声必须留着。
+        assertEquals(listOf(echo(2L, "two")), state.queued)
+
+        state = ChatReducer.reduce(state, assistant(seq = 12L, turn = 1L, step = 1L, text = "第一轮的回答"))
+        assertEquals(listOf(echo(2L, "two")), state.queued)
+
+        state = ChatReducer.reduce(state, rawEvent(seq = 13L, type = "turn/end"))
+        assertEquals(listOf(echo(2L, "two")), state.queued)
+        assertFalse(state.generating)
+
+        // 服务端取出第二条。
+        state = ChatReducer.reduce(state, event(seq = 14L, text = "two"))
+        assertTrue(state.queued.isEmpty())
+        assertEquals(3, state.items.size)
+        assertEquals(14L, state.items.last().seq)
     }
 
     @Test

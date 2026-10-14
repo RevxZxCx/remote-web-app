@@ -215,7 +215,11 @@ class ChatViewModel(
      * 而 `session/prompt` 只回 `{accepted:true}`、快照里没有 queue 投影、`updateQueue`
      * 又要 itemId——**远程客户端拿不到任何服务端确认**。所以这里在发送前就先挂一条
      * 本地回声（[QueuedMessage]），让用户立刻看到「我的话在排队」；RPC 失败时摘掉它。
-     * 摘除的正式路径在 [ChatReducer.onEvent]（`user/message` / `turn/start`）。
+     * 摘除的正式路径在 [ChatReducer.onEvent]（`user/message`，FIFO 摘最老一条）。
+     *
+     * 只在 [ChatUiState.generating] 为真时挂回声：不生成时消息会立刻进会话日志，
+     * 真实 `user/message` 一两个往返内就到，此时挂一条「排队中 · 等当前轮结束后发出」
+     * 是错的文案（用户 m20380 的场景只发生在生成中）。
      */
     fun send() {
         val text = _draft.value.trim()
@@ -226,13 +230,20 @@ class ChatViewModel(
         // 否则用户看到按钮一直亮着，会反复点（每次都白跑一次 RPC）。
         _state.value = _state.value.copy(sending = true)
         val echoId = ++queuedEchoSeq
-        val echo = QueuedMessage(
-            id = echoId,
-            text = text,
-            attachmentCount = attachments.size,
-            enqueuedAt = System.currentTimeMillis(),
-        )
-        _state.value = _state.value.copy(queued = _state.value.queued + echo)
+        // 只有真的在排队才需要回声（见 KDoc）。不在生成时也挂的话，每发一条正常消息
+        // 都会闪一下「排队中」，而它并不排队。
+        val echo = if (_state.value.generating) {
+            QueuedMessage(
+                id = echoId,
+                text = text,
+                attachmentCount = attachments.size,
+                enqueuedAt = System.currentTimeMillis(),
+            ).also { added ->
+                _state.value = _state.value.copy(queued = _state.value.queued + added)
+            }
+        } else {
+            null
+        }
         sendJob = viewModelScope.launch {
             try {
                 // 文件附件在上面的 attachFile 里就已经上传换好回执了，这里直接发。

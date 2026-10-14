@@ -126,53 +126,19 @@ fun ChatScreen(
     val attachNotice by viewModel.attachNotice.collectAsState()
     val pending by viewModel.pending.collectAsState()
 
-    // 用户是否贴在底部。用 snapshotFlow 观察而不是每次重组都读，避免无谓重组。
-    //
-    // 必须是 `rememberSaveable`（R007 P2-4）：`listState` 本身是普通 `remember`，旋转后会
-    // 得到新实例（滚动位置归零、从头开始），`LaunchedEffect(listState, lastIndex)` 随之重启、
-    // snapshotFlow 立即发射当前值；若 `atBottom` 也是普通 `remember`，旋转后它重置成 true，
-    // 于是用户正在上翻历史时一转屏就被拉回底部。保存 `atBottom` 至少保证「不强行跟随」。
-    // （要连滚动位置一起恢复，得给 `listState` 套 `rememberSaveable(saver = LazyListState.Saver)`，
-    //  本期没做：滚动位置恢复与「重连后跳到窗口尾巴」的交互还没在设备上验证过。）
-    var atBottom by rememberSaveable { mutableStateOf(true) }
-
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.canScrollForward }
-            .collect { canScrollForward ->
-                // 不能继续向下滚 = 已经在底部。
-                atBottom = !canScrollForward
-            }
-    }
-
-    // 条目数量或流式文本变化时，若用户在底部就跟随。
-    //
-    // 滚动目标必须是**最后一行**：列表里除了 [ChatUiState.items] 还可能有
-    // 「加载更早」的转圈行和流式预览行，只按 `items.size` 算会少滚一两行，
-    // 表现是新消息停在屏幕下沿看不全。
-    //
-    // key **只含 `lastIndex`**：流式生成时文本每个 token 变一次，把它当 key 会不停取消正在
-    // 进行的滚动（`scrollToItem` 是挂起函数），在高频 token 下表现为抖动甚至完全跟不上
-    // （R006 P3-4）。文本增长改在同一个 effect 内用 `snapshotFlow` 收集——它天然按快照帧
-    // 合并，一秒几十次 chunk 只会滚几次。
-    //
-    // 读的是组合里的 `state`（`collectAsState` 桥接出来的 Compose `State`），不是
-    // `viewModel.state.value`：`snapshotFlow` 只观察 Compose 快照系统里的对象，
-    // `MutableStateFlow` 不在其中，读它的原值会让这个 flow 只在建立时发射一次、此后再也不滚
-    // （`SnapshotFlowObservationTest` 把这条语义钉成了可执行契约）。
-    //
-    // 滚动用 [scrollToBottom] 而不是 `scrollToItem(lastIndex)`：后者只把最后一行的顶边
-    // 对齐视口顶边，而流式气泡一直在长高，于是最新的字永远在屏幕下面——这正是 T7 设备验收
-    // 看到的「生成时不自动往下滚」；用户手动下滚时它又会把气泡顶边弹回来，即「回弹到生成开头」。
+    // 「贴底跟随」的完整逻辑（含 R010m 修掉的首帧 latch、T7 的 scrollToBottom）在
+    // [ChatScrollFollow]，抽成独立 Composable 是为了能被 Robolectric 渲染测试直接驱动——
+    // 这段逻辑的缺陷只在真实渲染时现形，纯逻辑单测一条也抓不到。
     val itemCount = state.items.size
     val lastIndex = itemCount +
         (if (state.loadingMore) 1 else 0) +
         (if (state.live != null) 1 else 0) +
         state.queued.size - 1
-    LaunchedEffect(listState, lastIndex) {
-        if (lastIndex < 0) return@LaunchedEffect
-        snapshotFlow { state.live?.text?.length ?: 0 }
-            .collect { if (atBottom) listState.scrollToBottom(lastIndex) }
-    }
+    ChatScrollFollow(
+        listState = listState,
+        lastIndex = lastIndex,
+        liveLength = { state.live?.text?.length ?: 0 },
+    )
 
     // 滚到顶时自动加载更早历史。
     LaunchedEffect(listState, state.hasMore) {
