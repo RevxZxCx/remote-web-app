@@ -227,6 +227,56 @@ object ChatArgs {
     }
 
     /**
+     * `session/projections` 的 args——一次性读某个会话的全部投影。
+     *
+     * 实测（`F:\bot\_projprobe.mjs`）：参数只有 `sessionId`，**不是** address 联合；
+     * 返回 `{asOfSeq, values}`，会话不存在时返回 `null`。
+     * 这是唯一能给「非桌面端当前选中会话」读投影的路（`session/control` 的 baseline
+     * 只含当前选中会话，见 [SessionProjectionRepository.control] 的 KDoc）。
+     */
+    fun projections(sessionId: String): JsonObject = request {
+        put("sessionId", JsonPrimitive(sessionId))
+    }
+
+    /**
+     * `userQuestions/answer` 的 args——回答一组提问。
+     *
+     * 实测（`F:\bot\_uqprobe.mjs`）：args 键集**恰好**是 `{agentId, callId, answer}`
+     * （`typert.remote-client.js:1680` 的 exactKeys 校验，多一个键都报
+     * `gateway/arguments-invalid`）。`agentId` 在顶层会话上就是 `sessionId`。
+     *
+     * `answer` 是 `{answers:[{id, selected, custom?}]}`，一次提交覆盖该 `callId` 下的
+     * **所有**问题；`custom` 未定义时不能出现该键（`z.string().optional()`）。
+     */
+    fun answerQuestions(
+        sessionId: String,
+        callId: String,
+        answers: List<AskAnswer>,
+    ): JsonObject = buildJsonObject {
+        put("agentId", JsonPrimitive(sessionId))
+        put("callId", JsonPrimitive(callId))
+        put(
+            "answer",
+            buildJsonObject {
+                put(
+                    "answers",
+                    JsonArray(
+                        answers.map { answer ->
+                            buildJsonObject {
+                                put("id", JsonPrimitive(answer.id))
+                                put("selected", JsonArray(answer.selected.map { JsonPrimitive(it) }))
+                                if (!answer.custom.isNullOrBlank()) {
+                                    put("custom", JsonPrimitive(answer.custom))
+                                }
+                            }
+                        },
+                    ),
+                )
+            },
+        )
+    }
+
+    /**
      * 包一层 `{request: {...}}`。
      *
      * 五个 chat 方法的参数 wire 名**都是 `request`**（只有 `session/list` 是 `_request`）。

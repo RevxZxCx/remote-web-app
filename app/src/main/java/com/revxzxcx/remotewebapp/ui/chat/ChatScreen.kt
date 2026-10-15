@@ -111,6 +111,7 @@ import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
 import com.revxzxcx.remotewebapp.core.protocol.isHealthy
 import com.revxzxcx.remotewebapp.core.session.ChatItem
+import com.revxzxcx.remotewebapp.core.session.AskQuestion
 import com.revxzxcx.remotewebapp.core.session.ContentBlock
 import com.revxzxcx.remotewebapp.ui.theme.Motion
 import com.revxzxcx.remotewebapp.ui.theme.bubbleShape
@@ -118,6 +119,7 @@ import com.revxzxcx.remotewebapp.ui.theme.bubbleTailShape
 import com.revxzxcx.remotewebapp.ui.theme.groupShape
 import com.revxzxcx.remotewebapp.ui.theme.pillShape
 import com.revxzxcx.remotewebapp.core.session.ImageMeasure
+import com.revxzxcx.remotewebapp.core.session.InteractiveComposerRequest
 import com.revxzxcx.remotewebapp.core.session.LiveAttempt
 import com.revxzxcx.remotewebapp.core.session.ModelCatalog
 import com.revxzxcx.remotewebapp.core.session.ModelRef
@@ -174,6 +176,8 @@ fun ChatScreen(
     var showApprovals by rememberSaveable { mutableStateOf(false) }
     val approvals by viewModel.approvals.collectAsState()
     val approvalError by viewModel.approvalError.collectAsState()
+    val interactive by viewModel.interactive.collectAsState()
+    val questionError by viewModel.questionError.collectAsState()
 
     // 附件提示由 ViewModel 承载（R007 P2-3）：上传整条链跑在 viewModelScope 里，
     // 旋转屏幕既不取消上传也不丢提示。早先是这里的 `remember`，旋转就被重置。
@@ -282,38 +286,53 @@ fun ChatScreen(
             Column {
                 // 排队队列（用户 m21177 第 4 条反馈）：位置在模型条与输入区之间，
                 // 即「发送框上方」。每条一个气泡，带 编辑 / 删除 / 插队 三个操作。
-                QueuedStrip(
-                    messages = state.queued,
-                    generating = state.generating,
-                    now = now,
-                    onEdit = viewModel::editQueued,
-                    onRemove = viewModel::removeQueued,
-                    onSteer = viewModel::steerQueued,
-                )
-                // 有待审批的请求时，卡片出现在输入框**上方**（离手指最近、又不会被长历史
-                // 埋掉的位置）。没有请求时整块不占高度——`if (approvals.isEmpty()) return`
-                // 在 ApprovalBanner 内部，AnimatedVisibility 的 visible 也是同一个判据。
-                AnimatedVisibility(
-                    visible = approvals.isNotEmpty(),
-                    enter = fadeIn(tween(Motion.FAST)) + expandVertically(tween(Motion.FAST)),
-                    exit = fadeOut(tween(Motion.FAST)) + shrinkVertically(tween(Motion.FAST)),
-                ) {
-                    ApprovalBanner(
-                        approvals = approvals,
-                        onAllow = { viewModel.answerApproval(it, true) },
-                        onReject = { viewModel.answerApproval(it, false) },
+                //
+                // 有提问/审批时整块让位（用户 m29539）：输入区都变成回答窗口了，再显示
+                // 「待发送」会让人以为还能继续塞消息。已有排队消息由服务端保管，回答完
+                // 请求后这里自然回来。
+                if (interactive == null) {
+                    QueuedStrip(
+                        messages = state.queued,
+                        generating = state.generating,
+                        now = now,
+                        onEdit = viewModel::editQueued,
+                        onRemove = viewModel::removeQueued,
+                        onSteer = viewModel::steerQueued,
                     )
                 }
-                // 模型条与审批权限徽标**不再单独占一行**，而是收进 Composer 的展开态
-                // （用户 m27990 参考图：收起时一行、展开后才出现配置按钮）。
-                // 传 slot 而不是传参数：Composer 不该知道「模型」与「审批」长什么样，
-                // 它只管「展开时把这些东西排在 ＋ 后面」。
+                // 有待回答的请求时，**输入框本身变成审批/提问窗口**（用户 m29539，
+                // 与 DSH 桌面端一致：卡片暂时占用编辑器位置）。所以：
+                //   · 这里没有横幅，也没有「上面挂着卡片、下面还能打字」的状态——
+                //     那个状态下用户会把新消息发出去，而服务端还在等他回答；
+                //   · 排队条同样让位：有提问/审批时不能再往队列里塞消息。
+                // Composer 内部按 [interactive] 分派，三种形态共用同一个 Surface。
                 Composer(
                     draft = draft,
                     generating = state.generating,
                     sending = state.sending,
                     pending = pending,
                     attachNotice = attachNotice,
+                    interactive = interactive,
+                    // 两条错误通道合并展示，但必须带来源前缀——否则同时失败时用户
+                    // 分不清是「提问没送出去」还是「审批没送出去」，重试的点也不同。
+                    interactiveError = when {
+                        questionError != null && approvalError != null ->
+                            "提问失败：$questionError；审批失败：$approvalError"
+                        questionError != null -> "提问失败：$questionError"
+                        approvalError != null -> "审批失败：$approvalError"
+                        else -> null
+                    },
+                    onAnswerApproval = { eventId, allow ->
+                        viewModel.answerApproval(eventId, allow)
+                    },
+                    onToggleQuestionOption = { callId, question, label ->
+                        viewModel.toggleQuestionOption(callId, question, label)
+                    },
+                    onQuestionCustom = { callId, question, value ->
+                        viewModel.setQuestionCustom(callId, question, value)
+                    },
+                    onSubmitQuestions = viewModel::submitQuestionGroup,
+                    onSkipQuestions = viewModel::skipQuestionGroup,
                     permissionChip = {
                         PermissionChip(
                             permission = state.permission,
@@ -544,13 +563,15 @@ fun ChatScreen(
 
     // 审批权限面板（用户 m28009）。与模型选择器同一个位置：都是「从输入区配置行点进来
     // 的详情」，同一个窗口层级用户不需要学两次。
+    //
+    // R021（用户 m29539）起待处理的审批请求不再列在这里——它们已经占住输入框了。
+    // 这个面板只剩「当前策略是什么 + 为什么手机端改不了」，因为用户点进来第一件事
+    // 就是想改策略，不说明白他就会到处找开关（D53：不做假开关）。
     if (showApprovals) {
-        ApprovalSheet(
-            approvals = approvals,
+        PermissionSheet(
             permission = state.permission,
+            pendingCount = approvals.size,
             error = approvalError,
-            onAllow = { viewModel.answerApproval(it, true) },
-            onReject = { viewModel.answerApproval(it, false) },
             onDismissRequest = { showApprovals = false },
         )
     }
@@ -801,6 +822,11 @@ private fun effortOf(model: com.revxzxcx.remotewebapp.core.session.CatalogModel,
  * 相册走 `ActivityResultContracts.PickVisualMedia`（系统照片选择器，**不需要相机/存储权限）；
  * 文件走 `OpenDocument`（SAF，同样不需要权限）。两条路都不申请运行时权限——
  * 本项目 M5-7 已经验证过相机权限链路，附件这里没必要再引入第二个权限面。
+ *
+ * ## 三种形态（用户 m29539）
+ * [interactive] 非空时这个 Composable **整体变成审批/提问窗口**（[InteractiveWindow]），
+ * 文本输入、附件、模型与权限配置全部让位——与 DSH 桌面端「卡片暂时占用编辑器位置」
+ * 一致。默认值是 null，所以既有调用方（渲染测试）不受影响。
  */
 @Composable
 internal fun Composer(
@@ -809,6 +835,15 @@ internal fun Composer(
     sending: Boolean,
     pending: List<PromptAttachment>,
     attachNotice: String?,
+    /** 有待回答的请求时占用整个输入区；null = 正常聊天输入态。 */
+    interactive: InteractiveComposerRequest? = null,
+    /** 回答失败的原因（提问与审批共用一条：都是「这一步没送出去」）。 */
+    interactiveError: String? = null,
+    onAnswerApproval: (String, Boolean) -> Unit = { _, _ -> },
+    onToggleQuestionOption: (String, AskQuestion, String) -> Unit = { _, _, _ -> },
+    onQuestionCustom: (String, AskQuestion, String) -> Unit = { _, _, _ -> },
+    onSubmitQuestions: (String) -> Unit = {},
+    onSkipQuestions: (String) -> Unit = {},
     /** 模型配置入口（展开态第二行）。由调用方组装，Composer 不关心它长什么样。 */
     modelChip: @Composable () -> Unit,
     /** 审批权限入口（展开态第二行）。同上。 */
@@ -820,6 +855,18 @@ internal fun Composer(
     onAttachFile: (ByteArray, String?) -> Unit,
     onAttachNotice: (String?) -> Unit,
 ) {
+    if (interactive != null) {
+        InteractiveWindow(
+            request = interactive,
+            error = interactiveError,
+            onAnswerApproval = onAnswerApproval,
+            onToggleOption = onToggleQuestionOption,
+            onCustomAnswer = onQuestionCustom,
+            onSubmit = onSubmitQuestions,
+            onSkip = onSkipQuestions,
+        )
+        return
+    }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var showAttachSheet by rememberSaveable { mutableStateOf(false) }

@@ -3,6 +3,7 @@ package com.revxzxcx.remotewebapp.core.session
 import com.revxzxcx.remotewebapp.core.events.ApprovalPolicy
 import com.revxzxcx.remotewebapp.core.events.SandboxMode
 import com.revxzxcx.remotewebapp.core.events.SessionPermission
+import com.revxzxcx.remotewebapp.core.session.AskQuestion
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -10,6 +11,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -399,6 +401,60 @@ class ChatReducerTest {
             ChatFrame.Snapshot(emptyList(), 5, false, null, null, emptyList()),
         )
         assertEquals(SandboxMode.READ_ONLY, state.permission.sandboxMode)
+    }
+
+    /**
+     * `permissions` 投影只补 preset 一维，**不能**把事件已经拿到的 sandboxMode /
+     * approvalPolicy 冲掉（R021 审查 P2-5 的守护）。
+     *
+     * 老会话的加载窗口里可能一条权限事件都没有，此时只有投影能告诉 UI 真相；
+     * 反之事件是历史、投影是当前值，两者分工不能互相覆盖。
+     */
+    @Test
+    fun `permissions投影只补preset不覆盖事件得到的策略`() {
+        val known = ChatUiState(
+            permission = SessionPermission(
+                sandboxMode = SandboxMode.WORKSPACE_WRITE,
+                approvalPolicy = ApprovalPolicy.ASK,
+            ),
+        )
+        val state = ChatReducer.applyPermissionProjection(known, "danger-full-access")
+
+        assertEquals(SandboxMode.WORKSPACE_WRITE, state.permission.sandboxMode)
+        assertEquals(ApprovalPolicy.ASK, state.permission.approvalPolicy)
+        assertEquals(SandboxMode.DANGER_FULL_ACCESS, state.permission.preset)
+    }
+
+    /** 投影读到的预设无法映射成 SandboxMode 时保持原状（未知值不猜）。 */
+    @Test
+    fun `permissions投影遇到无法识别的预设时保持原状`() {
+        val known = ChatUiState(permission = SessionPermission(sandboxMode = SandboxMode.READ_ONLY))
+        val state = ChatReducer.applyPermissionProjection(known, "some-future-preset")
+        assertEquals(SandboxMode.READ_ONLY, state.permission.sandboxMode)
+        assertEquals(null, state.permission.preset)
+    }
+
+    /** 提问卡片消失后草稿必须跟着走，否则服务端复用 callId 时旧草稿会套到新问题上。 */
+    @Test
+    fun `提问卡片消失后草稿被剪掉`() {
+        var state = ChatUiState()
+        state = ChatReducer.enterQuestion(state, "call-a", AskQuestion("q1", "第一题"))
+        state = ChatReducer.setCustomAnswer(state, "call-a", AskQuestion("q1", "第一题"), "我的答案")
+        state = ChatReducer.enterQuestion(state, "call-b", AskQuestion("q2", "另一组"))
+
+        val pruned = ChatReducer.pruneQuestionDrafts(state, setOf("call-b"))
+
+        assertEquals(setOf("call-b"), pruned.questionDrafts.keys)
+        assertEquals("我的答案", state.questionDrafts["call-a"]?.get("q1")?.custom)
+        assertEquals("原状态不能被就地改掉", setOf("call-a", "call-b"), state.questionDrafts.keys)
+    }
+
+    /** 键集合没变时必须是同一个实例（避免每个投影帧都触发重组）。 */
+    @Test
+    fun `剪枝在键集合未变化时不产生新状态`() {
+        var state = ChatUiState()
+        state = ChatReducer.enterQuestion(state, "call-a", AskQuestion("q1", "第一题"))
+        assertSame(state, ChatReducer.pruneQuestionDrafts(state, setOf("call-a")))
     }
 
     @Test

@@ -22,6 +22,18 @@ import com.revxzxcx.remotewebapp.core.session.FileUploadRepository
 import com.revxzxcx.remotewebapp.core.session.ImageLimits
 import com.revxzxcx.remotewebapp.core.session.ImageMeasure
 import com.revxzxcx.remotewebapp.core.session.ImageRejection
+import com.revxzxcx.remotewebapp.core.session.PermissionSnapshot
+import com.revxzxcx.remotewebapp.core.session.QuestionSet
+import com.revxzxcx.remotewebapp.core.session.AskAnswer
+import com.revxzxcx.remotewebapp.core.session.SessionProjectionParser
+import com.revxzxcx.remotewebapp.core.session.SessionProjectionRepository
+import com.revxzxcx.remotewebapp.core.session.AskQuestion
+import com.revxzxcx.remotewebapp.core.session.InteractiveComposerRequest
+import com.revxzxcx.remotewebapp.core.session.UserQuestionsSnapshot
+import com.revxzxcx.remotewebapp.core.session.permissionOf
+import com.revxzxcx.remotewebapp.core.session.userQuestionsOf
+import com.revxzxcx.remotewebapp.core.session.KEY_PERMISSIONS
+import com.revxzxcx.remotewebapp.core.session.KEY_USER_QUESTIONS
 import com.revxzxcx.remotewebapp.core.session.message
 import com.revxzxcx.remotewebapp.core.session.ModelRef
 import com.revxzxcx.remotewebapp.core.session.PromptAttachment
@@ -38,6 +50,8 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.stateIn
@@ -65,6 +79,9 @@ class ChatViewModel(
 
     private val repository = ChatRepository(connection)
     private val changesRepository = ChangesRepository(connection)
+
+    /** 提问与权限投影的读取（`session/projections` + `session/control` + `userQuestions/answer`）。 */
+    private val projections = SessionProjectionRepository(connection)
 
     /**
      * 附件读取（需求 FR-5 的「图片」）。
@@ -113,6 +130,74 @@ class ChatViewModel(
     val approvalError: StateFlow<String?> = connection.remoteEvents.error
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
+    // ---------------------------------------------------- 提问（用户 m29539）
+
+    /**
+     * 等待本会话回答的提问组（`userQuestions` 投影的 `active`）。
+     *
+     * 数据源与审批**刻意不同**：审批走 `$events` 转发流（桌面端推给我们的），
+     * 提问走 `session/projections` 投影 + `session/control` 增量帧。原因是提问的
+     * `callId` 只存在于投影里——`$events` 的 waterfall 帧 request 里
+     * `wait?:{callId}` 是**可选**字段，拿不到 callId 就没法调
+     * `userQuestions/answer`（args 键集恰好三个：`agentId`/`callId`/`answer`）。
+     *
+     * 同样不并进 [ChatUiState]：投影不是 `session/follow` 的产物。
+     *
+     * 刷新四条路（缺一不可，见 [refreshQuestions] 的 KDoc）：
+     *  1. `start()` 里一次 unary 首读——`session/control` 的 baseline 只含桌面端
+     *     当前选中会话，冷启动时我们这个会话大概率不在里面；
+     *  2. `session/control` 的 `projection` 帧——桌面端/手机端任何一方回答了问题，
+     *     服务端都会发增量帧，这是「防重复回答」的主要机制；
+     *  3. `$events` 的 `user-questions/request` waterfall——有提问发生时立刻重读一次
+     *     （投影帧可能因为会话不是当前选中会话而不发）；
+     *  4. 生成中每 [QUESTION_REFRESH_MS] 重读一次——兜底，保证卡片在别人答掉后消失。
+     */
+    private val _questions = MutableStateFlow<List<QuestionSet>>(emptyList())
+    val questions: StateFlow<List<QuestionSet>> = _questions.asStateFlow()
+
+    /**
+     * 当前应该**占住输入框**的请求（用户 m29539：与 DSH 桌面端一致）。
+     *
+     * 优先级：审批 > 提问。理由：审批卡住的是**正在执行的工具**（安全闸门），
+     * 超时或漏答会让整轮停住；提问只是等一个输入。两个同时来时不并排堆两个卡片，
+     * 先把安全闸门放行。被挡掉的那个不会丢——[approvals] 与 [_questions] 都是独立流，
+     * 交互窗口消失后下一个会顶上来。
+     *
+     * 草稿从 [_state].questionDrafts 里读，所以这个流同时依赖 [_questions]（哪一组开着）、
+     * [state]（选了哪几项）与 [approvals]（有没有待批）——三者都是发射源，一个都少不得：
+     * 审批通常恰好在生成停止（`_state` 不再变化）时到达，少列它就会出现「静默会话里
+     * 审批卡片不渲染」。
+     */
+    val interactive: StateFlow<InteractiveComposerRequest?> =
+        combine(_questions, _state, approvals) { questions, ui, pending ->
+            pending.firstOrNull()?.let { request ->
+                InteractiveComposerRequest.Approval(
+                    eventId = request.eventId,
+                    toolName = request.toolName,
+                    reason = request.reason,
+                )
+            } ?: questions.firstOrNull()?.let { group ->
+                InteractiveComposerRequest.Question(
+                    callId = group.callId,
+                    questions = group.questions,
+                    drafts = ui.questionDrafts[group.callId].orEmpty(),
+                )
+            }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /** 提问通道的问题（读不到投影、回答没送出去）。 */
+    private val _questionError = MutableStateFlow<String?>(null)
+    val questionError: StateFlow<String?> = _questionError.asStateFlow()
+
+    /**
+     * 权限预设（`permissions` 投影的 `currentValue`），null = 还读不到。
+     *
+     * UI 实际读的是 [state].permission（经 `ChatReducer.applyPermissionProjection` 桥接），
+     * 这里只留作「投影与事件折叠两条路是否一致」的旁证，暂无界面消费方。
+     */
+    private val _permission = MutableStateFlow<PermissionSnapshot?>(null)
+    val permission: StateFlow<PermissionSnapshot?> = _permission.asStateFlow()
+
     private var pageJob: Job? = null
     private var sendJob: Job? = null
 
@@ -120,6 +205,18 @@ class ChatViewModel(
     private var queueJob: Job? = null
     private var changesJob: Job? = null
     private var cacheJob: Job? = null
+
+    /** 投影一次性首读 / 失败回补的协程（`session/projections`）。 */
+    private var projectionJob: Job? = null
+
+    /** 生成中周期重读的协程。**不能与 [projectionJob] 共用**。 */
+    private var questionPollJob: Job? = null
+
+    /** `session/control` 实时投影流的协程。 */
+    private var controlJob: Job? = null
+
+    /** 回答提问的协程（`userQuestions/answer`）。 */
+    private var answerJob: Job? = null
 
     /**
      * 排队回声的本地序号源。
@@ -164,6 +261,7 @@ class ChatViewModel(
         warmStart()
         start()
         watchChanges()
+        watchQuestions()
     }
 
     /**
@@ -242,12 +340,20 @@ class ChatViewModel(
      * 只在 [ChatUiState.generating] 为真时挂回声：不生成时消息会立刻进会话日志，
      * 真实 `user/message` 一两个往返内就到，此时挂一条「排队中 · 等当前轮结束后发出」
      * 是错的文案（用户 m20380 的场景只发生在生成中）。
+     *
+     * 输入框被审批/提问占用时**不允许发送**（用户 m29539：桌面端卡片占住编辑器时
+     * 用户没法同时打字）。UI 已经把输入区换掉了，这里是第二道防线——防止以后有人
+     * 加了第二条发送入口（比如快捷键）绕过 UI。
      */
     fun send() {
         val text = _draft.value.trim()
         val attachments = _pending.value
         if (text.isEmpty() && attachments.isEmpty()) return
         if (sendJob?.isActive == true) return
+        if (interactive.value != null) {
+            _attachNotice.value = "先回答上面的请求，再发新消息。"
+            return
+        }
         // T5 设备验收：发送是网络调用，期间「发送」按钮必须进入不可点的加载态。
         // 否则用户看到按钮一直亮着，会反复点（每次都白跑一次 RPC）。
         _state.value = _state.value.copy(sending = true)
@@ -382,6 +488,196 @@ class ChatViewModel(
 
     /** 清掉审批通道的错误说明。 */
     fun clearApprovalError() = connection.remoteEvents.clearError()
+
+    /**
+     * 提问/权限投影的读取与刷新。
+     *
+     * 四条刷新路（见 [_questions] 的 KDoc）：
+     *  1. **unary 首读**：`session/control` 的 baseline 只含桌面端当前选中会话
+     *     （实测 90 个会话只回 1 个），所以冷启动必须自己读一次；
+     *  2. **control 流**：实时增量帧，只认 `sessionId` 匹配的本会话；
+     *  3. **`$events` waterfall**：收到 `user-questions/request` 就重读一次投影；
+     *  4. **生成中周期重读**：兜底，保证别人答掉后卡片会消失。
+     *
+     * 后三条都由 [_questions]/[ChatUiState.generating] 的变化驱动，所以整个逻辑是
+     * 「先铺首读 → 之后只按事件刷新」，没有常驻轮询在会话不生成时跑。
+     */
+    private fun watchQuestions() {
+        refreshQuestions()
+        controlJob = viewModelScope.launch {
+            projections.control().collect { frame ->
+                when (frame) {
+                    is SessionProjectionRepository.ProjectionFrame.Projection -> {
+                        if (frame.sessionId != sessionId) return@collect
+                        when (frame.key) {
+                            KEY_USER_QUESTIONS -> applyQuestions(
+                                SessionProjectionParser.questions(frame.value),
+                            )
+
+                            KEY_PERMISSIONS -> {
+                                _permission.value = SessionProjectionParser.permission(frame.value)
+                                _state.value = ChatReducer.applyPermissionProjection(
+                                    _state.value,
+                                    _permission.value?.preset,
+                                )
+                            }
+                        }
+                    }
+
+                    is SessionProjectionRepository.ProjectionFrame.Baseline -> {
+                        // baseline 只含桌面端当前选中会话，所以绝大多数时候这里是空操作。
+                        val values = (frame.projections[sessionId] as? JsonObject)
+                            ?.get("values") as? JsonObject
+                        if (values != null) {
+                            userQuestionsOf(values)?.let { applyQuestions(it) }
+                            permissionOf(values)?.let { found ->
+                                _permission.value = found
+                                _state.value = ChatReducer.applyPermissionProjection(
+                                    _state.value,
+                                    found.preset,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            connection.remoteEvents.questionSignal.collect { refreshQuestions() }
+        }
+        viewModelScope.launch {
+            _state.map { it.generating }.distinctUntilChanged().collect { generating ->
+                questionPollJob?.cancel()
+                if (!generating) return@collect
+                questionPollJob = viewModelScope.launch {
+                    while (true) {
+                        delay(QUESTION_REFRESH_MS)
+                        refreshQuestions()
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 读一次投影并写入 [_questions] / [_permission]。
+     *
+     * 失败**不清空**已有卡片：一次网络抖动就让待答问题消失，用户会以为问题已经被
+     * 别人答掉了（实际上没有），比留着卡片更糟。错误只写进 [_questionError]。
+     *
+     * 重入守卫只保护**一次性读**（首读、失败回补）。生成中的周期轮询走
+     * [questionPollJob]，与 [projectionJob] 分开——早先两者共用一个字段，轮询循环
+     * 自己把自己 `isActive == true` 拦住，整段生成期里 unary 兜底刷新一次都没跑过，
+     * 回答失败后的回读也被吞掉。
+     */
+    private fun refreshQuestions() {
+        if (projectionJob?.isActive == true) return
+        projectionJob = viewModelScope.launch {
+            val snapshot = try {
+                projections.read(sessionId)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Exception) {
+                _questionError.value = describe(cause)
+                return@launch
+            }
+            _questionError.value = null
+            applyQuestions(snapshot.questions ?: UserQuestionsSnapshot.EMPTY)
+            snapshot.permission?.let { found ->
+                _permission.value = found
+                _state.value = ChatReducer.applyPermissionProjection(_state.value, found.preset)
+            }
+        }
+    }
+
+    /** 只保留还开着的提问组；`settled` 里的 callId 一律视为已被回答。 */
+    private fun applyQuestions(snapshot: UserQuestionsSnapshot) {
+        val open = snapshot.active.filter { it.isOpen && it.questions.isNotEmpty() }
+        _questions.value = open
+        // 桌面端规格：第一道带推荐标记的选项预先选中（未提交草稿）。这里在组第一次
+        // 出现时铺默认值；`enterQuestion` 对已有草稿的题是 no-op，所以重读投影不会
+        // 把用户已经选好的东西冲掉。
+        open.forEach { set -> set.questions.forEach { question -> enterQuestion(set.callId, question) } }
+        // 卡片消失（被别人答掉 / 被撤销）时草稿也要跟着走，否则同一 callId 若被服务端
+        // 复用，旧草稿会套到新问题上。
+        val live = open.map { it.callId }.toSet()
+        _state.value = ChatReducer.pruneQuestionDrafts(_state.value, live)
+    }
+
+    /** 点某个选项（单选互斥 / 多选累加）。 */
+    fun toggleQuestionOption(callId: String, question: AskQuestion, label: String) {
+        _state.value = ChatReducer.toggleOption(_state.value, callId, question, label)
+    }
+
+    /** 写自定义答案（单选下自动清掉已选）。 */
+    fun setQuestionCustom(callId: String, question: AskQuestion, value: String) {
+        _state.value = ChatReducer.setCustomAnswer(_state.value, callId, question, value)
+    }
+
+    /** 打开一道题（铺默认草稿）。已在 [applyQuestions] 里批量调用，单独暴露给测试。 */
+    private fun enterQuestion(callId: String, question: AskQuestion) {
+        _state.value = ChatReducer.enterQuestion(_state.value, callId, question)
+    }
+
+    /**
+     * 提交整组提问（桌面端规格：Enter 提交整组，缺答案时跳到第一道未完成的题）。
+     *
+     * 没答的题发 `{selected: []}`（等于「跳过」），而不是从 answers 里省掉——省掉会被
+     * 服务端当成空答案覆盖，效果相同但语义不清，而且桌面端就是这么发的。
+     */
+    fun submitQuestionGroup(callId: String) {
+        val group = _questions.value.firstOrNull { it.callId == callId } ?: return
+        val answers = group.questions.map { question ->
+            ChatReducer.answersOf(_state.value, callId, listOf(question)).firstOrNull()
+                ?: AskAnswer(id = question.id)
+        }
+        answerQuestions(callId, answers)
+    }
+
+    /** 整组跳过：全部发空答案。 */
+    fun skipQuestionGroup(callId: String) {
+        val group = _questions.value.firstOrNull { it.callId == callId } ?: return
+        answerQuestions(callId, group.questions.map { AskAnswer(id = it.id) })
+    }
+
+    /**
+     * 回答一组提问（`userQuestions/answer`）。
+     *
+     * @param answers 该 `callId` 下所有问题的答案。**缺的题不要放**：服务端按 `answers`
+     *   数组覆盖，缺的题会被当成空答案；桌面端的规则是「Enter 提交整组，缺答案时回到
+     *   第一道未完成的题」，所以「整组都答完才提交」由调用方（UI）保证。
+     * @param optimistic 立刻从界面上拿掉的 callId。回答是 unary RPC，成功前不撤卡片会让
+     *   用户以为没点上；失败时 [refreshQuestions] 会把服务端的真实状态读回来。
+     */
+    fun answerQuestions(callId: String, answers: List<AskAnswer>) {
+        if (answers.isEmpty()) {
+            _questionError.value = "这一组问题还没有答案"
+            return
+        }
+        if (answerJob?.isActive == true) return
+        val removed = _questions.value
+        _questions.value = removed.filterNot { it.callId == callId }
+        // 草稿跟着卡片一起走：答案已经进了服务端，留着草稿只会让下一组同 id 的题
+        // 一开始就带着上一次的选项。
+        _state.value = ChatReducer.clearQuestion(_state.value, callId)
+        answerJob = viewModelScope.launch {
+            try {
+                projections.answerQuestions(sessionId, callId, answers)
+                _questionError.value = null
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Exception) {
+                _questionError.value = describe(cause)
+                // 以服务端为准：可能别人已经答掉了（卡片不该回来），也可能还开着（该回来）。
+                refreshQuestions()
+            }
+        }
+    }
+
+    /** 清掉提问通道的错误说明。 */
+    fun clearQuestionError() {
+        _questionError.value = null
+    }
 
     // ---------------------------------------------------------------- 附件（需求 FR-5）
 
@@ -868,11 +1164,24 @@ class ChatViewModel(
         modelJob?.cancel()
         attachJob?.cancel()
         queueJob?.cancel()
+        projectionJob?.cancel()
+        questionPollJob?.cancel()
+        controlJob?.cancel()
+        answerJob?.cancel()
         super.onCleared()
     }
 
     companion object {
         private const val MAX_BACKOFF_MS = 30_000L
+
+        /**
+         * 生成中重读提问投影的间隔。
+         *
+         * 只在 [ChatUiState.generating] 为真时跑：提问只可能在工具执行期间出现，
+         * 不生成时没有任何东西会新建提问。2.5s 足够让「别人答掉了」在两次心跳内
+         * 反映到手机上，而每秒最多一次 unary RPC 的代价可以忽略。
+         */
+        private const val QUESTION_REFRESH_MS = 2_500L
 
         fun factory(
             connection: DshConnection,

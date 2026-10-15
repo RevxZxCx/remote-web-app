@@ -69,6 +69,13 @@ data class RemoteEventsStats(
     val approvalsSeen: Long = 0L,
     /** 成功送出的回答数。 */
     val answers: Long = 0L,
+    /**
+     * 收到的 `user-questions/request` 帧数。
+     *
+     * 提问的回答不走 `$events`（走 `userQuestions/answer` + 投影），所以这里只是
+     * 「有提问发生过」的信号计数，给诊断页看。
+     */
+    val questionsSeen: Long = 0L,
 )
 
 /** `$events` 流上的服务端帧。 */

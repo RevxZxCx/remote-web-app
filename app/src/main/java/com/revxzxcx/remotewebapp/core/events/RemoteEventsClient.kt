@@ -74,10 +74,40 @@ class RemoteEventsClient(
     /** 订阅或回答失败的中文说明。 */
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    /**
+     * 「有新的提问请求到达」的信号：每收到一次 `user-questions/request` waterfall 就 +1。
+     *
+     * 为什么不把请求本身放出来：waterfall 帧的 `request` 里 `wait?:{callId}` 是**可选**
+     * 字段（`dsh-api-user-questions/lib/types/record.js`），而 `userQuestions/answer`
+     * 的 args 必须有 `callId`——拿不到 callId 就没法回答。所以真正的提问卡片只能来自
+     * `userQuestions` 投影（`session/projections` / `session/control`），这里只当一个
+     * 「立刻去重读投影」的触发器。
+     *
+     * 回答本身走投影那条路，不经过这里：`$events/result` 只用于审批。
+     */
+    private val _questionSignal = MutableStateFlow(0L)
+
+    /** 单调递增的提问到达计数；UI 观察到变化就去重读一次投影。 */
+    val questionSignal: StateFlow<Long> = _questionSignal.asStateFlow()
+
     private var job: Job? = null
 
     /** 保护 [approvals] 与 [stats] 的「读-改-写」复合操作（见 [handle] 的 waterfall 分支）。 */
     private val lock = Any()
+
+    /**
+     * 已经回答过 / 主动弃置过的 `eventId`。
+     *
+     * [answer] 会立刻把卡片从 [approvals] 移除，于是 [handle] 里那句
+     * 「`current.none { it.eventId == eventId }`」的去重就失效了——服务端补发同一条
+     * waterfall 时卡片会被重新插回来，而且**永远点不动**（服务端早已视为已回答）。
+     * 所以「已处理」必须独立于「当前在列表里」记账。
+     *
+     * 上限 `HANDLED_RING`：一条流里可能有成百上千次审批，全留着就是无界增长。
+     */
+    private val handledApprovals = ArrayDeque<String>()
+
+    private val handledApprovalsSet = HashSet<String>()
 
     /**
      * 每收到一次 `ready` 帧就 +1。
@@ -133,7 +163,11 @@ class RemoteEventsClient(
                     _clientId.value = null
                     // 订阅失效时把在途请求清空：已经没有监听者，它们不可能再被回答，
                     // 留着只会让 UI 显示一堆点不动的按钮。
-                    _approvals.value = emptyList()
+                    synchronized(lock) {
+                        _approvals.value = emptyList()
+                        handledApprovals.clear()
+                        handledApprovalsSet.clear()
+                    }
                     false
                 } else {
                     _clientId.value = null
@@ -161,7 +195,13 @@ class RemoteEventsClient(
                     // 所以这些卡片必须清掉：留着就是一排点一次错一次的按钮。
                     if (_clientId.value != id) {
                         _clientId.value = id
-                        _approvals.value = emptyList()
+                        // 新流 = 新一批 eventId。旧流上「已处理」的记账没有意义了，
+                        // 全部清掉（否则新流里同一个 eventId 会被误判为已处理）。
+                        synchronized(lock) {
+                            _approvals.value = emptyList()
+                            handledApprovals.clear()
+                            handledApprovalsSet.clear()
+                        }
                     }
                     epoch += 1
                     _error.value = null
@@ -170,7 +210,12 @@ class RemoteEventsClient(
 
             "cancel" -> {
                 val eventId = obj.text("eventId") ?: return
-                _approvals.update { list -> list.filterNot { it.eventId == eventId } }
+                synchronized(lock) {
+                    _approvals.value = _approvals.value.filterNot { it.eventId == eventId }
+                }
+                // 服务端撤回的请求不会再被投递，但记一笔更稳：万一同一 eventId 又被
+                // 补发一次，也不该弹出一张已经取消的卡片。
+                markHandled(eventId)
             }
 
             "emit" -> {
@@ -196,14 +241,21 @@ class RemoteEventsClient(
                     // 会被随后的写回盖掉，用户刚允许通过的卡片又冒出来。
                     synchronized(lock) {
                         val current = _approvals.value
-                        if (current.none { it.eventId == eventId }) {
+                        if (current.none { it.eventId == eventId } && eventId !in handledApprovalsSet) {
                             _approvals.value = current + request
                             _stats.update { it.copy(approvalsSeen = it.approvalsSeen + 1) }
                         }
                     }
                 }
-                // `user-questions/request`（模型提问）也是 waterfall，本期未实现：
-                // 不接就意味着它会一直等。已知缺口，记录在测试记录里。
+                // `user-questions/request`（模型提问）也是 waterfall。请求本身不带可靠的
+                // `callId`，所以这里只发信号，让 `ChatViewModel` 去重读 `userQuestions`
+                // 投影（那里才有 `callId`）。
+                if (obj.text("event") == "user-questions/request") {
+                    synchronized(lock) {
+                        _questionSignal.value = _questionSignal.value + 1
+                        _stats.update { it.copy(questionsSeen = it.questionsSeen + 1) }
+                    }
+                }
             }
 
             else -> Unit
@@ -251,6 +303,7 @@ class RemoteEventsClient(
             typert.callUnit(RemoteEvents.EVENT_RESULT_ENDPOINT, args)
             _error.value = null
             _stats.update { it.copy(answers = it.answers + 1) }
+            markHandled(eventId)
         } catch (cause: CancellationException) {
             throw cause
         } catch (cause: Throwable) {
@@ -270,7 +323,26 @@ class RemoteEventsClient(
 
     /** 主动丢弃一条请求（不回答）。仅在用户明确划掉时调用。 */
     fun dismiss(eventId: String) {
-        _approvals.update { list -> list.filterNot { it.eventId == eventId } }
+        synchronized(lock) {
+            _approvals.value = _approvals.value.filterNot { it.eventId == eventId }
+        }
+        markHandled(eventId)
+    }
+
+    /**
+     * 记下「这个 eventId 已经处理过了」，并维持环形上限。
+     *
+     * 必须在锁外调用（自身会拿锁）；调用点已经持有结果或已经移除卡片。
+     */
+    private fun markHandled(eventId: String) {
+        synchronized(lock) {
+            if (handledApprovalsSet.add(eventId)) {
+                handledApprovals.addLast(eventId)
+                while (handledApprovals.size > HANDLED_RING) {
+                    handledApprovalsSet.remove(handledApprovals.removeFirst())
+                }
+            }
+        }
     }
 
     /** 清掉错误说明（用户看过之后）。 */
@@ -278,21 +350,34 @@ class RemoteEventsClient(
         _error.value = null
     }
 
-    /** 关闭订阅。随连接销毁。 */
+    /** 关闭订阅。随连接销毁。幂等——重复调用不抛异常、不重复重置。 */
     fun close() {
         stoppedByUnpair = true
         job?.cancel()
         job = null
         _clientId.value = null
-        _approvals.value = emptyList()
+        synchronized(lock) {
+            _approvals.value = emptyList()
+            handledApprovals.clear()
+            handledApprovalsSet.clear()
+        }
         _stats.value = RemoteEventsStats()
         _error.value = null
+        _questionSignal.value = 0L
     }
 
     private companion object {
 
         /** 终端失败后多久再试一次（只在 `while` 循环里用，退避仍归 `retryWhen` 管）。 */
         const val RESTART_DELAY_MS = 5_000L
+
+        /**
+         * 「已处理」记账的环形上限。
+         *
+         * 只需要覆盖「服务端补发同一条 waterfall」的窗口（秒级），
+         * 64 条足够；再大就是无界增长，与审批次数成正比。
+         */
+        const val HANDLED_RING = 64
     }
 
     private fun backoffMillis(attempt: Long): Long =

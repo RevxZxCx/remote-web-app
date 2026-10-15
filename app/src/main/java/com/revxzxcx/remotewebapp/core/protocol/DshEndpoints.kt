@@ -35,6 +35,7 @@ object DshEndpoints {
     const val SESSION_UPDATE_QUEUE = "session/updateQueue"
     const val SESSION_ATTACHMENT = "session/attachment"
     const val SESSION_PROJECTIONS = "session/projections"
+    const val USER_QUESTIONS_ANSWER = "userQuestions/answer"
     const val SESSION_OPEN_WORKSPACE_PATH = "session/openWorkspacePath"
     const val SESSION_WORKSPACE_PATH_APPLICATIONS = "session/workspacePathApplications"
     const val SESSION_CAN_OPEN_WORKSPACE_PATH = "session/canOpenWorkspacePath"

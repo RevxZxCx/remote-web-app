@@ -1,6 +1,8 @@
 package com.revxzxcx.remotewebapp.core.session
 
 import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
+import com.revxzxcx.remotewebapp.core.events.ApprovalPolicy
+import com.revxzxcx.remotewebapp.core.events.SandboxMode
 import com.revxzxcx.remotewebapp.core.events.SessionPermission
 import com.revxzxcx.remotewebapp.core.events.longOrNull
 import kotlinx.serialization.json.JsonObject
@@ -73,6 +75,14 @@ data class ChatUiState(
      * 放进 reducer 状态而不是 `remember`：旋转屏幕后不该丢掉「正在发送」这个事实。
      */
     val sending: Boolean = false,
+    /**
+     * 提问草稿：`callId` → `题目 id` → 草稿。
+     *
+     * 之所以放进 reducer 状态而不是 `remember`：草稿是「用户已经选了什么」这种不能丢的
+     * 事实（旋转屏幕、切后台再回来都还在），而且提问请求本身来自投影而不是 follow 流，
+     * 两者生命周期必须一致才说得清「这题的答案有没有提交过」。
+     */
+    val questionDrafts: Map<String, Map<String, QuestionDraft>> = emptyMap(),
     /** 翻页（加载更早历史）失败。重试动作是重新翻页。 */
     val pageError: String? = null,
     /** 是否已成功收到过第一帧（用于区分「空会话」与「还没加载」）。 */
@@ -581,6 +591,108 @@ object ChatReducer {
     /** 预览里是否有任何可见内容。 */
     private fun LiveAttempt.hasContent(): Boolean =
         text.isNotEmpty() || reasoning.isNotEmpty() || toolArgs.isNotEmpty()
+
+    // ---- 提问草稿（R021）------------------------------------------------------
+    //
+    // 草稿是「用户已经选了什么」，属于不能丢的事实，所以走 reducer 而不是 remember。
+    // 三个动作都是纯函数式的读-改-写，没有私有台账（D25）。
+
+    /** 打开一道题：只在还没有草稿时铺默认值（第一个选项预选）。 */
+    fun enterQuestion(state: ChatUiState, callId: String, question: AskQuestion): ChatUiState {
+        val forCall = state.questionDrafts[callId].orEmpty()
+        if (forCall.containsKey(question.id)) return state
+        return state.copy(
+            questionDrafts = state.questionDrafts +
+                (callId to (forCall + (question.id to InteractiveComposerRequest.defaultOf(question)))),
+        )
+    }
+
+    /** 单选 / 多选某一道题。单选下选项互斥（再点一次取消）。 */
+    fun toggleOption(
+        state: ChatUiState,
+        callId: String,
+        question: AskQuestion,
+        label: String,
+    ): ChatUiState {
+        val forCall = state.questionDrafts[callId].orEmpty()
+        val current = forCall[question.id] ?: InteractiveComposerRequest.defaultOf(question)
+        val selected = if (question.multiSelect) {
+            if (label in current.selected) current.selected - label else current.selected + label
+        } else {
+            // 单选与自定义答案互斥（桌面端规格）：点选项即清掉自定义文本。
+            if (label in current.selected) emptySet() else setOf(label)
+        }
+        return state.copy(
+            questionDrafts = state.questionDrafts +
+                (callId to (forCall + (question.id to current.copy(selected = selected, custom = "")))),
+        )
+    }
+
+    /** 自定义答案。单选下与选项互斥（写自定义即清空已选）。 */
+    fun setCustomAnswer(
+        state: ChatUiState,
+        callId: String,
+        question: AskQuestion,
+        value: String,
+    ): ChatUiState {
+        val forCall = state.questionDrafts[callId].orEmpty()
+        val current = forCall[question.id] ?: InteractiveComposerRequest.defaultOf(question)
+        return state.copy(
+            questionDrafts = state.questionDrafts +
+                (
+                    callId to (
+                        forCall + (
+                            question.id to current.copy(
+                                selected = if (question.multiSelect) current.selected else emptySet(),
+                                custom = value,
+                            )
+                            )
+                        )
+                    ),
+        )
+    }
+
+    /** 提交后丢掉整组草稿——答案已经进了服务端，草稿没有存在意义。 */
+    fun clearQuestion(state: ChatUiState, callId: String): ChatUiState =
+        state.copy(questionDrafts = state.questionDrafts - callId)
+
+    /**
+     * 丢掉不再开着的提问组的草稿。
+     *
+     * 卡片会因为「被别人答掉」「被撤销」「Host 重启后过期」而从投影里消失，此时草稿
+     * 若留着，服务端一旦复用同一个 `callId`（换一组新问题），旧草稿就会套到新问题上。
+     */
+    fun pruneQuestionDrafts(state: ChatUiState, liveCallIds: Set<String>): ChatUiState {
+        if (state.questionDrafts.keys == liveCallIds) return state
+        return state.copy(questionDrafts = state.questionDrafts.filterKeys { it in liveCallIds })
+    }
+
+    /**
+     * 把 `permissions` 投影读到的当前预设并进权限状态。
+     *
+     * 两个来源分工：`session/follow` 窗口里的 `permission/preset` 事件是**历史**，
+     * `permissions` 投影的 `currentValue` 是**当前值**。老会话的加载窗口里可能一条
+     * 权限事件都没有（R019 设备验收看到「权限未知」就是这种情况），此时只有投影能
+     * 告诉 UI 真相。所以投影不覆盖事件已经拿到的 sandboxMode / approvalPolicy，
+     * 只补 preset 这一维。
+     */
+    fun applyPermissionProjection(state: ChatUiState, preset: String?): ChatUiState {
+        val mode = SandboxMode.fromWire(preset) ?: return state
+        if (state.permission.preset == mode) return state
+        return state.copy(permission = state.permission.copy(preset = mode))
+    }
+
+    /** 把草稿转成 wire 答案。没答的题不出现在结果里（服务端也允许缺）。 */
+    fun answersOf(state: ChatUiState, callId: String, questions: List<AskQuestion>): List<AskAnswer> =
+        questions.mapNotNull { question ->
+            val draft = state.questionDrafts[callId]?.get(question.id) ?: return@mapNotNull null
+            if (!draft.isAnswered) return@mapNotNull null
+            AskAnswer(
+                id = question.id,
+                selected = draft.selected.toList(),
+                custom = draft.custom.takeIf { it.isNotBlank() },
+            )
+        }
 
     /**
      * 这条条目在列表里是否会占一行。

@@ -1,16 +1,22 @@
 package com.revxzxcx.remotewebapp.ui.chat
 
+import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import com.revxzxcx.remotewebapp.core.events.ApprovalPolicy
-import com.revxzxcx.remotewebapp.core.events.ApprovalRequest
 import com.revxzxcx.remotewebapp.core.events.SessionPermission
+import com.revxzxcx.remotewebapp.core.session.AskIntent
+import com.revxzxcx.remotewebapp.core.session.AskOption
+import com.revxzxcx.remotewebapp.core.session.AskQuestion
+import com.revxzxcx.remotewebapp.core.session.InteractiveComposerRequest
 import com.revxzxcx.remotewebapp.core.session.ModelRef
 import com.revxzxcx.remotewebapp.core.session.PromptAttachment
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -31,7 +37,7 @@ import org.robolectric.annotation.Config
  *
  * 另外两条来自审批链路本身：
  * ④ 有请求时「允许」必须把**那条** eventId 交出去，同时允许列表里剩下的还在；
- * ⑤ 权限徽标要说清当前策略（`不问直接放行` / `每次要批准`），这是用户
+ * ⑤ 权限徽标要说清当前策略（`每次询问` / `自动允许`），这是用户
  *    m28009「会话审批权限」唯一能在输入区看见的常驻反馈。
  *
  * **踩坑记录**：`SessionPermission` 是三个独立字段（sandboxMode / approvalPolicy /
@@ -59,12 +65,19 @@ class ComposerLayoutRenderTest {
         sending: Boolean = false,
         pending: List<PromptAttachment> = emptyList(),
         attachNotice: String? = null,
+        interactive: InteractiveComposerRequest? = null,
+        interactiveError: String? = null,
         permission: SessionPermission = SessionPermission(approvalPolicy = ApprovalPolicy.NEVER),
         model: ModelRef? = ModelRef("stepfun", "step-5-preview"),
         onDraftChange: (String) -> Unit = {},
         onSend: () -> Unit = {},
         onRemove: (Int) -> Unit = {},
         onOpenPermissions: () -> Unit = {},
+        onAnswerApproval: (String, Boolean) -> Unit = { _, _ -> },
+        onToggleOption: (String, AskQuestion, String) -> Unit = { _, _, _ -> },
+        onCustomAnswer: (String, AskQuestion, String) -> Unit = { _, _, _ -> },
+        onSubmitQuestions: (String) -> Unit = {},
+        onSkipQuestions: (String) -> Unit = {},
     ) {
         compose.setContent {
             Composer(
@@ -73,6 +86,8 @@ class ComposerLayoutRenderTest {
                 sending = sending,
                 pending = pending,
                 attachNotice = attachNotice,
+                interactive = interactive,
+                interactiveError = interactiveError,
                 modelChip = {
                     ModelBar(
                         model = model,
@@ -88,6 +103,11 @@ class ComposerLayoutRenderTest {
                         onClick = onOpenPermissions,
                     )
                 },
+                onAnswerApproval = onAnswerApproval,
+                onToggleQuestionOption = onToggleOption,
+                onQuestionCustom = onCustomAnswer,
+                onSubmitQuestions = onSubmitQuestions,
+                onSkipQuestions = onSkipQuestions,
                 onDraftChange = onDraftChange,
                 onSend = onSend,
                 onRemoveAttachment = onRemove,
@@ -144,7 +164,7 @@ class ComposerLayoutRenderTest {
             permission = SessionPermission(approvalPolicy = ApprovalPolicy.ASK),
         )
         compose.onNodeWithContentDescription("审批权限").assertExists()
-        compose.onNodeWithText("每次要批准").assertExists()
+        compose.onNodeWithText("权限 未知 · 审批 每次询问").assertExists()
     }
 
     @Test
@@ -154,8 +174,8 @@ class ComposerLayoutRenderTest {
             draft = "hi",
             permission = SessionPermission(approvalPolicy = ApprovalPolicy.NEVER),
         )
-        compose.onNodeWithText("不问直接放行").assertExists()
-        compose.onNodeWithText("每次要批准").assertDoesNotExist()
+        compose.onNodeWithText("权限 未知 · 审批 自动允许").assertExists()
+        compose.onNodeWithText("每次询问").assertDoesNotExist()
     }
 
     @Test
@@ -189,79 +209,209 @@ class ComposerLayoutRenderTest {
 
     // ---- ③ 审批卡片 ----
 
-    private fun request(
-        id: String,
-        tool: String = "pwsh",
-        callId: String? = "call-1",
-        reason: String? = null,
-    ) = ApprovalRequest(
-        eventId = id,
-        agentId = "agent-1",
-        toolName = tool,
-        callId = callId,
-        reason = reason,
-    )
-
-    private fun setBanner(
-        approvals: List<ApprovalRequest>,
-        onAllow: (String) -> Unit = {},
-        onReject: (String) -> Unit = {},
+    private fun setInteractive(
+        request: InteractiveComposerRequest?,
+        onAnswerApproval: (String, Boolean) -> Unit = { _, _ -> },
+        onToggleOption: (String, AskQuestion, String) -> Unit = { _, _, _ -> },
+        onCustom: (String, AskQuestion, String) -> Unit = { _, _, _ -> },
+        onSubmit: (String) -> Unit = {},
+        onSkip: (String) -> Unit = {},
     ) {
         compose.setContent {
-            ApprovalBanner(approvals = approvals, onAllow = onAllow, onReject = onReject)
+            InteractiveWindow(
+                request = request,
+                error = null,
+                onAnswerApproval = onAnswerApproval,
+                onToggleOption = onToggleOption,
+                onCustomAnswer = onCustom,
+                onSubmit = onSubmit,
+                onSkip = onSkip,
+            )
         }
     }
 
-    @Test
-    fun `没有待审批请求时卡片不占位`() {
-        setBanner(approvals = emptyList())
-        compose.onNodeWithText("桌面端在等你授权").assertDoesNotExist()
-        compose.onNodeWithText("允许一次").assertDoesNotExist()
-    }
+    // ---- 交互窗口：审批 ----
 
     @Test
-    fun `有待审批请求时卡片列出工具名`() {
-        setBanner(approvals = listOf(request("e-1")))
-        compose.onNodeWithText("桌面端在等你授权（1）").assertExists()
+    fun `审批请求占住输入区并给出允许与拒绝`() {
+        setInteractive(InteractiveComposerRequest.Approval("e-1", "pwsh", null))
+        compose.onNodeWithText("需要授权").assertExists()
         compose.onNodeWithText("pwsh").assertExists()
+        compose.onNodeWithText("允许一次").assertExists()
+        compose.onNodeWithText("拒绝").assertExists()
     }
 
     @Test
     fun `点允许交出的是那一条 eventId`() {
         val allowed = mutableListOf<String>()
-        setBanner(
-            approvals = listOf(request("e-1"), request("e-2", tool = "write")),
-            onAllow = { allowed += it },
+        setInteractive(
+            InteractiveComposerRequest.Approval("e-7", "write", null),
+            onAnswerApproval = { id, allow -> if (allow) allowed += id },
         )
-        // 两条请求各有自己的按钮，按文案取第一条（pwsh）的那一颗。
-        compose.onAllNodesWithText("允许一次")[0].performClick()
+        compose.onNodeWithText("允许一次").performClick()
         compose.waitForIdle()
-        assertEquals(listOf("e-1"), allowed)
+        assertEquals(listOf("e-7"), allowed)
     }
 
     @Test
-    fun `两条请求时两条都渲染出来`() {
-        setBanner(approvals = listOf(request("e-1"), request("e-2", tool = "write")))
-        compose.onNodeWithText("pwsh").assertExists()
-        compose.onNodeWithText("write").assertExists()
-        assertEquals(2, compose.onAllNodesWithText("允许一次").fetchSemanticsNodes().size)
-    }
-
-    @Test
-    fun `拒绝按钮交出的是那一条 eventId`() {
-        val rejected = mutableListOf<String>()
-        setBanner(approvals = listOf(request("e-9")), onReject = { rejected += it })
+    fun `点拒绝交出的是那一条 eventId 且 allow 为假`() {
+        val seen = mutableListOf<Pair<String, Boolean>>()
+        setInteractive(
+            InteractiveComposerRequest.Approval("e-9", "pwsh", null),
+            onAnswerApproval = { id, allow -> seen += id to allow },
+        )
         compose.onNodeWithText("拒绝").performClick()
         compose.waitForIdle()
-        assertEquals(listOf("e-9"), rejected)
+        assertEquals(listOf("e-9" to false), seen)
     }
 
     @Test
-    fun `没有理由时卡片仍可读`() {
+    fun `没有理由时审批窗口仍可读`() {
         // 服务端 reason / displayReason 都是可选的（契约探针实测 403 里两者皆无）。
-        // 缺字段时卡片不能因此崩或变成一行空白——`reasonText()` 有四级回落。
-        setBanner(approvals = listOf(request("e-1", reason = null)))
+        // 缺字段时窗口不能因此崩或变成一行空白。
+        setInteractive(InteractiveComposerRequest.Approval("e-1", "pwsh", null))
         compose.onNodeWithText("pwsh").assertExists()
-        compose.onNodeWithText("工具 pwsh 需要你的授权").assertExists()
+        compose.onNodeWithText("允许后这一步会立刻执行；拒绝后本轮会停在这里。").assertExists()
+    }
+
+    @Test
+    fun `服务端给了理由时原样展示`() {
+        setInteractive(InteractiveComposerRequest.Approval("e-1", "pwsh", "要删掉一个目录"))
+        compose.onNodeWithText("要删掉一个目录").assertExists()
+    }
+
+    // ---- 交互窗口：提问 ----
+
+    private fun question(
+        id: String = "q-1",
+        text: String = "用哪个数据库？",
+        multiSelect: Boolean = false,
+    ) = AskQuestion(
+        id = id,
+        question = text,
+        options = listOf(AskOption("Postgres", "关系型"), AskOption("SQLite", "单文件")),
+        multiSelect = multiSelect,
+    )
+
+    private fun questionRequest(
+        callId: String = "call-1",
+        questions: List<AskQuestion> = listOf(question()),
+    ) = InteractiveComposerRequest.Question(callId, questions)
+
+    @Test
+    fun `提问窗口一次只显示一道题`() {
+        setInteractive(
+            questionRequest(questions = listOf(question("q-1", "第一题"), question("q-2", "第二题"))),
+        )
+        compose.onNodeWithText("第 1 / 2 题").assertExists()
+        compose.onNodeWithText("第一题").assertExists()
+        compose.onNodeWithText("第二题").assertDoesNotExist()
+    }
+
+    @Test
+    fun `多选可以累加两个选项`() {
+        val toggled = mutableListOf<String>()
+        setInteractive(
+            questionRequest(questions = listOf(question(multiSelect = true))),
+            onToggleOption = { _, _, label -> toggled += label },
+        )
+        compose.onAllNodesWithText("Postgres")[0].performClick()
+        compose.onAllNodesWithText("SQLite")[0].performClick()
+        compose.waitForIdle()
+        assertEquals(listOf("Postgres", "SQLite"), toggled)
+    }
+
+    @Test
+    fun `提交交出的是 callId`() {
+        val submitted = mutableListOf<String>()
+        setInteractive(questionRequest(callId = "call-42"), onSubmit = { submitted += it })
+        compose.onNodeWithText("提交").performClick()
+        compose.waitForIdle()
+        assertEquals(listOf("call-42"), submitted)
+    }
+
+    /**
+     * 动作区必须钉在滚动区**外面**。
+     *
+     * 这条契约差点靠「测试碰巧通过」蒙混过关：R022 P1-2 第一次修「提交按钮被裁掉」时只给
+     * 内容包了 `verticalScroll`，按钮仍在滚动区里。内容一超高，按钮就被推到视口下方，
+     * 而 Robolectric 的窗口只有 386px 高 —— `performClick` 往窗口外注入触摸，**不报错、
+     * 也不触发回调**，两个用例静默失败（`expected:<[call-42]> but was:<[]>`）。
+     *
+     * 所以这里直接钉几何：动作按钮的底边必须在根节点底边之内。
+     */
+    @Test
+    fun `提交按钮钉在滚动区外且完整可见`() {
+        setInteractive(questionRequest(callId = "call-9"))
+        val root = compose.onRoot().getBoundsInRoot()
+        val submit = compose.onNodeWithText("提交").getBoundsInRoot()
+        assertTrue(
+            "提交按钮底边 ${submit.bottom} 超出窗口底边 ${root.bottom}，用户点不到",
+            submit.bottom <= root.bottom,
+        )
+        val skip = compose.onNodeWithText("跳过").getBoundsInRoot()
+        assertTrue("跳过按钮被裁掉", skip.bottom <= root.bottom)
+    }
+
+    /** 审批的两个动作同样必须钉住：允许/拒绝是被动等待的请求，滚下去就永远点不到。 */
+    @Test
+    fun `审批动作钉在滚动区外且完整可见`() {
+        setInteractive(InteractiveComposerRequest.Approval("e-1", "pwsh", "要删掉一个目录"))
+        val root = compose.onRoot().getBoundsInRoot()
+        val allow = compose.onNodeWithText("允许一次").getBoundsInRoot()
+        val reject = compose.onNodeWithText("拒绝").getBoundsInRoot()
+        assertTrue("允许按钮被裁掉", allow.bottom <= root.bottom)
+        assertTrue("拒绝按钮被裁掉", reject.bottom <= root.bottom)
+    }
+
+    @Test
+    fun `多题时提交按钮写的是提交整组`() {
+        setInteractive(
+            questionRequest(questions = listOf(question("q-1"), question("q-2"))),
+            onSubmit = {},
+        )
+        compose.onNodeWithText("提交整组").assertExists()
+    }
+
+    @Test
+    fun `跳过与提交走不同的回调`() {
+        val skipped = mutableListOf<String>()
+        setInteractive(questionRequest(callId = "call-3"), onSkip = { skipped += it })
+        compose.onNodeWithText("跳过").performClick()
+        compose.waitForIdle()
+        assertEquals(listOf("call-3"), skipped)
+    }
+
+    @Test
+    fun `plan-review 换成计划确认文案`() {
+        setInteractive(
+            questionRequest(
+                questions = listOf(
+                    question().copy(
+                        intent = AskIntent(kind = "plan-review", approve = "按这个计划执行"),
+                    ),
+                ),
+            ),
+        )
+        compose.onNodeWithText("计划确认").assertExists()
+    }
+
+    // ---- Composer 分派 ----
+
+    @Test
+    fun `输入区被审批占用时发送按钮让位`() {
+        setComposer(
+            interactive = InteractiveComposerRequest.Approval("e-1", "pwsh", null),
+        )
+        compose.onNodeWithContentDescription("发送按钮").assertDoesNotExist()
+        compose.onNodeWithContentDescription("添加附件").assertDoesNotExist()
+        compose.onNodeWithText("允许一次").assertExists()
+    }
+
+    @Test
+    fun `输入区被提问占用时草稿输入框让位`() {
+        setComposer(interactive = questionRequest())
+        compose.onNodeWithText("需要你回答").assertExists()
+        compose.onNodeWithContentDescription("发送按钮").assertDoesNotExist()
     }
 }

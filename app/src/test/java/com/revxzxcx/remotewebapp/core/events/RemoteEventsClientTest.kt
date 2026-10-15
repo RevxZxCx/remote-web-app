@@ -303,6 +303,103 @@ class RemoteEventsClientTest {
 
         socket.send(serverFrame("""{"type":"cancel","eventId":"ev-a"}"""))
         assertTrue(awaitOn(8_000) { target.approvals.value.isEmpty() })
+        // 被取消的 eventId 也要记账：服务端补发一次不该弹出一张已经取消的卡片。
+        socket.send(serverFrame(waterfall("ev-a")))
+        Thread.sleep(300)
+        assertTrue(target.approvals.value.isEmpty())
+    }
+
+    @Test
+    fun answeredEventIdIsNotResurrectedByARedelivery() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+
+        expectUnaryOk()
+        socket.send(serverFrame(waterfall("ev-a")))
+        assertTrue(awaitOn(8_000) { target.approvals.value.size == 1 })
+        target.answer("ev-a", allow = true)
+        assertTrue(awaitOn(8_000) { target.approvals.value.isEmpty() })
+
+        // 服务端补发同一条 waterfall。回答已经把卡片摘走了，若去重只看「当前列表」，
+        // 这张卡片会被插回来，而且永远点不动（服务端早已视为已回答）。
+        socket.send(serverFrame(waterfall("ev-a")))
+        Thread.sleep(300)
+
+        assertTrue(target.approvals.value.isEmpty())
+        assertEquals(1L, target.stats.value.approvalsSeen)
+        assertEquals(1L, target.stats.value.answers)
+    }
+
+    @Test
+    fun dismissedEventIdIsNotResurrectedByARedelivery() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+
+        socket.send(serverFrame(waterfall("ev-a")))
+        assertTrue(awaitOn(8_000) { target.approvals.value.size == 1 })
+        target.dismiss("ev-a")
+        assertTrue(awaitOn(8_000) { target.approvals.value.isEmpty() })
+
+        socket.send(serverFrame(waterfall("ev-a")))
+        Thread.sleep(300)
+
+        assertTrue(target.approvals.value.isEmpty())
+        assertEquals(1L, target.stats.value.approvalsSeen)
+    }
+
+    @Test
+    fun newStreamForgivesHandledEventIds() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+
+        socket.send(serverFrame(waterfall("ev-a")))
+        assertTrue(awaitOn(8_000) { target.approvals.value.size == 1 })
+        target.dismiss("ev-a")
+
+        // 新流 = 新一批 eventId。旧流上「已处理」的记账必须清掉，
+        // 否则同一 eventId 在新流里会被误判为已处理而静默丢弃。
+        socket.send(serverFrame("""{"type":"ready","clientId":"cid-2"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-2" })
+        socket.send(serverFrame(waterfall("ev-a")))
+        assertTrue(awaitOn(8_000) { target.approvals.value.size == 1 })
+    }
+
+    @Test
+    fun closeIsIdempotent() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+
+        target.close()
+        target.close()
+        target.close()
+
+        assertNull(target.clientId.value)
+        assertTrue(target.approvals.value.isEmpty())
+        assertNull(target.error.value)
     }
 
     @Test
