@@ -1,7 +1,11 @@
 package com.revxzxcx.remotewebapp.core.session
 
+import com.revxzxcx.remotewebapp.core.events.ApprovalPolicy
+import com.revxzxcx.remotewebapp.core.events.SandboxMode
+import com.revxzxcx.remotewebapp.core.events.SessionPermission
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -320,6 +324,81 @@ class ChatReducerTest {
             ChatFrame.Snapshot(emptyList(), 0, false, title = null, cwd = null, baseline = emptyList()),
         )
         assertEquals("已知道", state.title)
+    }
+
+    /**
+     * 快照里的权限事件必须折叠进 [ChatUiState.permission]。
+     *
+     * R020 P2-4 的守护：原来用 `takeIf { it.isString }` 过滤 seq，而 seq 线上可能是
+     * JSON **数字**——那一版会让整条信封被丢掉，徽标永远显示「权限未知」，
+     * 只有实时收到一条事件后才对。数字与数字字符串都要喂一遍。
+     */
+    @Test
+    fun `快照信封里的权限事件折叠成权限状态`() {
+        val frame = ChatFrame.Snapshot(
+            items = listOf(ChatItem.User(3, 300, text = "hi")),
+            cursor = 9,
+            hasMore = false,
+            title = null,
+            cwd = null,
+            baseline = emptyList(),
+            envelopes = listOf(
+                Json.parseToJsonElement(
+                    """{"type":"sandbox/mode","seq":7,"time":700,"data":{"mode":"danger-full-access"}}""",
+                ).jsonObject,
+                // seq 是数字字符串也要认（全仓唯一约定）。
+                Json.parseToJsonElement(
+                    """{"type":"approval/policy","seq":"8","time":800,"data":{"policy":"ask"}}""",
+                ).jsonObject,
+            ),
+        )
+        val state = ChatReducer.reduce(ChatUiState(), frame)
+
+        assertNotNull("权限必须折叠出来", state.permission)
+        assertEquals(SandboxMode.DANGER_FULL_ACCESS, state.permission.sandboxMode)
+        assertEquals(ApprovalPolicy.ASK, state.permission.approvalPolicy)
+        assertEquals(8L, state.permission.asOfSeq)
+        // 权限事件不占行。
+        assertEquals(1, state.items.size)
+    }
+
+    @Test
+    fun `实时权限事件更新状态且不占行`() {
+        var state = ChatUiState()
+        state = ChatReducer.reduce(
+            state,
+            parse(
+                """
+                {"type":"sandbox/mode","seq":1,"time":1000,"data":{"mode":"read-only"}}
+                """.trimIndent(),
+            ),
+        )
+        assertEquals(SandboxMode.READ_ONLY, state.permission.sandboxMode)
+        assertEquals(1L, state.permission.asOfSeq)
+
+        state = ChatReducer.reduce(
+            state,
+            parse(
+                """
+                {"type":"approval/policy","seq":2,"time":2000,"data":{"policy":"never"}}
+                """.trimIndent(),
+            ),
+        )
+        assertEquals(ApprovalPolicy.NEVER, state.permission.approvalPolicy)
+        assertEquals(2L, state.permission.asOfSeq)
+        assertEquals("权限事件不占行", 0, state.items.size)
+        assertEquals("游标仍要推进", 2L, state.cursor)
+    }
+
+    /** 快照里没有权限事件时不能把已知状态抹掉（与服务端权威性一致：窗口外不折）。 */
+    @Test
+    fun `没有权限事件的快照保留当前权限状态`() {
+        val known = ChatUiState(permission = SessionPermission(sandboxMode = SandboxMode.READ_ONLY))
+        val state = ChatReducer.reduce(
+            known,
+            ChatFrame.Snapshot(emptyList(), 5, false, null, null, emptyList()),
+        )
+        assertEquals(SandboxMode.READ_ONLY, state.permission.sandboxMode)
     }
 
     @Test

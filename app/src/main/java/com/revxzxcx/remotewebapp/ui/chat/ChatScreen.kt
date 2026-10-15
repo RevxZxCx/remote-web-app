@@ -5,9 +5,11 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.tween
@@ -23,6 +25,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,10 +33,9 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -61,6 +63,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -85,6 +89,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.MonotonicFrameClock
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -163,6 +168,12 @@ fun ChatScreen(
     // 模型选择器的显示开关。目录本身由 ViewModel 拉（[ChatUiState.catalog]），
     // 这里只负责「弹不弹」——目录没到时对话框显示为空而不是崩。
     var showModelPicker by rememberSaveable { mutableStateOf(false) }
+
+    // 审批权限面板（用户 m28009）。请求本身由应用级的 `$events` 订阅推送，
+    // ViewModel 只按 sessionId 取子集；这里是「弹不弹」。
+    var showApprovals by rememberSaveable { mutableStateOf(false) }
+    val approvals by viewModel.approvals.collectAsState()
+    val approvalError by viewModel.approvalError.collectAsState()
 
     // 附件提示由 ViewModel 承载（R007 P2-3）：上传整条链跑在 viewModelScope 里，
     // 旋转屏幕既不取消上传也不丢提示。早先是这里的 `remember`，旋转就被重置。
@@ -279,21 +290,48 @@ fun ChatScreen(
                     onRemove = viewModel::removeQueued,
                     onSteer = viewModel::steerQueued,
                 )
-                ModelBar(
-                    model = state.model,
-                    loading = state.catalogLoading,
-                    error = state.modelError,
-                    onOpen = {
-                        viewModel.openModelPicker()
-                        showModelPicker = true
-                    },
-                )
+                // 有待审批的请求时，卡片出现在输入框**上方**（离手指最近、又不会被长历史
+                // 埋掉的位置）。没有请求时整块不占高度——`if (approvals.isEmpty()) return`
+                // 在 ApprovalBanner 内部，AnimatedVisibility 的 visible 也是同一个判据。
+                AnimatedVisibility(
+                    visible = approvals.isNotEmpty(),
+                    enter = fadeIn(tween(Motion.FAST)) + expandVertically(tween(Motion.FAST)),
+                    exit = fadeOut(tween(Motion.FAST)) + shrinkVertically(tween(Motion.FAST)),
+                ) {
+                    ApprovalBanner(
+                        approvals = approvals,
+                        onAllow = { viewModel.answerApproval(it, true) },
+                        onReject = { viewModel.answerApproval(it, false) },
+                    )
+                }
+                // 模型条与审批权限徽标**不再单独占一行**，而是收进 Composer 的展开态
+                // （用户 m27990 参考图：收起时一行、展开后才出现配置按钮）。
+                // 传 slot 而不是传参数：Composer 不该知道「模型」与「审批」长什么样，
+                // 它只管「展开时把这些东西排在 ＋ 后面」。
                 Composer(
                     draft = draft,
                     generating = state.generating,
                     sending = state.sending,
                     pending = pending,
                     attachNotice = attachNotice,
+                    permissionChip = {
+                        PermissionChip(
+                            permission = state.permission,
+                            pendingCount = approvals.size,
+                            onClick = { showApprovals = true },
+                        )
+                    },
+                    modelChip = {
+                        ModelBar(
+                            model = state.model,
+                            loading = state.catalogLoading,
+                            error = state.modelError,
+                            onOpen = {
+                                viewModel.openModelPicker()
+                                showModelPicker = true
+                            },
+                        )
+                    },
                     onDraftChange = viewModel::onDraftChange,
                     onSend = viewModel::send,
                     onRemoveAttachment = viewModel::removeAttachment,
@@ -503,14 +541,27 @@ fun ChatScreen(
             )
         }
     }
+
+    // 审批权限面板（用户 m28009）。与模型选择器同一个位置：都是「从输入区配置行点进来
+    // 的详情」，同一个窗口层级用户不需要学两次。
+    if (showApprovals) {
+        ApprovalSheet(
+            approvals = approvals,
+            permission = state.permission,
+            error = approvalError,
+            onAllow = { viewModel.answerApproval(it, true) },
+            onReject = { viewModel.answerApproval(it, false) },
+            onDismissRequest = { showApprovals = false },
+        )
+    }
 }
 
 /**
- * 输入区上方的模型条（需求 FR-5.5 模型切换的入口）。
+ * 输入区里的模型胶囊（需求 FR-5.5 模型切换的入口）。
  *
- * 为什么放在这里而不是顶栏：模型名 `provider/model · effort` 有 20–40 个字符，
- * 顶栏要和标题、`cwd`、中止按钮抢空间；输入区上方那一行本来就是「与发送相关的上下文」，
- * 用户改模型的时机就在打字前。
+ * R019（用户 m27990）起它不再单独占一行，而是收进 [Composer] 的展开态配置行，与
+ * [PermissionChip] 并排。所以外层从「整行 surfaceVariant 容器」改成裸 Row：
+ * 容器在配置行里会把「＋ ⚠️ 模型」整行糊成一块，而且 `fillMaxWidth` 会把右侧空间吃光。
  *
  * 拉取失败时这里同时也是错误展示位（[error]）：目录拉不到不该弹对话框打断用户，
  * 但也不能让他以为「这个 App 没有模型切换功能」。
@@ -522,85 +573,80 @@ internal fun ModelBar(
     error: String?,
     onOpen: () -> Unit,
 ) {
-    Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // R017：从 TextButton 改成胶囊徽标。TextButton 自带 48dp 最小触控高度和
+        // 内边距，在这条 ~30dp 的窄行里会把输入区整体撑高；胶囊显式给定 32dp，
+        // 并且「实底 + 1dp 描边」的形态与工作区统计徽标、排队条操作钮同源。
+        //
+        // leading 6dp 圆点用 primary：这是当前唯一在用户打字前需要被看到的
+        // 「发送上下文」，但它是静态的（不参与 GeneratingGlyph 的运行中语义）。
+        Surface(
+            onClick = onOpen,
+            enabled = !loading,
+            shape = pillShape,
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            modifier = Modifier.height(32.dp),
         ) {
-            // R017：从 TextButton 改成胶囊徽标。TextButton 自带 48dp 最小触控高度和
-            // 内边距，在这条 ~30dp 的窄行里会把输入区整体撑高；胶囊显式给定 32dp，
-            // 并且「实底 + 1dp 描边」的形态与工作区统计徽标、排队条操作钮同源。
-            //
-            // leading 6dp 圆点用 primary：这是当前唯一在用户打字前需要被看到的
-            // 「发送上下文」，但它是静态的（不参与 GeneratingGlyph 的运行中语义）。
-            Surface(
-                onClick = onOpen,
-                enabled = !loading,
-                shape = pillShape,
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                modifier = Modifier.height(32.dp),
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 12.dp),
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 12.dp),
-                ) {
-                    if (model != null) {
-                        Box(
-                            Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primary),
-                        )
-                        Spacer(Modifier.width(6.dp))
-                    }
-                    Text(
-                        text = when {
-                            loading -> "正在读取模型列表…"
-                            model != null -> "${model.provider}/${model.model}"
-                            else -> "桌面端默认模型"
-                        },
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontFamily = FontFamily.Monospace,
-                        ),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                if (model != null) {
+                    Box(
+                        Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary),
                     )
-                    if (model?.reasoningEffort != null) {
-                        Spacer(Modifier.width(6.dp))
-                        // 推理档做成更小的一枚内嵌徽标而不是拼进同一串文字：
-                        // `provider/model` 与 `high` 是两个不同维度的信息，混在一行
-                        // 等宽字体里用户得自己断开读。
-                        Surface(
-                            shape = pillShape,
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                        ) {
-                            Text(
-                                text = model.reasoningEffort,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 5.dp),
-                                maxLines = 1,
-                            )
-                        }
-                    }
+                    Spacer(Modifier.width(6.dp))
                 }
-            }
-            if (error != null) {
                 Text(
-                    text = error,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 12.dp),
+                    text = when {
+                        loading -> "正在读取模型列表…"
+                        model != null -> "${model.provider}/${model.model}"
+                        else -> "桌面端默认模型"
+                    },
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                if (model?.reasoningEffort != null) {
+                    Spacer(Modifier.width(6.dp))
+                    // 推理档做成更小的一枚内嵌徽标而不是拼进同一串文字：
+                    // `provider/model` 与 `high` 是两个不同维度的信息，混在一行
+                    // 等宽字体里用户得自己断开读。
+                    Surface(
+                        shape = pillShape,
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                    ) {
+                        Text(
+                            text = model.reasoningEffort,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 5.dp),
+                            maxLines = 1,
+                        )
+                    }
+                }
             }
+        }
+        if (error != null) {
+            Text(
+                text = error,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier
+                    .padding(start = 8.dp)
+                    .weight(1f, fill = false),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -763,6 +809,10 @@ internal fun Composer(
     sending: Boolean,
     pending: List<PromptAttachment>,
     attachNotice: String?,
+    /** 模型配置入口（展开态第二行）。由调用方组装，Composer 不关心它长什么样。 */
+    modelChip: @Composable () -> Unit,
+    /** 审批权限入口（展开态第二行）。同上。 */
+    permissionChip: @Composable () -> Unit,
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit,
     onRemoveAttachment: (Int) -> Unit,
@@ -772,7 +822,14 @@ internal fun Composer(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var showAttachSheet by remember { mutableStateOf(false) }
+    var showAttachSheet by rememberSaveable { mutableStateOf(false) }
+
+    // 展开/收起：**只看焦点与内容，不看键盘**。键盘高度在部分设备上恒 0（MuMu + 搜狗实测），
+    // 拿 `WindowInsets.ime` 当判据会让「点了输入框却没展开」。焦点是用户手指直接造成的，
+    // 比任何间接信号都可靠。
+    val fieldInteraction = remember { MutableInteractionSource() }
+    val focused by fieldInteraction.collectIsFocusedAsState()
+    val expanded = focused || draft.isNotEmpty() || pending.isNotEmpty() || attachNotice != null
 
     // 选图：系统照片选择器返回的 Uri 只在这个回调里有效，读字节必须在这里做。
     val pickImage = rememberLauncherForActivityResult(
@@ -813,18 +870,41 @@ internal fun Composer(
     // 消息气泡的圆角猜。加一道 1dp 顶描边之后，「上面是对话、下面是输入」不再需要
     // 用户自己去理解。描边走 outlineVariant 而不是 primary：输入区不是当前焦点元素，
     // 用强调色会把注意力从真正在生成的消息上抢走。
+    //
+    // R019 重设计（用户 m27990）：**收起态是一个全圆角胶囊单行**（＋ | 占位符 | 发送），
+    // **展开态变成更高的圆角矩形**（附件行 + 多行输入 + 配置行）。两态共用一个 Surface，
+    // 只让 `shape` 在两态之间过渡——容器不消失重建，输入框焦点与草稿因此不会因为
+    // 状态切换而丢（这是「收起」最容易踩的坑）。
+    //
+    // 动画走**圆角半径**而不是「两个 Shape 之间插值」：Compose 没有 animateShapeAsState，
+    // 而 `CircleShape`（收起）与 `RoundedCornerShape(16dp)`（展开）之间也没有可插值的
+    // 中间形状。半径 26dp 在 ~52dp 高的单行上就是视觉上的全圆角，20dp 是圆角矩形，
+    // 两者同族，动画连续。
+    val cornerRadius by animateDpAsState(
+        targetValue = if (expanded) 20.dp else 26.dp,
+        animationSpec = tween(Motion.FAST, easing = Motion.Emphasized),
+        label = "composerCorner",
+    )
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(cornerRadius),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
-            if (pending.isNotEmpty()) {
+            // ---- 只在展开态出现：附件行 ----
+            AnimatedVisibility(
+                visible = expanded && pending.isNotEmpty(),
+                enter = fadeIn(tween(Motion.FAST)) + expandVertically(tween(Motion.FAST)),
+                exit = fadeOut(tween(Motion.FAST)) + shrinkVertically(tween(Motion.FAST)),
+            ) {
                 PendingAttachmentsRow(pending = pending, onRemove = onRemoveAttachment)
             }
+            // ---- 只在展开态出现：附件提示 ----
             // 附件提示走 AnimatedVisibility 而不是 `let`：上传成功/失败/「正在上传…」
             // 三态切换是硬切时会闪一下，淡入淡出让它看起来是连续的状态变化。
             AnimatedVisibility(
-                visible = attachNotice != null,
+                visible = expanded && attachNotice != null,
                 enter = fadeIn(tween(Motion.FAST)) + expandVertically(tween(Motion.FAST)),
                 exit = fadeOut(tween(Motion.FAST)) + shrinkVertically(tween(Motion.FAST)),
             ) {
@@ -844,6 +924,8 @@ internal fun Composer(
                     TextButton(onClick = { onAttachNotice(null) }) { Text("知道了") }
                 }
             }
+
+            // ---- 输入行（两态都有）----
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -876,50 +958,107 @@ internal fun Composer(
                     modifier = Modifier
                         .weight(1f)
                         .padding(horizontal = 6.dp)
-                        .heightIn(min = 48.dp, max = 160.dp),
+                        .heightIn(min = 40.dp, max = 160.dp),
                     placeholder = {
-                        Text(if (generating) "生成中…（发送会排到当前轮之后）" else "发消息…")
+                        Text(
+                            // 收起态文案贴近用户 m27990 参考图的「描述你的任务，或…」；
+                            // 展开态改用能解释「现在发会怎样」的文案（生成中 = 排队）。
+                            if (expanded && generating) {
+                                "生成中…（发送会排到当前轮之后）"
+                            } else {
+                                "描述你的任务，或先聊几句…"
+                            },
+                        )
                     },
                     maxLines = 6,
                     shape = MaterialTheme.shapes.large,
+                    interactionSource = fieldInteraction,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = { onSend() }),
                 )
-                // 发送键：胶囊形 + 内容随状态过渡。「发送中」时按钮缩窄并显示转圈，
-                // 用户看得到「点了有反应」，而不是按了一次没动静（R016 交互优雅）。
+                // 发送键（用户 m27990 明确要求）：**圆形 + ↑ 图标**，不再是胶囊文字钮。
+                // 圆形来自参考图；用 `KeyboardArrowUp` 而不是「↑」字符——字符的字形
+                // 宽度随字体变，圆形里永远偏一两像素（R017 同理由）。
                 //
-                // contentDescription 固定为「发送按钮」：按钮**内容**会在「发送」文字与
-                // 转圈之间切换，测试与无障碍服务都需要一个稳定的锚点（R016）。
+                // 禁用态不隐藏按钮而是降透明度：参考图里它一直在。点了没反应会让人
+                // 以为 App 卡了，所以 `canSend == false` 时点击给一句提示。
+                //
+                // `enabled = canSend` 必须真的传给 clickable：早先是硬编码 `enabled = true`，
+                // 于是 `assertIsNotEnabled` 这类判据（以及读屏用户）拿到的是「可点」。
+                // contentDescription 恒为「发送按钮」——它是按钮的身份，不随状态变；
+                // 「现在发会排队」由占位符承担（见下面 OutlinedTextField 的 placeholder）。
                 val canSend = (draft.isNotBlank() || pending.isNotEmpty()) && !sending
-                Button(
-                    onClick = onSend,
-                    enabled = canSend,
-                    shape = pillShape,
+                val sendTint by animateColorAsState(
+                    targetValue = if (canSend) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.18f)
+                    },
+                    // 必须显式给出类型实参：`tween(Motion.FAST)` 没有别的约束，Kotlin 会把
+                    // T 推成 Int，于是 `AnimationSpec<Color>` 一个候选都不匹配。
+                    animationSpec = tween<Color>(Motion.FAST),
+                    label = "sendTint",
+                )
+                Box(
                     modifier = Modifier
                         .padding(start = 4.dp, bottom = 4.dp)
-                        .semantics { contentDescription = "发送按钮" },
-                ) {
-                    AnimatedContent(
-                        targetState = sending,
-                        transitionSpec = {
-                            (fadeIn(tween(Motion.FAST)) + scaleIn(tween(Motion.FAST), initialScale = 0.8f)) togetherWith
-                                fadeOut(tween(Motion.FAST))
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(sendTint)
+                        .semantics { contentDescription = "发送按钮" }
+                        .clickable(enabled = canSend) {
+                            if (canSend) {
+                                onSend()
+                            } else {
+                                // 空草稿 / 上传中。给一句当场可懂的理由，而不是静默吞掉。
+                                onAttachNotice(
+                                    when {
+                                        sending -> "正在发送上一条，请稍等…"
+                                        else -> "先输入文字或加个附件。"
+                                    },
+                                )
+                            }
                         },
-                        label = "sendLabel",
-                    ) { busy ->
-                        if (busy) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(14.dp),
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.onPrimary,
-                            )
-                        } else {
-                            // 生成中点发送 = 排队（用户 m21177 第 4 条反馈）。按钮文案是
-                            // 用户唯一能提前知道「这条不会马上发出」的地方，写「发送」
-                            // 会让人以为消息已经出去了。
-                            Text(if (generating) "排队" else "发送")
-                        }
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (sending) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(IconSizes.composer),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.surface,
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowUp,
+                            contentDescription = null,
+                            tint = if (canSend) {
+                                MaterialTheme.colorScheme.onPrimary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            modifier = Modifier.size(IconSizes.composer),
+                        )
                     }
+                }
+            }
+
+            // ---- 配置行（仅展开态）----
+            // 用户 m27990 参考图：展开后输入框下方出现一排配置按钮。放在这里而不是
+            // 消息列表与输入区之间，是为了「收起时一行、展开时一屏」的两态结构。
+            AnimatedVisibility(
+                visible = expanded,
+                enter = fadeIn(tween(Motion.FAST)) + expandVertically(tween(Motion.FAST)),
+                exit = fadeOut(tween(Motion.FAST)) + shrinkVertically(tween(Motion.FAST)),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 8.dp, end = 12.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    permissionChip()
+                    Spacer(Modifier.width(6.dp))
+                    modelChip()
                 }
             }
         }

@@ -124,6 +124,40 @@ fun DebugScreen(viewModel: DebugViewModel, onBack: () -> Unit) {
                 InfoRow("孤儿帧（未知 streamId，已忽略）", "${state.stats.orphanFrames}")
             }
 
+            item(key = "sec-events") { SectionTitle("审批通道") }
+            item(key = "row-ev-ready") {
+                InfoRow(
+                    label = "状态",
+                    value = if (state.remoteEvents.ready) {
+                        "已就绪（可以回答审批请求）"
+                    } else {
+                        "未就绪：还没收到服务端的 ready 帧，此刻答不了任何请求"
+                    },
+                )
+            }
+            item(key = "row-ev-client") {
+                InfoRow(label = "连接 id", value = state.remoteEvents.maskedClientId)
+            }
+            item(key = "row-ev-frames") {
+                InfoRow(label = "收到帧", "${state.remoteEvents.stats.framesIn}")
+            }
+            item(key = "row-ev-error") {
+                InfoRow(label = "最近一条错误", value = state.remoteEvents.error ?: "（无）")
+            }
+            item(key = "row-ev-waterfall") {
+                InfoRow(
+                    label = "审批请求",
+                    value = "见过 ${state.remoteEvents.stats.approvalsSeen} 条 · " +
+                        "已回答 ${state.remoteEvents.stats.answers} 条",
+                )
+            }
+            item(key = "row-ev-emits") {
+                InfoRow(
+                    label = "已忽略的转发事件",
+                    value = "${state.remoteEvents.stats.emits} 条（白名单里其余事件，本 App 不接）",
+                )
+            }
+
             item(key = "sec-cache") { SectionTitle("本地缓存") }
             item(key = "row-cache") {
                 InfoRow(

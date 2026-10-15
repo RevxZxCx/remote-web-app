@@ -9,6 +9,7 @@ import com.revxzxcx.remotewebapp.core.cache.DshCache
 import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
 import com.revxzxcx.remotewebapp.core.changes.ChangesRepository
 import com.revxzxcx.remotewebapp.core.connection.DshConnection
+import com.revxzxcx.remotewebapp.core.events.ApprovalRequest
 import com.revxzxcx.remotewebapp.core.protocol.CarrierState
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
 import com.revxzxcx.remotewebapp.core.session.ChatArgs
@@ -92,6 +93,25 @@ class ChatViewModel(
     val carrier: StateFlow<CarrierState> = connection.mux.stats
         .map { it.carrier }
         .stateIn(viewModelScope, SharingStarted.Eagerly, connection.mux.stats.value.carrier)
+
+    /**
+     * 等待本会话审批的请求。
+     *
+     * 数据源是**应用级**的 [DshConnection.remoteEvents]（订阅随连接长驻，不随聊天页开关），
+     * 这里只按 `sessionId` 取子集。之所以不并进 [ChatUiState]：那些请求不是
+     * `session/follow` 的产物，reducer 看不到它们；硬塞进去就得给 reducer 开一个
+     * 「外来帧」入口，把「状态只有一个来源」这条规矩打破。
+     *
+     * `SharingStarted.Eagerly` 而不是 `WhileSubscribed`：聊天页随时可能被划掉，
+     * 但审批卡片必须在用户回到聊天页时**立刻**就在（不能先闪一下空列表再加载）。
+     */
+    val approvals: StateFlow<List<ApprovalRequest>> = connection.remoteEvents.approvals
+        .map { list -> list.filter { it.belongsTo(sessionId) } }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** 审批通道本身的问题（没连上、回答没送出去）。 */
+    val approvalError: StateFlow<String?> = connection.remoteEvents.error
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private var pageJob: Job? = null
     private var sendJob: Job? = null
@@ -333,6 +353,35 @@ class ChatViewModel(
      * （`index.js:966`）。UI 因此只在 `generating` 时才显示这个按钮。
      */
     fun steerQueued(message: QueuedMessage) = queueAction(message, ChatArgs.QueueAction.Steer, null)
+
+    // ---------------------------------------------------- 审批（用户 m28009）
+
+    /**
+     * 回答一个审批请求。
+     *
+     * @param allow true = 允许一次；false = 拒绝。服务端**没有**「永久允许」，只有 one-shot
+     *   （`@deepseek-ai/dsh-user-approval` 的 `PendingApproval` 只接受这两种）。
+     *
+     * 不需要挂起：回答走 unary RPC，由 [RemoteEventsClient] 自己在内部管协程。UI 因此可以
+     * 在点击时立刻得到反馈（卡片消失），不必先置一个「正在回答」的中间态。
+     */
+    fun answerApproval(eventId: String, allow: Boolean) {
+        viewModelScope.launch {
+            try {
+                connection.remoteEvents.answer(eventId, allow)
+            } catch (cause: Throwable) {
+                if (cause is kotlinx.coroutines.CancellationException) throw cause
+                // RemoteEventsClient 自己已经把错误写进它的 `error` 流并保留卡片，
+                // 这里不需要再写一份——否则同一个故障会在两处各显示一次。
+            }
+        }
+    }
+
+    /** 划掉一个审批请求（不回答）。 */
+    fun dismissApproval(eventId: String) = connection.remoteEvents.dismiss(eventId)
+
+    /** 清掉审批通道的错误说明。 */
+    fun clearApprovalError() = connection.remoteEvents.clearError()
 
     // ---------------------------------------------------------------- 附件（需求 FR-5）
 

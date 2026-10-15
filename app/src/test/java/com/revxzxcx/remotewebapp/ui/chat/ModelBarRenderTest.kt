@@ -16,8 +16,8 @@ import org.robolectric.annotation.Config
 /**
  * [ModelBar] 的渲染测试（Robolectric，决策 D22）。
  *
- * 为什么值得写：模型条在**输入区上方**，是用户改模型的唯一入口，而它的信息密度
- * （`provider/model` + 推理档）在 R017 被重构成胶囊徽标。重构引入了三条新的
+ * 为什么值得写：模型条在**输入区展开态的配置行**里，是用户改模型的唯一入口，而它的
+ * 信息密度（`provider/model` + 推理档）在 R017 被重构成胶囊徽标。重构引入了三条新的
  * 可回归契约，都只能由渲染层钉住：
  *
  * ① 文案去掉了「模型 · 」前缀。胶囊本身已经是「这是一条模型信息」的形状，前缀是
@@ -26,6 +26,12 @@ import org.robolectric.annotation.Config
  *    是两个维度的信息，混在一行等宽字体里用户得自己断开读。
  * ③ 点了胶囊必须真的调 [onOpen]（`Surface(onClick=…)` 的 enabled 参数容易写错：
  *    `loading = true` 时点它不该有任何反应）。
+ *
+ * R019（用户 m27990）起模型条与 [PermissionChip] 并排收进 Composer 的展开态配置行，
+ * 因此 [ModelBar] 自身从「整行 surfaceVariant 容器」改成裸 `Row`。那条容器要是加回来，
+ * 配置行会变成一整块糊色、`fillMaxWidth` 还会把权限徽标挤出屏幕——**这类回归只有渲染
+ * 测试能发现**：单测不会碰 Compose，而语义树里 `Row` 与 `Surface(color=surfaceVariant)`
+ * 都不留痕迹。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])

@@ -6,6 +6,8 @@ import com.revxzxcx.remotewebapp.core.protocol.DshJson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -67,11 +69,16 @@ class WorkspaceRepositoryTest {
 
     private val jobs = mutableListOf<Job>()
 
+    /** R019：`DshConnection` 要一个 scope 供 `$events` 长驻订阅用，测试里逐个登记逐个取消。 */
+    private val scopes = mutableListOf<CoroutineScope>()
+
     @Before
     fun setUp() {
         sockets.clear()
         clientFrames.clear()
         jobs.clear()
+        scopes.forEach { it.cancel() }
+        scopes.clear()
         server = MockWebServer()
         server.start()
     }
@@ -79,6 +86,7 @@ class WorkspaceRepositoryTest {
     @After
     fun tearDown() {
         jobs.forEach { it.cancel() }
+        scopes.forEach { it.cancel() }
         runBlocking {
             withContext(Dispatchers.IO) {
                 sockets.toList().forEach { runCatching { it.close(1000, null) } }
@@ -96,6 +104,9 @@ class WorkspaceRepositoryTest {
         ),
         unaryHttp = http,
         streamHttp = http,
+        // R019：`$events` 的长驻订阅要一个应用级 scope（`DshConnection` 的 KDoc 说明）。
+        // 测试里给一个独立的 SupervisorJob 并登记，`tearDown` 里 cancel 掉，避免泄漏。
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined).also { scopes += it },
     )
 
     private fun upgrade() {

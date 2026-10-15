@@ -8,6 +8,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.revxzxcx.remotewebapp.core.cache.CacheRows
 import com.revxzxcx.remotewebapp.core.cache.DshCache
 import com.revxzxcx.remotewebapp.core.connection.DshConnection
+import com.revxzxcx.remotewebapp.core.events.RemoteEventsStats
 import com.revxzxcx.remotewebapp.core.protocol.CarrierState
 import com.revxzxcx.remotewebapp.core.protocol.MuxError
 import com.revxzxcx.remotewebapp.core.protocol.MuxStats
@@ -48,7 +49,28 @@ data class DebugUiState(
      * - `Failed`：真的读库失败。
      */
     val cacheRows: CacheRowsState = CacheRowsState.Unknown,
+    /**
+     * 审批通道（`$events` 流）的状态。
+     *
+     * 与 `stats`（mux 总帧数）分开：一条 WebSocket 上三条流复用，总帧数回答不了
+     * 「审批通道通不通」。`clientId` 为空 = 还没收到 `ready` 帧 = 现在答不了任何请求。
+     */
+    val remoteEvents: RemoteEventsState = RemoteEventsState(),
 )
+
+/** 审批通道的展示状态（[DebugUiState.remoteEvents]）。 */
+data class RemoteEventsState(
+    /** 服务端分配的连接 id；空表示流还没就绪。 */
+    val clientId: String? = null,
+    /** 打码后的 id（完整值没有诊断价值）。 */
+    val maskedClientId: String = "",
+    val stats: RemoteEventsStats = RemoteEventsStats(),
+    /** 订阅或回答失败的中文说明；排查审批问题时最关键的一条。 */
+    val error: String? = null,
+) {
+    /** 流是否已就绪（收到过 `ready`）。 */
+    val ready: Boolean get() = clientId != null
+}
 
 /** [DebugUiState.cacheRows] 的四态。 */
 sealed interface CacheRowsState {
@@ -94,6 +116,26 @@ class DebugViewModel(
                 stats to errors
             }.collect { (stats, errors) ->
                 _state.value = _state.value.copy(stats = stats, errors = errors)
+            }
+        }
+        // 审批通道独立订阅：它挂在应用级 scope 上（不随调试页开关），
+        // 所以这里只是「读」，不负责启停。
+        // error 必须一起 combine 进来——「授权没能送出」「还没连上审批通道」
+        // 恰恰是排查审批问题最关键的一条，看不到它调试页就等于没这个段。
+        viewModelScope.launch {
+            combine(
+                connection.remoteEvents.clientId,
+                connection.remoteEvents.stats,
+                connection.remoteEvents.error,
+            ) { id, stats, error -> Triple(id, stats, error) }.collect { (id, stats, error) ->
+                _state.value = _state.value.copy(
+                    remoteEvents = RemoteEventsState(
+                        clientId = id,
+                        maskedClientId = id?.let { maskClientId(it) } ?: "（无）",
+                        stats = stats,
+                        error = error,
+                    ),
+                )
             }
         }
         viewModelScope.launch { refreshCacheRows() }
@@ -142,6 +184,18 @@ internal fun maskDeviceId(deviceId: String): String = when {
     deviceId.isEmpty() -> "（无）"
     deviceId.length <= 12 -> deviceId.first() + "…" + deviceId.last()
     else -> deviceId.take(6) + "…" + deviceId.takeLast(4)
+}
+
+/**
+ * `$events` 的 clientId 打码。
+ *
+ * 它不是凭证（只是本次连接的句柄），但同样没有完整显示的价值：截图里露出一串 uuid
+ * 只会让人以为漏了什么重要信息。留头尾足够判断「是不是同一次连接」。
+ */
+internal fun maskClientId(clientId: String): String = when {
+    clientId.isEmpty() -> "（无）"
+    clientId.length <= 12 -> clientId.first() + "…" + clientId.last()
+    else -> clientId.take(8) + "…" + clientId.takeLast(4)
 }
 
 /** 载波状态在调试页里的补充说明（状态条已经有一句，这里补「为什么」）。 */

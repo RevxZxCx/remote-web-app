@@ -4,6 +4,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -24,6 +25,11 @@ import org.robolectric.annotation.Config
  * ② 「＋」点开是不是真的给出两个选择器（R017 后「＋」换成 Add 图标 + contentDescription）；
  * ③ 待发送 chips 的「×」删的是不是点的那一个。
  * 这三件事纯逻辑层测不到，因为它们编码在 Composable 的入参组合上。
+ *
+ * R019（用户 m27990）起重写输入区，发送键从「胶囊文字钮」改成**圆形 ↑ 图标钮**，
+ * 展开态多出配置行。断言因此从 `onNodeWithText("发送")` 换成
+ * `onNodeWithContentDescription("发送按钮")`——**这更接近真实用户路径**（读屏用户
+ * 听到的就是这个描述），也把「按钮还在、文案被换掉」这类回归钉死了。
  *
  * 与 `MdViewRenderTest` 同样的教训：Robolectric 虚拟屏幕只有几屏高，断言用
  * `assertIsDisplayed`（这里每个节点都点得到，没有滚动需求）。
@@ -64,11 +70,13 @@ class ComposerAttachmentTest {
                 sending = sending,
                 pending = pending,
                 attachNotice = attachNotice,
+                modelChip = {},
+                permissionChip = {},
                 onDraftChange = {},
                 onSend = onSend,
                 onRemoveAttachment = onRemove,
                 onAttachImage = { _, _, _, _ -> null },
-                onAttachFile = { _, _ -> null },
+                onAttachFile = { _, _ -> },
                 onAttachNotice = {},
             )
         }
@@ -77,7 +85,7 @@ class ComposerAttachmentTest {
     @Test
     fun `只有文字没有附件时发送可用`() {
         setComposer(draft = "你好")
-        compose.onNodeWithText("发送").assertIsEnabled()
+        compose.onNodeWithContentDescription("发送按钮").assertIsEnabled()
     }
 
     @Test
@@ -105,7 +113,7 @@ class ComposerAttachmentTest {
     fun `只有附件没有文字时发送也可用`() {
         // 带图不发文字是常见用法；只判 draft 会让用户卡在「有图发不出去」。
         setComposer(draft = "", pending = listOf(image))
-        compose.onNodeWithText("发送").assertIsEnabled()
+        compose.onNodeWithContentDescription("发送按钮").assertIsEnabled()
     }
 
     @Test
@@ -115,7 +123,7 @@ class ComposerAttachmentTest {
         // 「点了有人答应」是两件事，必须分别钉住。
         var sends = 0
         setComposer(draft = "", pending = listOf(image), onSend = { sends++ })
-        compose.onNodeWithText("发送").performClick()
+        compose.onNodeWithContentDescription("发送按钮").performClick()
         compose.waitForIdle()
         assertEquals(1, sends)
     }
@@ -123,7 +131,7 @@ class ComposerAttachmentTest {
     @Test
     fun `文字和附件都没有时发送不可用`() {
         setComposer(draft = "", pending = emptyList())
-        compose.onNodeWithText("发送").assertIsNotEnabled()
+        compose.onNodeWithContentDescription("发送按钮").assertIsNotEnabled()
     }
 
     @Test
@@ -131,16 +139,26 @@ class ComposerAttachmentTest {
         // R017：生成中点发送的按钮文案从「发送」改成「排队」。这不是文案洁癖——
         // 按钮是用户唯一能提前知道「这条不会马上发出」的地方，写「发送」会让人
         // 以为消息已经出去了（用户 m21177 第 4 条反馈的配套修正）。
-        setComposer(draft = "第二条", generating = true)
-        compose.onNodeWithText("排队").assertExists()
-        assertEquals(0, compose.onAllNodesWithText("发送").fetchSemanticsNodes().size)
+        //
+        // R019（用户 m27990）：发送键改成圆形图标钮，按钮上不再有文字。告知改由
+        // **占位符**承担（「生成中…（发送会排到当前轮之后）」）——它就在用户眼睛
+        // 看着的地方，而且不占用按钮宽度。这里用 `pending` 把输入区推进展开态：
+        // Robolectric 里拿不到真实焦点，而展开判据同时接受「有待发送附件」。
+        var sends = 0
+        setComposer(draft = "", generating = true, pending = listOf(image), onSend = { sends++ })
+        compose.onNodeWithText("生成中…（发送会排到当前轮之后）").assertExists()
+        compose.onNodeWithText("描述你的任务，或先聊几句…").assertDoesNotExist()
+        // 「排队」不等于「不能发」：生成中仍然可以点，消息会排到当前轮之后。
+        compose.onNodeWithContentDescription("发送按钮").assertIsEnabled()
+        compose.onNodeWithContentDescription("发送按钮").performClick()
+        compose.waitForIdle()
+        assertEquals(1, sends)
     }
 
     @Test
     fun `非生成中发送键仍是发送`() {
         setComposer(draft = "第一条", generating = false)
-        compose.onNodeWithText("发送").assertIsEnabled()
-        assertEquals(0, compose.onAllNodesWithText("排队").fetchSemanticsNodes().size)
+        compose.onNodeWithContentDescription("发送按钮").assertIsEnabled()
     }
 
     @Test

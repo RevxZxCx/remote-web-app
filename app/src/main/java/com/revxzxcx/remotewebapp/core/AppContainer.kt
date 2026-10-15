@@ -162,7 +162,12 @@ class AppContainer(context: Context) {
             credential = credential,
             unaryHttp = unaryHttp,
             streamHttp = streamHttp,
+            scope = appScope,
         )
+        // 审批请求是 waterfall：订阅必须**在连接建立的那一刻就活着**，不能等用户打开某个
+        // 聊天页。晚一步的代价是「服务端已经把请求抛给第一个监听者」——没有监听者时它会
+        // 一直等到请求自己的 signal 超时，用户看到的就是毫无反应（RemoteEventsClient KDoc）。
+        connection?.remoteEvents?.start()
         _state.value = AppState.Paired(credential)
         // 换设备/重新配对后，别的 owner 的缓存行永远查不到，但会一直占空间：
         // 在拿到新分区的这一刻清掉。用容器自己的 scope（而不是 GlobalScope）——

@@ -1,7 +1,10 @@
 package com.revxzxcx.remotewebapp.core.session
 
 import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
+import com.revxzxcx.remotewebapp.core.events.SessionPermission
+import com.revxzxcx.remotewebapp.core.events.longOrNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * 聊天页的状态。
@@ -123,6 +126,19 @@ data class ChatUiState(
     val catalog: ModelCatalog? = null,
     /** 是否正在拉取可选模型目录。 */
     val catalogLoading: Boolean = false,
+    /**
+     * 这个会话当前的权限状态（沙箱模式 + 审批策略 + 预设档位），**只读展示**。
+     *
+     * 权威来源是会话日志里的三个事件：`sandbox/mode`、`approval/policy`、`permission/preset`
+     * （桌面端三种写入路径各追加一种）。三者都是「不占行」的事件，所以走
+     * [ChatReducer.onEvent] 的 `item == null` 分支——那条分支必须更新它们，否则
+     * 一个只用工具调用的会话永远不显示权限（R006 P3-14 同类问题）。
+     *
+     * **没有对应的写入入口**：`session` 命名空间 24 个远程方法里没有任何
+     * setApprovalPolicy / setPermission（`typert.host.js` 逐一核对过）。所以 UI 只能展示，
+     * 不能做成开关。
+     */
+    val permission: SessionPermission = SessionPermission(),
 )
 
 /**
@@ -191,6 +207,28 @@ object ChatReducer {
         // `LazyColumn`，重复 key 会直接抛 `IllegalArgumentException`。服务端窗口
         // 理论上不会重复，但这一行是零成本的保险（R003 P1-1 同类问题）。
         val items = (older + window).distinctBy { it.seq }.sortedBy { it.seq }
+        // 权限状态从快照窗口的信封里折叠出来。三个权限事件都不占行，所以窗口里可能有
+        // 好几条；按 seq 升序折叠，最后一条生效（桌面端就是这样显示的）。
+        // 只扫窗口而不是全量 items：窗口之外的旧权限设置已被服务端覆盖，再折一遍只会
+        // 把已被覆盖的旧值盖回去。
+        //
+        // 信封按到达序（服务端升序）折叠；`sortedBy { seq }` 是零成本保险——
+        // 万一解析器保留了乱序，也不要让「谁后到」变成「谁生效」。
+        val permission = frame.envelopes
+            .mapNotNull { envelope ->
+                val type = (envelope["type"] as? JsonPrimitive)
+                    ?.takeIf { it.isString }?.content ?: return@mapNotNull null
+                if (type !in SessionPermission.EVENT_TYPES) return@mapNotNull null
+                // seq 可能是 JSON 数字也可能是数字字符串（全仓唯一约定，见
+                // `core/cache/DshCache.kt` 的 `seqOf` KDoc）。加 `isString` 过滤
+                // 会让数字形态的 seq 整条信封被丢掉 → 快照权限折叠恒不生效。
+                val seq = envelope.longOrNull("seq") ?: return@mapNotNull null
+                Triple(type, envelope["data"] as? JsonObject, seq)
+            }
+            .sortedBy { it.third }
+            .fold(state.permission) { acc, (type, data, seq) ->
+                SessionPermission.reduce(acc, type, data, seq)
+            }
         // 快照替换窗口后，窗口外的摘要就该丢掉：否则长时间挂着会随会话越长越吃内存。
         // 仍在窗口内的必须保留——同一轮次的摘要没有必要重新拉一遍（每次都是一次网络往返）。
         val liveSeqs = items.asSequence().filterIsInstance<ChatItem.Changes>().map { it.seq }.toSet()
@@ -215,6 +253,7 @@ object ChatReducer {
             changesLoading = state.changesLoading.filterTo(mutableSetOf()) { it in liveSeqs },
             fromCache = false,
             model = frame.model ?: state.model,
+            permission = permission,
             // 快照带权威队列；本地回声里已被服务端确认（同 rpcId）的让位给它。
             queued = mergeQueued(frame.inbox, state.queued),
         )
@@ -310,6 +349,15 @@ object ChatReducer {
             else -> state.queued
         }
 
+        // 4) 权限状态。三个事件都不产生卡片（`item == null`），但必须更新——否则从历史
+        //    进入一个「只用过工具」的会话时，权限徽标会显示「未知」，而其实日志里写着呢。
+        val permission = SessionPermission.reduce(
+            state.permission,
+            type,
+            frame.envelope?.get("data") as? JsonObject,
+            seq,
+        )
+
         if (item == null || item.isInvisible()) {
             // 不占行的东西：纯噪声事件（`step/end` 等），或「只承载工具调用」的助手消息。
             //
@@ -329,6 +377,7 @@ object ChatReducer {
                 loading = false,
                 model = model,
                 queued = queued,
+                permission = permission,
             )
         }
 
@@ -347,6 +396,7 @@ object ChatReducer {
             generating = generating,
             model = model,
             queued = queued,
+            permission = permission,
             // 真的渲染出内容了才清错误条；否则会把重连提示一并抹掉。
             error = null,
         )
