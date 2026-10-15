@@ -10,6 +10,8 @@ import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
 import com.revxzxcx.remotewebapp.core.changes.ChangesRepository
 import com.revxzxcx.remotewebapp.core.connection.DshConnection
 import com.revxzxcx.remotewebapp.core.events.ApprovalRequest
+import com.revxzxcx.remotewebapp.core.events.QuestionRequest
+import com.revxzxcx.remotewebapp.core.events.RemoteEvents
 import com.revxzxcx.remotewebapp.core.protocol.CarrierState
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
 import com.revxzxcx.remotewebapp.core.session.ChatArgs
@@ -160,16 +162,31 @@ class ChatViewModel(
      *
      * 优先级：审批 > 提问。理由：审批卡住的是**正在执行的工具**（安全闸门），
      * 超时或漏答会让整轮停住；提问只是等一个输入。两个同时来时不并排堆两个卡片，
-     * 先把安全闸门放行。被挡掉的那个不会丢——[approvals] 与 [_questions] 都是独立流，
+     * 先把安全闸门放行。被挡掉的那个不会丢——这几条源都是独立流，
      * 交互窗口消失后下一个会顶上来。
      *
-     * 草稿从 [_state].questionDrafts 里读，所以这个流同时依赖 [_questions]（哪一组开着）、
-     * [state]（选了哪几项）与 [approvals]（有没有待批）——三者都是发射源，一个都少不得：
+     * 草稿从 [_state].questionDrafts 里读，所以这个流同时依赖 [_questions]（投影里的
+     * 提问组）、[connection] 的 `remoteEvents.questions`（waterfall 立刻推来的提问）、
+     * [state]（选了哪几项）与 [approvals]（有没有待批）——四者都是发射源，一个都少不得：
      * 审批通常恰好在生成停止（`_state` 不再变化）时到达，少列它就会出现「静默会话里
      * 审批卡片不渲染」。
+     *
+     * ## 两条提问路怎么合并
+     * **投影是权威来源**（桌面端 README 原话）。waterfall 只负责「立刻弹」——
+     * 投影最快也要等一次轮询（2.5s）。合并规则：
+     *  - 投影有 open 组 → 用投影的（带 `callId`，能直接调 `userQuestions/answer`）；
+     *  - 投影没有、waterfall 有 → 用 waterfall 的。
+     *
+     * ## 草稿键：有 `callId` 就用真实 callId
+     * waterfall 帧的 `wait.callId` 与投影组的 `callId` 是**同一个问题**的同一个 id
+     * （实测定案）。所以两边共用同一个草稿键，用户在「waterfall 刚弹出来」到
+     * 「投影刷新覆盖它」这几百毫秒里点的选项、打的自定义答案才不会丢。
+     * 只有 `callId` 取不到时才回落到 `waterfall:<eventId>` 合成 id。
+     *
+     * 合成 id 也解释了为什么回答要走两条不同的路（见 [answerQuestionGroup]）。
      */
     val interactive: StateFlow<InteractiveComposerRequest?> =
-        combine(_questions, _state, approvals) { questions, ui, pending ->
+        combine(_questions, _state, approvals, connection.remoteEvents.questions) { questions, ui, pending, pushed ->
             pending.firstOrNull()?.let { request ->
                 InteractiveComposerRequest.Approval(
                     eventId = request.eventId,
@@ -182,8 +199,19 @@ class ChatViewModel(
                     questions = group.questions,
                     drafts = ui.questionDrafts[group.callId].orEmpty(),
                 )
+            } ?: pushed.firstOrNull { it.belongsTo(sessionId) }?.let { request ->
+                val key = request.callId ?: waterfallCallId(request.eventId)
+                InteractiveComposerRequest.Question(
+                    callId = key,
+                    questions = request.questions,
+                    drafts = ui.questionDrafts[key].orEmpty(),
+                )
             }
-        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+        }
+            // `_state` 在 assistant-stream 期间每个 token 都变，不打断的话每个 token 都会
+            // 重建一个 Question 对象并重组整张卡片（流式高峰里这是白烧帧）。
+            .distinctUntilChanged()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     /** 提问通道的问题（读不到投影、回答没送出去）。 */
     private val _questionError = MutableStateFlow<String?>(null)
@@ -543,7 +571,13 @@ class ChatViewModel(
             }
         }
         viewModelScope.launch {
-            connection.remoteEvents.questionSignal.collect { refreshQuestions() }
+            // waterfall 帧一到就**同步**铺默认草稿，不能只等 refreshQuestions() 的 unary
+            // 往返：那张卡是 `interactive` 立刻渲染出来的，等投影的几百毫秒里用户点「提交」
+            // 会撞上「还没有草稿」而被挡住，报的还是一句看不懂的错。
+            connection.remoteEvents.questionSignal.collect {
+                seedWaterfallDefaults()
+                refreshQuestions()
+            }
         }
         viewModelScope.launch {
             _state.map { it.generating }.distinctUntilChanged().collect { generating ->
@@ -590,21 +624,84 @@ class ChatViewModel(
         }
     }
 
-    /** 只保留还开着的提问组；`settled` 里的 callId 一律视为已被回答。 */
+    /**
+     * 只保留还开着的提问组；`settled` 里的 callId 一律视为已被回答。
+     *
+     * `settled` 是**别人答掉**的账（桌面端或另一个客户端回答了同一个问题）。投影组从
+     * `active` 消失时，`interactive` 会回退到 waterfall 上那张孪生卡片，用户看到一张
+     * 刚刚被别人亲口答过的题——所以这里必须按 `settledCallIds` 把 waterfall 条目一起摘掉
+     * （R026 审查 P2：这一条此前只写在注释里，没有实现）。
+     */
     private fun applyQuestions(snapshot: UserQuestionsSnapshot) {
         val open = snapshot.active.filter { it.isOpen && it.questions.isNotEmpty() }
         _questions.value = open
-        // 桌面端规格：第一道带推荐标记的选项预先选中（未提交草稿）。这里在组第一次
-        // 出现时铺默认值；`enterQuestion` 对已有草稿的题是 no-op，所以重读投影不会
-        // 把用户已经选好的东西冲掉。
-        open.forEach { set -> set.questions.forEach { question -> enterQuestion(set.callId, question) } }
+        snapshot.settledCallIds.forEach { settled -> connection.remoteEvents.forgetQuestion(settled) }
+        // 桌面端规格：**当前**那道题预选第一个选项（未提交草稿）。`enterQuestion` 对已有
+        // 草稿的题是 no-op，所以重读投影不会把用户已经选好的东西冲掉。
+        //
+        // 只铺到「第一道还没有草稿的题」为止，**不能给组内每道题都铺**：铺满之后每道题的
+        // 草稿都是 isAnswered，`InteractiveComposerRequest.Question.currentIndex()` 的
+        // `indexOfFirst` 全部落空 → 回落到 lastIndex → 多题组只显示最后一道题，前 N-1 道
+        // 被按预选项自动作答（R025 UI 层 P1-1，渲染测试因为直接构造空 drafts 而完全看不见）。
+        open.forEach { set -> seedDefaults(set.callId, set.questions) }
+        // waterfall 帧不带 `wait.callId` 时，卡片在投影刷新到位之前用的是 `waterfall:<eventId>`
+        // 合成键，用户在这几百毫秒里点的选项、打的自定义答案都存在那个键下。投影一到位
+        // `interactive` 就改读真实 callId，键不迁移的话这些输入从界面上消失
+        // （map 里还在，但再也读不到）——R026 审查 P2。
+        //
+        // 迁移条件：合成键对应的 waterfall 条目**还活着**（说明投影组就是它），
+        // 且真实 callId 那一侧还没有草稿（避免覆盖用户后来直接按真实 callId 填的东西）。
+        connection.remoteEvents.questions.value
+            .filter { it.belongsTo(sessionId) && it.callId == null }
+            .forEach { request ->
+                val from = waterfallCallId(request.eventId)
+                val to = open.firstOrNull { it.callId == request.callId }?.callId
+                    ?: return@forEach
+                migrateQuestionDrafts(from, to)
+            }
         // 卡片消失（被别人答掉 / 被撤销）时草稿也要跟着走，否则同一 callId 若被服务端
         // 复用，旧草稿会套到新问题上。
-        val live = open.map { it.callId }.toSet()
+        //
+        // `live` 必须**同时**包含投影 callId 与 waterfall 合成 id：waterfall 那组的草稿
+        // 也存在同一个 map 里（键是 `waterfall:<eventId>`），漏掉它就会把用户正在填的
+        // 自定义答案在下一次投影刷新时清空。
+        val live = open.map { it.callId }.toSet() +
+            connection.remoteEvents.questions.value
+                .filter { it.belongsTo(sessionId) }
+                .map { it.callId ?: waterfallCallId(it.eventId) }
         _state.value = ChatReducer.pruneQuestionDrafts(_state.value, live)
     }
 
-    /** 点某个选项（单选互斥 / 多选累加）。 */
+    /**
+     * 把一组草稿从一个键搬到另一个键（waterfall 合成键 → 投影真实 callId）。
+     *
+     * 目标键已经有草稿时**什么都不做**——那说明用户已经在按真实 callId 填了，
+     * 搬过去会把后来者覆盖掉。
+     */
+    private fun migrateQuestionDrafts(from: String, to: String) {
+        if (from == to) return
+        val drafts = _state.value.questionDrafts[from] ?: return
+        if (_state.value.questionDrafts.containsKey(to)) return
+        _state.value = _state.value.copy(
+            questionDrafts = _state.value.questionDrafts - from + (to to drafts),
+        )
+    }
+
+    /** 给一组题铺默认草稿：只铺到「第一道还没有草稿的题」为止。见 [ChatReducer.seedQuestionDefaults]。 */
+    private fun seedDefaults(callId: String, questions: List<AskQuestion>) {
+        _state.value = ChatReducer.seedQuestionDefaults(_state.value, callId, questions)
+    }
+
+    /** waterfall 路径同样要铺默认草稿（投影路在 [applyQuestions] 里铺）。 */
+    private fun seedWaterfallDefaults() {
+        connection.remoteEvents.questions.value
+            .filter { it.belongsTo(sessionId) }
+            .forEach { request ->
+                seedDefaults(request.callId ?: waterfallCallId(request.eventId), request.questions)
+            }
+    }
+
+    /** 点某个选项（单选互斥 / 多选累加；单选下点已选项幂等，见 D65）。 */
     fun toggleQuestionOption(callId: String, question: AskQuestion, label: String) {
         _state.value = ChatReducer.toggleOption(_state.value, callId, question, label)
     }
@@ -614,55 +711,109 @@ class ChatViewModel(
         _state.value = ChatReducer.setCustomAnswer(_state.value, callId, question, value)
     }
 
-    /** 打开一道题（铺默认草稿）。已在 [applyQuestions] 里批量调用，单独暴露给测试。 */
-    private fun enterQuestion(callId: String, question: AskQuestion) {
-        _state.value = ChatReducer.enterQuestion(_state.value, callId, question)
-    }
-
     /**
      * 提交整组提问（桌面端规格：Enter 提交整组，缺答案时跳到第一道未完成的题）。
      *
-     * 没答的题发 `{selected: []}`（等于「跳过」），而不是从 answers 里省掉——省掉会被
-     * 服务端当成空答案覆盖，效果相同但语义不清，而且桌面端就是这么发的。
+     * 没答的题**挡住提交**，而不是补一条空答案静默发出去——后者会让用户以为
+     * 「我点的就是我要的」，实际上前几道题被按预选项自动答掉了
+     * （R025 UI 层 P1-1 的同一个根因，只是发生在提交那一刻）。
+     *
+     * **没有 `?: AskAnswer(id = …)` 回落**（R026 审查 P1）：守卫只看「有没有草稿键」的
+     * 那个版本能被「键在但没有答案」绕过（无预设选项的题、多选取消预选项、自定义答案删空），
+     * 于是走到这里补一条空答案发出。守卫改成数 [ChatReducer.unansweredCount]（答案维度）
+     * 之后回落不可达，留着它就是下一次静默提交的通道。
      */
     fun submitQuestionGroup(callId: String) {
-        val group = _questions.value.firstOrNull { it.callId == callId } ?: return
-        val answers = group.questions.map { question ->
-            ChatReducer.answersOf(_state.value, callId, listOf(question)).firstOrNull()
-                ?: AskAnswer(id = question.id)
+        val group = questionGroupOf(callId)
+        if (group == null) {
+            _questionError.value = "这一组问题已经不在等待回答了"
+            return
         }
-        answerQuestions(callId, answers)
+        val missing = ChatReducer.unansweredCount(_state.value, callId, group)
+        if (missing > 0) {
+            _questionError.value = "还有 $missing 道题没有答案，请先答完再提交"
+            return
+        }
+        val answers = group.mapNotNull { question ->
+            ChatReducer.answersOf(_state.value, callId, listOf(question)).firstOrNull()
+        }
+        if (answers.size != group.size) {
+            // 守卫已经保证每道题都有答案，走到这里说明草稿在两次读之间变了（投影刷新、
+            // 或者别的入口清了草稿）。宁可挡住也不发半组。
+            _questionError.value = "答案刚刚发生了变化，请再点一次提交"
+            return
+        }
+        answerQuestionGroup(callId, answers)
     }
 
     /** 整组跳过：全部发空答案。 */
     fun skipQuestionGroup(callId: String) {
-        val group = _questions.value.firstOrNull { it.callId == callId } ?: return
-        answerQuestions(callId, group.questions.map { AskAnswer(id = it.id) })
+        val group = questionGroupOf(callId)
+        if (group == null) {
+            _questionError.value = "这一组问题已经不在等待回答了"
+            return
+        }
+        answerQuestionGroup(callId, group.map { AskAnswer(id = it.id) })
     }
 
     /**
-     * 回答一组提问（`userQuestions/answer`）。
+     * 按 callId 找出题组。**两条路都查**：投影（真实 callId）与 waterfall。
      *
-     * @param answers 该 `callId` 下所有问题的答案。**缺的题不要放**：服务端按 `answers`
+     * waterfall 那边按 `callId` 匹配（[InteractiveComposerRequest.Question] 现在用的就是
+     * 真实 callId），取不到 `callId` 的老条目才按合成 id 兜底。
+     *
+     * 返回的 [AskQuestion] 列表对两条路是同一种东西，所以上层不必区分来源。
+     */
+    private fun questionGroupOf(callId: String): List<AskQuestion>? {
+        val fromProjection = _questions.value.firstOrNull { it.callId == callId }
+        if (fromProjection != null) return fromProjection.questions
+        val eventId = callId.removePrefix(WATERFALL_PREFIX).takeIf { it != callId }
+        return connection.remoteEvents.questions.value
+            .firstOrNull { it.callId == callId || it.eventId == eventId }
+            ?.questions
+    }
+
+    /**
+     * 回答一组提问。
+     *
+     * ## 两条回答路（按「这个 callId 当前在不在投影里」分派）
+     *  - **在投影里** → `userQuestions/answer`（`session` 命名空间的 unary RPC），
+     *    args 恰好 `{agentId, callId, answer}`。这是服务端**记录在案**的提问：
+     *    投影里看得见、别人也能看到它被回答。
+     *  - **只在 waterfall 里** → `$events/result` 回
+     *    `{kind:'result', value:{answers:[…]}}`。这种提问服务端还没落到投影上
+     *    （`agent.status` 还没变成 `awaiting_user`），只能从 waterfall 本身回答。
+     *
+     * 分派判据**不能**是「callId 带不带 `waterfall:` 前缀」：waterfall 帧带 `callId` 时
+     * 草稿与卡片用的都是真实 callId，前缀法会把它错路由到投影路（那边必然找不到组）。
+     *
+     * @param answers 该组所有问题的答案。**缺的题不要放**：服务端按 `answers`
      *   数组覆盖，缺的题会被当成空答案；桌面端的规则是「Enter 提交整组，缺答案时回到
      *   第一道未完成的题」，所以「整组都答完才提交」由调用方（UI）保证。
-     * @param optimistic 立刻从界面上拿掉的 callId。回答是 unary RPC，成功前不撤卡片会让
-     *   用户以为没点上；失败时 [refreshQuestions] 会把服务端的真实状态读回来。
      */
-    fun answerQuestions(callId: String, answers: List<AskAnswer>) {
+    fun answerQuestionGroup(callId: String, answers: List<AskAnswer>) {
         if (answers.isEmpty()) {
             _questionError.value = "这一组问题还没有答案"
             return
         }
         if (answerJob?.isActive == true) return
-        val removed = _questions.value
-        _questions.value = removed.filterNot { it.callId == callId }
-        // 草稿跟着卡片一起走：答案已经进了服务端，留着草稿只会让下一组同 id 的题
-        // 一开始就带着上一次的选项。
-        _state.value = ChatReducer.clearQuestion(_state.value, callId)
+        val fromProjection = _questions.value.any { it.callId == callId }
         answerJob = viewModelScope.launch {
             try {
-                projections.answerQuestions(sessionId, callId, answers)
+                if (fromProjection) {
+                    projections.answerQuestions(sessionId, callId, answers)
+                    _questions.value = _questions.value.filterNot { it.callId == callId }
+                    // waterfall 上可能还挂着同一条（`callId` 对上就是同一个问题）。
+                    // 不摘的话投影组一消失，`interactive` 会回退到一张已经答过的卡片，
+                    // 用户再点一次就是对同一个 eventId 发第二次 outcome。
+                    connection.remoteEvents.forgetQuestion(callId)
+                } else {
+                    connection.remoteEvents.answerQuestions(callId, answers)
+                }
+                // 草稿跟着卡片一起走：答案已经进了服务端，留着草稿只会让下一组同 id 的题
+                // 一开始就带着上一次的选项。**必须在成功分支里清**——放在协程外面的话，
+                // 回答失败时用户手打的自定义答案已经没了，而卡片还在，只能重打一遍。
+                _state.value = ChatReducer.clearQuestion(_state.value, callId)
                 _questionError.value = null
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
@@ -678,6 +829,16 @@ class ChatViewModel(
     fun clearQuestionError() {
         _questionError.value = null
     }
+
+    /**
+     * 由 waterfall 帧的 `eventId` 合成草稿命名空间用的 callId。
+     *
+     * **必须带前缀**：真实 `callId` 是服务端发的，理论上不与 `waterfall:` 开头冲突
+     * （`userQuestions` 的 callId 形如 `call_00_…`），带前缀只是双保险。真正的原因是
+     * 草稿按 callId 存进 `ChatUiState.questionDrafts`，两条路若共用裸 id，
+     * 「投影那组」与「waterfall 那组」的草稿会互相覆盖。
+     */
+    private fun waterfallCallId(eventId: String): String = WATERFALL_PREFIX + eventId
 
     // ---------------------------------------------------------------- 附件（需求 FR-5）
 
@@ -1173,6 +1334,17 @@ class ChatViewModel(
 
     companion object {
         private const val MAX_BACKOFF_MS = 30_000L
+
+        /**
+         * 草稿命名空间里标记「这组提问来自 `$events` waterfall」的前缀。
+         *
+         * 值取自 [RemoteEvents.WATERFALL_PREFIX] 而不是在这里另写一份字面量：
+         * `RemoteEventsClient.answerQuestions` 要剥同一个前缀才能找到条目，
+         * 两边各写一份就是下一次「一边改了另一边没改」的静默失败。
+         *
+         * 见 [waterfallCallId] 与 [answerQuestionGroup]。
+         */
+        private val WATERFALL_PREFIX: String get() = RemoteEvents.WATERFALL_PREFIX
 
         /**
          * 生成中重读提问投影的间隔。

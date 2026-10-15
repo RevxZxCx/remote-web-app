@@ -7,6 +7,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import com.revxzxcx.remotewebapp.core.events.ApprovalPolicy
 import com.revxzxcx.remotewebapp.core.events.SessionPermission
 import com.revxzxcx.remotewebapp.core.session.AskIntent
@@ -286,10 +287,11 @@ class ComposerLayoutRenderTest {
         id: String = "q-1",
         text: String = "用哪个数据库？",
         multiSelect: Boolean = false,
+        options: List<AskOption> = listOf(AskOption("Postgres", "关系型"), AskOption("SQLite", "单文件")),
     ) = AskQuestion(
         id = id,
         question = text,
-        options = listOf(AskOption("Postgres", "关系型"), AskOption("SQLite", "单文件")),
+        options = options,
         multiSelect = multiSelect,
     )
 
@@ -394,6 +396,50 @@ class ComposerLayoutRenderTest {
             ),
         )
         compose.onNodeWithText("计划确认").assertExists()
+    }
+
+    // ---- 交互窗口：提问的「其他答案」钉住区（R025 UI 层 P1-1 / P1-2）----
+    //
+    // 真机缺陷：选项多于 4 个时正文滚动区占满 220dp，「其他答案（可留空）」被滚出视野，
+    // 用户根本不知道要往下滚。修法把它从滚动内容挪到 `ComposerShell` 的 `pinned` 槽。
+    // 这三条用例就是那道修复的守护：存在性 / 在滚动区外 / 输入真的送到回调。
+
+    /** 自定义答案框必须一直在（用户 m29539：「也可以点击输入回答选项」）。 */
+    @Test
+    fun `自定义答案框一直在提问窗口里`() {
+        setInteractive(questionRequest())
+        compose.onNodeWithText("其他答案（可留空）").assertExists()
+    }
+
+    /** 选项多到把滚动区占满时，自定义答案框仍要在滚动区**下面**（= 钉住，不跟着滚）。 */
+    @Test
+    fun `自定义答案框钉在滚动区外`() {
+        val many = (1..6).map { AskOption("选项 $it", "说明 $it") }
+        setInteractive(questionRequest(questions = listOf(question(options = many))))
+        compose.onNodeWithText("选项 6").assertExists()
+
+        val root = compose.onRoot().getBoundsInRoot()
+        val scroll = compose.onNodeWithText("用哪个数据库？").getBoundsInRoot()
+        val pinned = compose.onNodeWithText("其他答案（可留空）").getBoundsInRoot()
+        // 在滚动内容之后（纵向位置更低），且完整落在窗口内。
+        assertTrue(
+            "自定义答案框顶边 ${pinned.top} 没有低于题目 ${scroll.top}，说明它还在滚动区里",
+            pinned.top >= scroll.top,
+        )
+        assertTrue("自定义答案框被裁掉", pinned.bottom <= root.bottom)
+    }
+
+    /** 打字必须真的送到 `onCustomAnswer`，且带上 callId 与题目 id。 */
+    @Test
+    fun `自定义答案输入会交出 callId 与题目 id`() {
+        val seen = mutableListOf<Triple<String, String, String>>()
+        setInteractive(
+            questionRequest(callId = "call-7", questions = listOf(question(id = "q-9"))),
+            onCustom = { callId, question, value -> seen += Triple(callId, question.id, value) },
+        )
+        compose.onNodeWithText("其他答案（可留空）").performTextInput("用 Postgres")
+        compose.waitForIdle()
+        assertEquals(listOf(Triple("call-7", "q-9", "用 Postgres")), seen)
     }
 
     // ---- Composer 分派 ----

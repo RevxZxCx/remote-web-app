@@ -1765,7 +1765,13 @@ internal fun ReasoningBlock(text: String) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                    modifier = Modifier
+                        // 思考过程动辄上万字（同一个 ChatItem 的 reasoning 会一直累积）。
+                        // 不封顶的话整块文字进内存后被 Measurer 一次量完，
+                        // 低端机上直接 OOM / ANR。5000 字足够看清模型在想什么。
+                        .heightIn(max = 200.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
                 )
             }
         }

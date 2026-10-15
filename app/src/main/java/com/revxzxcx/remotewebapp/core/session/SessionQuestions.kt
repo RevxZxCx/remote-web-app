@@ -4,6 +4,8 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * 模型向用户提问（`userQuestions`）与权限预设（`permissions`）两个投影的线级模型。
@@ -40,14 +42,28 @@ data class AskQuestion(
 ) {
     val isPlanReview: Boolean get() = intent?.kind == INTENT_PLAN_REVIEW
 
-    /** plan-review 的两个动作按钮文案；缺省给桌面端的默认值。 */
+    /**
+     * plan-review 的「同意执行」按钮文案；缺省给桌面端的默认值。
+     *
+     * **已知缺口**：桌面端规格里 plan-review 还有第二个动作「要求修改」（以
+     * `ASK_CANCELLED` 拒绝等待），本 App 没有实现它——投影路（`userQuestions/answer`）
+     * 只有「给答案」一个入口，没有拒绝语义，而 waterfall 路的拒绝形状尚未在真机验证过。
+     * 与其发一个猜出来的 outcome，不如先只提供「跳过」（发空答案）与「同意执行」。
+     */
     val approveLabel: String get() = intent?.approve?.takeIf { it.isNotBlank() } ?: DEFAULT_APPROVE_LABEL
-    val reviseLabel: String get() = DEFAULT_REVISE_LABEL
 
     companion object {
         const val INTENT_PLAN_REVIEW = "plan-review"
         const val DEFAULT_APPROVE_LABEL = "同意执行"
-        const val DEFAULT_REVISE_LABEL = "要求修改"
+
+        /**
+         * 从一段 JSON 解析一道题；解析不出来返回 null。
+         *
+         * 给 `core/events/RemoteEvents.kt` 的 `QuestionRequest.parse` 用——waterfall 帧
+         * 里的 `questions` 与投影里的 `active[].questions` 是同一套 wire 形状，
+         * 解析规则只能有一份。
+         */
+        fun parse(element: JsonElement?): AskQuestion? = SessionProjectionParser.questionPublic(element)
     }
 }
 
@@ -65,12 +81,6 @@ data class QuestionSet(
     val state: String = STATE_OPEN,
 ) {
     val isOpen: Boolean get() = state != STATE_CLOSED
-
-    /** 第一道还没给出答案的题的下标；全部答完返回 [questions]。 */
-    fun firstUnanswered(answers: Map<String, AskAnswer>): Int {
-        val index = questions.indexOfFirst { !answers.containsKey(it.id) }
-        return if (index < 0) questions.size else index
-    }
 
     companion object {
         const val STATE_OPEN = "open"
@@ -211,7 +221,10 @@ internal object SessionProjectionParser {
         return PermissionSnapshot(preset = obj.string("currentValue")?.takeIf { it.isNotBlank() })
     }
 
-    private fun question(element: JsonElement?): AskQuestion? {
+    private fun question(element: JsonElement?): AskQuestion? = questionPublic(element)
+
+    /** [question] 的公开入口（给 `core/events` 的 waterfall 解析用）。 */
+    internal fun questionPublic(element: JsonElement?): AskQuestion? {
         val obj = element as? JsonObject ?: return null
         val id = obj.string("id") ?: return null
         val text = obj.string("question") ?: return null
@@ -255,19 +268,20 @@ internal object SessionProjectionParser {
     private fun JsonObject.array(key: String): JsonArray = this[key] as? JsonArray ?: JsonArray(emptyList())
 }
 
-/** 提问卡片在输入框里用的草稿答案。`selected` 空 + `custom` 空表示还没答。 */
-data class AskDraft(
-    val selected: Set<String> = emptySet(),
-    val custom: String = "",
-) {
-    val isEmpty: Boolean get() = selected.isEmpty() && custom.isBlank()
-
-    fun toAnswer(id: String): AskAnswer = AskAnswer(id = id, selected = selected.toList(), custom = custom.trim().ifBlank { null })
+/**
+ * [AskAnswer] → wire JSON。`outcome.value` 的 `answers` 数组就是这个形状
+ * （桌面端 `client.js:936`）。
+ *
+ * `custom` 空白时不发这个键——服务端 schema 是 `custom:string().optional()`，
+ * 发空串会被当成「用户写了一串空白」而不是「没写自定义答案」。
+ */
+internal fun List<AskAnswer>.wire(): List<JsonObject> = map { answer ->
+    buildJsonObject {
+        put("id", JsonPrimitive(answer.id))
+        put("selected", JsonArray(answer.selected.map { JsonPrimitive(it) }))
+        answer.custom?.takeIf { it.isNotBlank() }?.let { put("custom", JsonPrimitive(it)) }
+    }
 }
-
-/** 把投影答案转成 wire 上的 `answers` 数组。 */
-fun Map<String, AskDraft>.toWireAnswers(): List<AskAnswer> =
-    entries.mapNotNull { (id, draft) -> if (draft.isEmpty) null else draft.toAnswer(id) }
 
 /** `session/follow` 快照里也带 `userQuestions` 投影，用同一个解析器。 */
 fun userQuestionsOf(projections: JsonObject?): UserQuestionsSnapshot? {

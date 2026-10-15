@@ -1,7 +1,11 @@
 package com.revxzxcx.remotewebapp.core.events
 
+import com.revxzxcx.remotewebapp.core.session.AskQuestion
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * 远程**转发事件**（forwarded events）的端点与形状。
@@ -14,7 +18,7 @@ import kotlinx.serialization.json.JsonPrimitive
  * 权威定义在 `@deepseek-ai/dsh-api-remotes/lib/index.js:17-126` 的
  * `API_REMOTE_FORWARDED_EVENTS`。当前 **27 条**（`index.js:18-125` 逐条数过），本 App 只关心：
  *  - `approval/request`（waterfall）——**敏感工具的审批请求**；
- *  - `user-questions/request`（waterfall）——模型向用户提问（本期未实现，见缺口记录）。
+ *  - `user-questions/request`（waterfall）——模型向用户提问。
  * 其余 `emit` 型里与本 App 有关的是 `api-session/status`、`api-session/activity`、
  * `api-session/added`（会话增删/运行态），但聊天页的 `session/follow` 已经覆盖了这些，
  * 所以本期也不接——多一条订阅就多一份状态要同步，没有收益。
@@ -42,6 +46,15 @@ object RemoteEvents {
      * 走普通 Typert unary（`POST {base}/remote/api/$events/result`），**不是**流。
      */
     const val EVENT_RESULT_ENDPOINT: String = "\$events/result"
+
+    /**
+     * waterfall 提问在拿不到 `callId` 时，卡片身份与草稿键用的合成前缀。
+     *
+     * **必须与 `ChatViewModel.WATERFALL_PREFIX` 是同一个值**：`ChatViewModel` 用它拼卡片
+     * 身份，[RemoteEventsClient.answerQuestions] 用它剥前缀找条目。两边各写一份字面量
+     * 就是下一次「一边改了另一边没改」的静默失败（本工程已出现过三次同类问题）。
+     */
+    const val WATERFALL_PREFIX: String = "waterfall:"
 }
 
 /**
@@ -67,16 +80,28 @@ data class RemoteEventsStats(
     val waterfalls: Long = 0L,
     /** 真正认出来的审批请求数（去重后）。 */
     val approvalsSeen: Long = 0L,
-    /** 成功送出的回答数。 */
-    val answers: Long = 0L,
+    /** 成功送出的审批回答数。 */
+    val approvalAnswers: Long = 0L,
+    /** 成功送出的提问回答数。 */
+    val questionAnswers: Long = 0L,
     /**
      * 收到的 `user-questions/request` 帧数。
      *
-     * 提问的回答不走 `$events`（走 `userQuestions/answer` + 投影），所以这里只是
-     * 「有提问发生过」的信号计数，给诊断页看。
+     * 计数放在这里是为了让「帧在涨但没有提问」与「帧不涨」在诊断页上可区分。
      */
     val questionsSeen: Long = 0L,
 )
+
+/**
+ * 回答的种类——只用来在诊断页上把两类回答分开计数。
+ *
+ * 审批与提问共用同一条 `$events/result` unary（见 [RemoteEventsClient.submit]），
+ * 但用户在诊断页上需要知道「我到底答过哪种」，所以计数器必须分两个。
+ */
+enum class AnswerKind {
+    APPROVAL,
+    QUESTION,
+}
 
 /** `$events` 流上的服务端帧。 */
 sealed interface RemoteEventFrame {
@@ -109,6 +134,49 @@ enum class ApprovalOutcome(val wire: String, val label: String) {
 
     companion object {
         fun fromWire(value: String?): ApprovalOutcome? = entries.firstOrNull { it.wire == value }
+    }
+}
+
+/**
+ * `user-questions/request` 的回答结果。
+ *
+ * ## 与审批的区别
+ * 审批只有四种 `ApprovalOutcome`，提问的回答是**业务值**：服务端把 `value`
+ * 原样交给等着的 `ask_user_question` 工具，形状是
+ * `{answers:[{id, selected:string[], custom?}]}`（`userQuestions/answer` 的
+ * `answer` 参数 schema 逐字抄来）。
+ *
+ * 所以这里不用枚举，而是两个构造函数：
+ *  - [answered] 正常回答；
+ *  - [cancelled] 用户关掉/放弃——按桌面端 `questionError('ASK_CANCELLED')`
+ *    的形状拒绝，消息文案逐字一致（`the user cancelled ask_user_question`），
+ *    这样模型在桌面端与手机上看到的失败原因完全相同。
+ */
+sealed interface QuestionOutcome {
+
+    /** 序列化成 `$events/result` 的 `outcome` 字段。 */
+    fun wire(): JsonObject
+
+    /** 用户给了一组答案。 */
+    data class Answered(val answers: List<JsonObject>) : QuestionOutcome {
+        override fun wire(): JsonObject = buildJsonObject {
+            put("kind", "result")
+            put("value", buildJsonObject {
+                put("answers", JsonArray(answers))
+            })
+        }
+    }
+
+    /** 用户取消了（对应桌面端的 `ASK_CANCELLED`）。 */
+    data object Cancelled : QuestionOutcome {
+        override fun wire(): JsonObject = buildJsonObject {
+            put("kind", "rejected")
+            put("error", buildJsonObject {
+                put("name", "UserQuestionError")
+                put("message", "the user cancelled ask_user_question")
+                put("code", "ASK_CANCELLED")
+            })
+        }
     }
 }
 
@@ -195,6 +263,82 @@ data class ApprovalRequest(
                     ?: emptyMap(),
             )
         }
+    }
+}
+
+/**
+ * 一条 `user-questions/request` 的 waterfall 帧携带的提问。
+ *
+ * ## 为什么投影之外还要接 waterfall
+ * `userQuestions` 投影的 `active` 只包含**已经开始等待回答**的提问组。当
+ * `agent.status === 'awaiting_user'` 时提问组已经在那儿了，投影刷新足够；
+ * 但投影是轮询出来的（[SessionProjectionRepository] 有一条 2.5s 的兜底循环），
+ * 而 waterfall 是**服务端主动推送**——模型刚发问的那一刻就该弹卡片。
+ * 所以两条路都接：waterfall 负责「立刻弹」，投影负责「权威同步」。
+ *
+ * 桌面端就是这么做的（`dsh-client-ui-user-questions/lib/client.js` 的
+ * `ctx.remote.$on("user-questions/request", …)`），而且它同样把
+ * 「Host 投影是权威来源」写在 README 里。
+ *
+ * ## `wait?: {callId, timed?}`
+ * 帧上的 `wait` 是**可选**的（schema 里带 `?`）。`callId` 的作用不是「能不能回答」——
+ * waterfall 卡片的回答一律走 `$events/result`（见 [RemoteEventsClient.submit]），
+ * 只需要 `eventId`。`callId` 的真正用途是**跨路去重**：投影里同一个提问组也会带这个
+ * `callId`，两边对上就说明是同一个问题，草稿与「已回答」记账才能合到一处。
+ * 所以 `callId` 允许为 null，取不到时两条路各弹一张卡（用户可能答两遍），
+ * 这是已知且可接受的降级——服务端会以先到者为准。
+ *
+ * ## 线上形状（`dsh-api-remotes/lib/index.js` 的 `API_REMOTE_FORWARDED_EVENTS`）
+ * ```
+ * {"type":"waterfall","event":"user-questions/request",
+ *  "eventId":"…","agentId":"session-…",
+ *  "request":{"questions":[{id,question,detail?,header?,options?,multiSelect?,intent?}],
+ *            "wait":{"callId":"call_…"}}}
+ * ```
+ */
+data class QuestionRequest(
+    val eventId: String,
+    val agentId: String?,
+    val callId: String?,
+    val questions: List<AskQuestion>,
+) {
+
+    /** 这个提问是不是属于 [sessionId] 这个顶层会话（同 [ApprovalRequest.belongsTo]）。 */
+    fun belongsTo(sessionId: String): Boolean = agentId == sessionId
+
+    companion object {
+
+        /**
+         * 从 waterfall 帧的 `request` 解析。
+         *
+         * 宽容：`questions` 缺失/为空、或全部解析失败时返回 null——那就不弹卡片，
+         * 只让投影刷新去兜底。
+         *
+         * 两条上限都是**故意**的：
+         * - [MAX_QUESTIONS]：`handle()` 跑在 `$events` 流的唯一收集协程上，
+         *   超长数组会把后面的审批帧堵住（头阻塞）。
+         * - 题内 `id` 去重：草稿以 `id` 为键，重复 id 会让两道题共用一份草稿。
+         */
+        fun parse(eventId: String, agentId: String?, request: JsonObject?): QuestionRequest? {
+            val obj = request ?: return null
+            val raw = (obj["questions"] as? kotlinx.serialization.json.JsonArray) ?: return null
+            val questions = raw.take(MAX_QUESTIONS).mapNotNull { element ->
+                (element as? JsonObject)?.let { AskQuestion.parse(it) }
+            }.distinctBy { it.id }
+            if (questions.isEmpty()) return null
+            val wait = obj["wait"] as? JsonObject
+            val callId = (wait?.get("callId") as? JsonPrimitive)?.takeIf { it.isString }?.content
+                ?: (obj["callId"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            return QuestionRequest(
+                eventId = eventId,
+                agentId = agentId,
+                callId = callId,
+                questions = questions,
+            )
+        }
+
+        /** 单条 waterfall 帧最多接住的题数。超出部分丢弃（投影路仍是权威来源）。 */
+        const val MAX_QUESTIONS = 16
     }
 }
 

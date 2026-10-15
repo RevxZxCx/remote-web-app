@@ -3,6 +3,7 @@ package com.revxzxcx.remotewebapp.core.session
 import com.revxzxcx.remotewebapp.core.events.ApprovalPolicy
 import com.revxzxcx.remotewebapp.core.events.SandboxMode
 import com.revxzxcx.remotewebapp.core.events.SessionPermission
+import com.revxzxcx.remotewebapp.core.session.AskOption
 import com.revxzxcx.remotewebapp.core.session.AskQuestion
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -455,6 +456,202 @@ class ChatReducerTest {
         var state = ChatUiState()
         state = ChatReducer.enterQuestion(state, "call-a", AskQuestion("q1", "第一题"))
         assertSame(state, ChatReducer.pruneQuestionDrafts(state, setOf("call-a")))
+    }
+
+    /**
+     * R025 UI 层 P1-1：只给**当前**那道题铺默认值。
+     *
+     * 每道题都铺的时候 `currentIndex()` 的 `indexOfFirst` 全部落空 → 回落到 lastIndex →
+     * 多题组只显示最后一道，前 N-1 道被按预选项自动作答。
+     */
+    @Test
+    fun `多题组只给当前题铺默认值`() {
+        val questions = listOf(
+            AskQuestion("q1", "第一题", options = listOf(AskOption("继续"), AskOption("停止"))),
+            AskQuestion("q2", "第二题", options = listOf(AskOption("红"), AskOption("蓝"))),
+            AskQuestion("q3", "第三题", options = listOf(AskOption("是"), AskOption("否"))),
+        )
+
+        val seeded = ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", questions)
+
+        assertEquals(setOf("q1"), seeded.questionDrafts["call-a"]?.keys)
+        assertEquals(setOf("继续"), seeded.questionDrafts["call-a"]?.get("q1")?.selected)
+        // 第一道有草稿 = 已答，第二道没有 = 未答 → currentIndex 应该落在第二道。
+        val current = InteractiveComposerRequest.Question("call-a", questions, seeded.questionDrafts["call-a"].orEmpty())
+        assertEquals(1, current.currentIndex())
+    }
+
+    /** 答完当前题之后，下一题才铺默认值（桌面端「点单选选项立即前进」的配套行为）。 */
+    @Test
+    fun `答完当前题后下一题才铺默认值`() {
+        val questions = listOf(
+            AskQuestion("q1", "第一题", options = listOf(AskOption("继续"), AskOption("停止"))),
+            AskQuestion("q2", "第二题", options = listOf(AskOption("红"), AskOption("蓝"))),
+        )
+        var state = ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", questions)
+        state = ChatReducer.toggleOption(state, "call-a", questions[0], "停止")
+
+        val again = ChatReducer.seedQuestionDefaults(state, "call-a", questions)
+
+        assertEquals(setOf("q1", "q2"), again.questionDrafts["call-a"]?.keys)
+        assertEquals(setOf("红"), again.questionDrafts["call-a"]?.get("q2")?.selected)
+        // 已经答过的题不能被重铺冲掉。
+        assertEquals(setOf("停止"), again.questionDrafts["call-a"]?.get("q1")?.selected)
+    }
+
+    /**
+     * 用户**主动清空**某一道题的选择后，不能因为「它还没答案」就重新预选第一个选项。
+     *
+     * 草稿的键在不在，才是「这题被用户碰过没有」的唯一判据；`isAnswered` 会把「碰过但
+     * 故意清空」误判成没碰过。所以 [ChatReducer.seedQuestionDefaults] 截断用的是
+     * `containsKey` 而不是 `isAnswered`。
+     *
+     * 清空的现实路径是自定义答案框：打进去又删掉（`setCustomAnswer("")`）。单选下点已
+     * 选项**不是**清空——见 `单选下点已选项不会把答案清空`。
+     */
+    @Test
+    fun `用户主动清空的题不会被重铺默认值`() {
+        val questions = listOf(
+            AskQuestion("q1", "第一题", options = listOf(AskOption("继续"))),
+            AskQuestion("q2", "第二题", options = listOf(AskOption("红"), AskOption("蓝"))),
+        )
+        var state = ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", questions)
+        state = ChatReducer.setCustomAnswer(state, "call-a", questions[0], "")
+        state = ChatReducer.seedQuestionDefaults(state, "call-a", questions)
+        state = ChatReducer.setCustomAnswer(state, "call-a", questions[1], "")
+
+        val again = ChatReducer.seedQuestionDefaults(state, "call-a", questions)
+
+        assertEquals(setOf("q1", "q2"), again.questionDrafts["call-a"]?.keys)
+        assertEquals(emptySet<String>(), again.questionDrafts["call-a"]?.get("q2")?.selected)
+        // 而一道**新出现**的题（服务端往组里加了题）照样会拿到预选。
+        val third = AskQuestion("q3", "第三题", options = listOf(AskOption("是")))
+        val grown = ChatReducer.seedQuestionDefaults(again, "call-a", questions + third)
+        assertEquals(setOf("q1", "q2", "q3"), grown.questionDrafts["call-a"]?.keys)
+        assertEquals(setOf("是"), grown.questionDrafts["call-a"]?.get("q3")?.selected)
+    }
+
+    /**
+     * 单选下再点一次**已选中**的选项必须保持选中（R026 真机教训）。
+     *
+     * 第一项是被预选的。用户认同它时会顺手点一下确认，若这一下被解释成「取消」，
+     * 提交出去的就是 `{selected: []}`——桌面端收到空选择，什么决定都没拿到。
+     */
+    @Test
+    fun `单选下点已选项不会把答案清空`() {
+        val question = AskQuestion("q1", "继续吗", options = listOf(AskOption("继续"), AskOption("停止")))
+        var state = ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", listOf(question))
+        assertEquals(setOf("继续"), state.questionDrafts["call-a"]?.get("q1")?.selected)
+
+        state = ChatReducer.toggleOption(state, "call-a", question, "继续")
+
+        assertEquals(setOf("继续"), state.questionDrafts["call-a"]?.get("q1")?.selected)
+        // 换成另一个选项仍然正常。
+        state = ChatReducer.toggleOption(state, "call-a", question, "停止")
+        assertEquals(setOf("停止"), state.questionDrafts["call-a"]?.get("q1")?.selected)
+    }
+
+    /** 多选下同一个标签点两次 = 取消（多选本来就是开关语义）。 */
+    @Test
+    fun `多选下点已选项会取消`() {
+        val question = AskQuestion("q1", "选颜色", options = listOf(AskOption("红"), AskOption("蓝")), multiSelect = true)
+        var state = ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", listOf(question))
+        assertEquals(setOf("红"), state.questionDrafts["call-a"]?.get("q1")?.selected)
+
+        state = ChatReducer.toggleOption(state, "call-a", question, "红")
+        assertEquals(emptySet<String>(), state.questionDrafts["call-a"]?.get("q1")?.selected)
+
+        // 取消之后再点一次会重新选中。
+        state = ChatReducer.toggleOption(state, "call-a", question, "红")
+        assertEquals(setOf("红"), state.questionDrafts["call-a"]?.get("q1")?.selected)
+
+        // 多个选项可以同时选中。
+        state = ChatReducer.toggleOption(state, "call-a", question, "蓝")
+        assertEquals(setOf("红", "蓝"), state.questionDrafts["call-a"]?.get("q1")?.selected)
+    }
+
+    /** 没答的题必须挡住提交，而不是被补一条空答案静默发出去。 */
+    @Test
+    fun `没答的题挡住提交`() {
+        val questions = listOf(
+            AskQuestion("q1", "第一题", options = listOf(AskOption("继续"))),
+            AskQuestion("q2", "第二题", options = listOf(AskOption("红"))),
+        )
+        val seeded = ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", questions)
+
+        assertEquals(1, ChatReducer.unansweredCount(seeded, "call-a", questions))
+        assertEquals(0, ChatReducer.unansweredCount(ChatUiState(), "call-b", emptyList()))
+    }
+
+    /**
+     * 「有草稿键但没有答案」也必须挡住提交。
+     *
+     * R026 审查 P1：守卫原来数的是「有没有键」，于是下面三种情况全部漏过——
+     * ① 无预设选项的题（`defaultOf` 给空 selected，`QuestionBody` 还专门提示「直接在下面写答案」）；
+     * ② 多选把预选项再点一次取消；③ 自定义答案打进去又删空。
+     * 漏过之后 `answersOf` 因 `!isAnswered` 返回 null，回落成 `{selected: []}` 发出，
+     * 桌面端拿到「空选择」——正是这条守卫要防的事。
+     */
+    @Test
+    fun `键在但没有答案的题照样挡住提交`() {
+        val noOptions = AskQuestion("q1", "没有选项的题", options = emptyList())
+        val multi = AskQuestion("q2", "多选题", options = listOf(AskOption("红"), AskOption("蓝")), multiSelect = true)
+        val cleared = AskQuestion("q3", "被清空的题", options = listOf(AskOption("是")))
+
+        var state = ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", listOf(noOptions))
+        // ② 多选：铺默认（红被预选）→ 再点一次红 = 取消 → selected 空
+        state = ChatReducer.seedQuestionDefaults(state, "call-a", listOf(multi))
+        state = ChatReducer.toggleOption(state, "call-a", multi, "红")
+        // ③ 自定义答案写进去又删空
+        state = ChatReducer.seedQuestionDefaults(state, "call-a", listOf(cleared))
+        state = ChatReducer.setCustomAnswer(state, "call-a", cleared, "临时想法")
+        state = ChatReducer.setCustomAnswer(state, "call-a", cleared, "")
+
+        // 三道题的草稿键都在（用户都碰过），但一道都没有答案。
+        assertEquals(setOf("q1", "q2", "q3"), state.questionDrafts["call-a"]?.keys)
+        assertEquals(3, ChatReducer.unansweredCount(state, "call-a", listOf(noOptions, multi, cleared)))
+        assertEquals(emptyList<AskAnswer>(), ChatReducer.answersOf(state, "call-a", listOf(noOptions, multi, cleared)))
+    }
+
+    /**
+     * 多选下点选项**不能**清掉已经打好的自定义答案（桌面端：多选题可同时带 selected 与 custom）。
+     *
+     * 注意 `defaultOf` 对多选也预选第一个选项（桌面端的「推荐标记」就是第一个），所以这里
+     * 点的是**第二个**选项——加选，不是取消预选。
+     */
+    @Test
+    fun `多选下点选项保留自定义答案`() {
+        val question = AskQuestion("q1", "多选题", options = listOf(AskOption("红"), AskOption("蓝")), multiSelect = true)
+        var state = ChatReducer.setCustomAnswer(ChatUiState(), "call-a", question, "顺便要绿的")
+        state = ChatReducer.toggleOption(state, "call-a", question, "蓝")
+
+        val draft = state.questionDrafts["call-a"]?.getValue("q1")
+        assertEquals(setOf("红", "蓝"), draft?.selected)
+        assertEquals("顺便要绿的", draft?.custom)
+    }
+
+    /** 多选下取消一个已选项同样不动自定义答案。 */
+    @Test
+    fun `多选下取消已选项也保留自定义答案`() {
+        val question = AskQuestion("q1", "多选题", options = listOf(AskOption("红"), AskOption("蓝")), multiSelect = true)
+        var state = ChatReducer.setCustomAnswer(ChatUiState(), "call-a", question, "只要蓝的")
+        state = ChatReducer.toggleOption(state, "call-a", question, "红")
+
+        val draft = state.questionDrafts["call-a"]?.getValue("q1")
+        assertEquals(emptySet<String>(), draft?.selected)
+        assertEquals("只要蓝的", draft?.custom)
+    }
+
+    /** 单选下点选项仍然清掉自定义答案（互斥，桌面端规格）。 */
+    @Test
+    fun `单选下点选项清掉自定义答案`() {
+        val question = AskQuestion("q1", "单选题", options = listOf(AskOption("继续"), AskOption("停止")))
+        var state = ChatReducer.setCustomAnswer(ChatUiState(), "call-a", question, "都不对")
+        state = ChatReducer.toggleOption(state, "call-a", question, "停止")
+
+        val draft = state.questionDrafts["call-a"]?.getValue("q1")
+        assertEquals(setOf("停止"), draft?.selected)
+        assertEquals("", draft?.custom)
     }
 
     @Test

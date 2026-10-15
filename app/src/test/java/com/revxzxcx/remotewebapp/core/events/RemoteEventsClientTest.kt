@@ -1,13 +1,19 @@
 package com.revxzxcx.remotewebapp.core.events
 
+import com.revxzxcx.remotewebapp.core.session.AskAnswer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
@@ -19,6 +25,8 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -333,7 +341,7 @@ class RemoteEventsClientTest {
 
         assertTrue(target.approvals.value.isEmpty())
         assertEquals(1L, target.stats.value.approvalsSeen)
-        assertEquals(1L, target.stats.value.answers)
+        assertEquals(1L, target.stats.value.approvalAnswers)
     }
 
     @Test
@@ -430,16 +438,479 @@ class RemoteEventsClientTest {
         assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
         socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
         assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
-        // `user-questions/request` 也是 waterfall，本期未实现：不接 = 它会一直等。
-        // 这里钉住「不被误渲染成审批」——渲染成一个答不了的按钮比不渲染更糟。
+        // 没有 `questions` 数组的提问帧解析不出任何题 → 既不渲染成审批，也不渲染成提问卡。
         socket.send(
             serverFrame("""{"type":"waterfall","event":"user-questions/request","eventId":"q-1","request":{"question":"hi"}}"""),
         )
         Thread.sleep(300)
 
         assertTrue(target.approvals.value.isEmpty())
+        assertTrue(target.questions.value.isEmpty())
         assertEquals(1L, target.stats.value.waterfalls)
         assertEquals(0L, target.stats.value.approvalsSeen)
+    }
+
+    // ---------------------------------------------------------------- 模型提问（user-questions/request）
+
+    /** 一条 `user-questions/request` waterfall 帧的 JSON（带 `wait.callId`）。 */
+    private fun questionWaterfall(
+        eventId: String,
+        agentId: String = "session-a",
+        callId: String? = "call-42",
+    ): String = buildJsonObject {
+        put("type", JsonPrimitive("waterfall"))
+        put("event", JsonPrimitive("user-questions/request"))
+        put("eventId", JsonPrimitive(eventId))
+        put("agentId", JsonPrimitive(agentId))
+        put(
+            "request",
+            buildJsonObject {
+                put(
+                    "questions",
+                    JsonArray(
+                        listOf(
+                            buildJsonObject {
+                                put("id", JsonPrimitive("q1"))
+                                put("question", JsonPrimitive("用哪个方案？"))
+                                put("multiSelect", JsonPrimitive(false))
+                                put(
+                                    "options",
+                                    JsonArray(
+                                        listOf(
+                                            buildJsonObject {
+                                                put("label", JsonPrimitive("方案 A"))
+                                                put("description", JsonPrimitive("快"))
+                                            },
+                                            buildJsonObject { put("label", JsonPrimitive("方案 B")) },
+                                        ),
+                                    ),
+                                )
+                            },
+                        ),
+                    ),
+                )
+                if (callId != null) {
+                    put("wait", buildJsonObject { put("callId", JsonPrimitive(callId)) })
+                }
+            },
+        )
+    }.toString()
+
+    @Test
+    fun questionWaterfallPublishesTheQuestionsAndTheSignal() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+        socket.send(serverFrame(questionWaterfall("q-1")))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+
+        val request = target.questions.value.single()
+        assertEquals("q-1", request.eventId)
+        assertEquals("session-a", request.agentId)
+        assertEquals("call-42", request.callId)
+        // 瀑布帧带 callId 时卡片就是「可回答」的：`$events/result` 那条路认 eventId，
+        // 而 callId 用来与投影组对上（同一条问题的两个视图）。
+        assertEquals("call-42", request.callId)
+        assertEquals("用哪个方案？", request.questions.single().question)
+        assertEquals(listOf("方案 A", "方案 B"), request.questions.single().options.map { it.label })
+        // 信号与卡片是两条独立的出口：投影那条路只认信号，卡片那条路只认 questions。
+        assertEquals(1L, target.questionSignal.value)
+        assertEquals(1L, target.stats.value.questionsSeen)
+        // 提问绝不是审批。
+        assertTrue(target.approvals.value.isEmpty())
+    }
+
+    @Test
+    fun questionWaterfallWithoutCallIdIsStillPublishedButNotAnswerable() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+        socket.send(serverFrame(questionWaterfall("q-1", callId = null)))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+
+        // `wait?` 是可选的。拿不到 callId 时与投影组对不上（`ChatViewModel` 那边按
+        // callId 匹配），但卡片仍然要弹——投影刷新会补上真正的 callId，
+        // 而 `answerQuestions` 收 callId、内部回落到 eventId，两种都答得出去。
+        val request = target.questions.value.single()
+        assertNull(request.callId)
+        assertEquals(1, request.questions.size)
+    }
+
+    @Test
+    fun answeringAQuestionSendsTheAnswersAsAResultOutcome() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+        socket.send(serverFrame(questionWaterfall("q-1")))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+
+        expectUnaryOk()
+        unaryBodies.clear()
+        withTimeout(10_000) {
+            // 参数是 **callId**（`call-42`）而不是 eventId：`ChatViewModel` 用 callId
+            // 当卡片身份与草稿键，客户端内部自己回落去匹配 eventId。
+            target.answerQuestions(
+                "call-42",
+                listOf(AskAnswer(id = "q1", selected = listOf("方案 A"))),
+            )
+        }
+
+        assertTrue(awaitOn(8_000) { target.questions.value.isEmpty() })
+        // 提问与审批的回答必须分开计数，否则诊断页会把「答过一次提问」
+        // 显示成「答过一次审批」。
+        assertEquals(1L, target.stats.value.questionAnswers)
+        assertEquals(0L, target.stats.value.approvalAnswers)
+        val args = Json.parseToJsonElement(unaryBodies.single()).jsonObject["payload"]!!
+            .jsonObject["args"]!!.jsonObject
+        // 键集必须恰好三个（服务端 exactKeys 校验）。
+        assertEquals(setOf("clientId", "eventId", "outcome"), args.keys)
+        assertEquals("cid-1", args["clientId"]!!.jsonPrimitive.content)
+        assertEquals("q-1", args["eventId"]!!.jsonPrimitive.content)
+        val outcome = args["outcome"]!!.jsonObject
+        assertEquals("result", outcome["kind"]!!.jsonPrimitive.content)
+        val answers = outcome["value"]!!.jsonObject["answers"]!!.jsonArray
+        assertEquals(1, answers.size)
+        assertEquals("q1", answers.single().jsonObject["id"]!!.jsonPrimitive.content)
+        assertEquals(
+            "方案 A",
+            answers.single().jsonObject["selected"]!!.jsonArray.single().jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun cancellingAQuestionRejectsWithTheDesktopCancellationError() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+        socket.send(serverFrame(questionWaterfall("q-1")))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+
+        expectUnaryOk()
+        unaryBodies.clear()
+        withTimeout(10_000) { target.dismissQuestion("q-1") }
+
+        assertTrue(awaitOn(8_000) { target.questions.value.isEmpty() })
+        val outcome = Json.parseToJsonElement(unaryBodies.single()).jsonObject["payload"]!!
+            .jsonObject["args"]!!.jsonObject["outcome"]!!.jsonObject
+        assertEquals("rejected", outcome["kind"]!!.jsonPrimitive.content)
+        val error = outcome["error"]!!.jsonObject
+        // 三个字段必须与桌面端 `questionError('ASK_CANCELLED')` 逐字一致，
+        // 否则模型在桌面端与手机上看到的失败原因不同。
+        assertEquals("UserQuestionError", error["name"]!!.jsonPrimitive.content)
+        assertEquals("the user cancelled ask_user_question", error["message"]!!.jsonPrimitive.content)
+        assertEquals("ASK_CANCELLED", error["code"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun answeringAQuestionLeavesTheApprovalCounterAlone() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+
+        // 先答一次审批：approvalAnswers 必须动，questionAnswers 必须不动。
+        socket.send(serverFrame(waterfall("ev-a")))
+        assertTrue(awaitOn(8_000) { target.approvals.value.isNotEmpty() })
+        expectUnaryOk()
+        withTimeout(10_000) { target.answer("ev-a", allow = true) }
+        assertTrue(awaitOn(8_000) { target.approvals.value.isEmpty() })
+        assertEquals(1L, target.stats.value.approvalAnswers)
+        assertEquals(0L, target.stats.value.questionAnswers)
+
+        // 再答一次提问：反过来。
+        socket.send(serverFrame(questionWaterfall("q-1")))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+        expectUnaryOk()
+        withTimeout(10_000) {
+            target.answerQuestions("call-42", listOf(AskAnswer(id = "q1", selected = listOf("方案 A"))))
+        }
+        assertTrue(awaitOn(8_000) { target.questions.value.isEmpty() })
+        assertEquals(1L, target.stats.value.approvalAnswers)
+        assertEquals(1L, target.stats.value.questionAnswers)
+    }
+
+    @Test
+    fun answeredQuestionIsNotResurrectedByARedelivery() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+        socket.send(serverFrame(questionWaterfall("q-1")))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+
+        expectUnaryOk()
+        withTimeout(10_000) {
+            target.answerQuestions("call-42", listOf(AskAnswer(id = "q1")))
+        }
+        assertTrue(awaitOn(8_000) { target.questions.value.isEmpty() })
+
+        // 服务端补发同一条 waterfall：已经答过了，不能再弹一张点不动的卡片。
+        socket.send(serverFrame(questionWaterfall("q-1")))
+        Thread.sleep(300)
+
+        assertTrue(target.questions.value.isEmpty())
+        // 信号仍然要发——投影可能还没读到「已落定」。
+        assertEquals(2L, target.questionSignal.value)
+    }
+
+    @Test
+    fun questionWaterfallIsDroppedWhenTheStreamIsRebuilt() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+        socket.send(serverFrame(questionWaterfall("q-1")))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+
+        socket.send(serverFrame("""{"type":"ready","clientId":"cid-2"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-2" })
+
+        // 新流 = 新一批 eventId。旧流上的提问带着旧 eventId，答不了。
+        assertTrue(target.questions.value.isEmpty())
+        // 且同一 eventId 在新流里可以重新出现（记账已清）。
+        socket.send(serverFrame(questionWaterfall("q-1")))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+    }
+
+    @Test
+    fun cancelFrameAlsoRemovesAPendingQuestion() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+        socket.send(serverFrame(questionWaterfall("q-1")))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+
+        socket.send(serverFrame("""{"type":"cancel","eventId":"q-1"}"""))
+        assertTrue(awaitOn(8_000) { target.questions.value.isEmpty() })
+        assertNull(target.error.value)
+    }
+
+    /**
+     * R025 P1-2：从**投影**那条路答掉一组提问后，waterfall 上同一条卡片必须消失。
+     *
+     * 投影组与 waterfall 条目是同一个问题的两个视图（用 `callId` 对上）。
+     * 用户答投影组时只动 `ChatViewModel` 的 `_questions`，waterfall 条目留在这里；
+     * 投影组一消失，`interactive` 回退到这条 → 用户看到一张刚刚亲口答过的卡片，
+     * 再点一次就是对同一个 eventId 发第二次 outcome。
+     *
+     * 修复前这条用例第二段断言失败（卡片复活）。
+     */
+    @Test
+    fun answeringThroughTheProjectionDropsTheWaterfallCard() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+        socket.send(serverFrame(questionWaterfall("q-1", callId = "call-42")))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+
+        // `ChatViewModel.answerQuestionGroup` 走投影路成功后会调这一下。
+        target.forgetQuestion("call-42")
+        assertTrue(awaitOn(8_000) { target.questions.value.isEmpty() })
+
+        // 服务端补发同一条 waterfall：已经答过了，不能再弹回来。
+        socket.send(serverFrame(questionWaterfall("q-1", callId = "call-42")))
+        Thread.sleep(300)
+        assertTrue(target.questions.value.isEmpty())
+    }
+
+    /** callId 对不上任何条目时是 no-op，不是崩溃。 */
+    @Test
+    fun forgettingAnUnknownCallIdIsANoOp() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+        socket.send(serverFrame(questionWaterfall("q-1", callId = "call-42")))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+
+        target.forgetQuestion("call-does-not-exist")
+        assertTrue(target.questions.value.isNotEmpty())
+
+        // 真的 callId 照样摘得掉。
+        target.forgetQuestion("call-42")
+        assertTrue(target.questions.value.isEmpty())
+    }
+
+    /**
+     * waterfall 帧不带 `wait.callId` 时，`ChatViewModel` 从头到尾用的是
+     * `waterfall:<eventId>` 合成键 —— [RemoteEventsClient.forgetQuestion] 也必须认它。
+     *
+     * R026 审查 P2：只认真实 callId 的话这一半永远摘不掉，投影组一消失就回退到一张
+     * 刚刚亲口答过的卡片。
+     */
+    @Test
+    fun forgettingByWaterfallKeyDropsTheCard() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+        socket.send(serverFrame(questionWaterfall("q-1", callId = null)))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+
+        target.forgetQuestion("waterfall:q-1")
+        assertTrue(awaitOn(8_000) { target.questions.value.isEmpty() })
+
+        // 记了账，补发不会再复活。
+        socket.send(serverFrame(questionWaterfall("q-1", callId = null)))
+        Thread.sleep(300)
+        assertTrue(target.questions.value.isEmpty())
+    }
+
+    /**
+     * R025 P2-4：按 callId 回答时，卡片身份与草稿键都必须是同一个 callId。
+     *
+     * waterfall 帧带 `callId` 时 [ChatViewModel] 用它当卡片身份（不再套
+     * `waterfall:` 前缀），所以客户端这边也要收 callId、内部回落到 eventId。
+     * 这条用例同时钉住「回落匹配」：传 eventId 也答得出去。
+     */
+    @Test
+    fun answeringByCallIdOrByEventIdBothReachTheSameCard() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+        socket.send(serverFrame(questionWaterfall("q-1", callId = "call-42")))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+
+        expectUnaryOk()
+        unaryBodies.clear()
+        withTimeout(10_000) { target.answerQuestions("call-42", listOf(AskAnswer(id = "q1"))) }
+        assertTrue(awaitOn(8_000) { target.questions.value.isEmpty() })
+        val args = Json.parseToJsonElement(unaryBodies.single()).jsonObject["payload"]!!
+            .jsonObject["args"]!!.jsonObject
+        // 回答送出去的仍然是 eventId——服务端只认它。
+        assertEquals("q-1", args["eventId"]!!.jsonPrimitive.content)
+        // 而答案按桌面端 `answer.answers` 的形状走（自定义答案空白时不发该键）。
+        val answers = args["outcome"]!!.jsonObject["value"]!!.jsonObject["answers"]!!.jsonArray
+        assertEquals(1, answers.size)
+        assertEquals("q1", answers[0].jsonObject["id"]!!.jsonPrimitive.content)
+        assertEquals(emptyList<String>(), answers[0].jsonObject["selected"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertNull(answers[0].jsonObject["custom"])
+
+        // 回落：直接传 eventId 也匹配同一条卡片。
+        socket.send(serverFrame(questionWaterfall("q-2", callId = "call-42")))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+        expectUnaryOk()
+        unaryBodies.clear()
+        withTimeout(10_000) { target.answerQuestions("q-2", listOf(AskAnswer(id = "q1"))) }
+        assertTrue(awaitOn(8_000) { target.questions.value.isEmpty() })
+        assertEquals("q-2", Json.parseToJsonElement(unaryBodies.single()).jsonObject["payload"]!!
+            .jsonObject["args"]!!.jsonObject["eventId"]!!.jsonPrimitive.content)
+    }
+
+    /**
+     * R025 协议层 P1-1：`ChatViewModel` 在 waterfall 帧**拿不到 callId** 时用
+     * `waterfall:<eventId>` 当卡片身份与草稿键，`answerQuestions` 必须认这个合成键。
+     *
+     * 不认的后果不是报错而是**静默空返**：没有任何 outcome 送出、没有任何错误、卡片也不退，
+     * 用户点「提交」看到的是「什么都没发生」，而且可以无限重复。这条用例钉住的就是这个。
+     */
+    @Test
+    fun answeringBySyntheticWaterfallKeyReachesTheSameCard() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+        // 不带 callId 的 waterfall 帧（`wait` 可选，schema 里带 `?`）。
+        socket.send(serverFrame(questionWaterfall("q-9", callId = null)))
+        assertTrue(awaitOn(8_000) { target.questions.value.isNotEmpty() })
+        assertNull(target.questions.value.single().callId)
+
+        expectUnaryOk()
+        unaryBodies.clear()
+        withTimeout(10_000) {
+            target.answerQuestions("waterfall:q-9", listOf(AskAnswer(id = "q1")))
+        }
+        assertTrue(awaitOn(8_000) { target.questions.value.isEmpty() })
+        assertEquals(
+            "q-9",
+            Json.parseToJsonElement(unaryBodies.single()).jsonObject["payload"]!!
+                .jsonObject["args"]!!.jsonObject["eventId"]!!.jsonPrimitive.content,
+        )
+    }
+
+    /**
+     * 同一个 P1 的另一半：匹配不到任何卡片时**必须抛**，不能 `?: return`。
+     *
+     * 抛出来才会被 `ChatViewModel.answerQuestionGroup` 的 catch 变成「回答没能送出」显示给
+     * 用户；静默返回则让调用方以为成功了，把草稿清掉、卡片留着。
+     */
+    @Test
+    fun answeringAnUnknownQuestionReportsInsteadOfSilentlyDoingNothing() = runBlocking {
+        var socket: WebSocket? = null
+        upgrade { socket = it }
+        val target = client()
+        startAsync(target)
+
+        assertTrue(awaitOn(8_000) { socket != null && clientFrames.isNotEmpty() })
+        socket!!.send(serverFrame("""{"type":"ready","clientId":"cid-1"}"""))
+        assertTrue(awaitOn(8_000) { target.clientId.value == "cid-1" })
+
+        val failure = runCatching {
+            withTimeout(10_000) { target.answerQuestions("waterfall:gone", listOf(AskAnswer(id = "q1"))) }
+        }.exceptionOrNull()
+        assertNotNull(failure)
+        assertTrue("实际抛的是 ${failure?.javaClass?.simpleName}: ${failure?.message}", failure is IllegalStateException)
+        // 没送出任何 RPC。
+        assertTrue(unaryBodies.isEmpty())
     }
 
     @Test
@@ -459,7 +930,7 @@ class RemoteEventsClientTest {
         withTimeout(10_000) { target.answer("ev-a", allow = true) }
 
         assertTrue(target.approvals.value.isEmpty())
-        assertEquals(1L, target.stats.value.answers)
+        assertEquals(1L, target.stats.value.approvalAnswers)
         assertNull(target.error.value)
 
         val body = awaitOn(8_000) { unaryBodies.isNotEmpty() }
@@ -508,7 +979,7 @@ class RemoteEventsClientTest {
 
         assertEquals(1, target.approvals.value.size)
         assertTrue(target.error.value?.contains("授权没能送出") == true)
-        assertEquals(0L, target.stats.value.answers)
+        assertEquals(0L, target.stats.value.approvalAnswers)
         // 放回的是原来那条（工具名不变），不是一条空壳。
         assertEquals("pwsh", target.approvals.value.single().toolName)
         assertEquals("ev-a", target.approvals.value.single().eventId)

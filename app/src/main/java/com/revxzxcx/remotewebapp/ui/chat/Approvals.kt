@@ -53,6 +53,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.core.session.AskQuestion
 import com.revxzxcx.remotewebapp.core.session.InteractiveComposerRequest
@@ -65,10 +66,11 @@ import com.revxzxcx.remotewebapp.core.events.SessionPermission
  * 三个形态共用同一个外壳 [ComposerShell]，只有内容区不同：
  * 1. `Approval` —— 敏感工具的权限审批，允许一次 / 拒绝两个动作；
  * 2. `Question` —— 模型提问，选项 + 自定义答案 + 提交/跳过；
- * 3. `plan-review` —— 走 [Question]，但 UI 换成紧凑审批卡片（要求修改 / 同意执行）。
+ * 3. `plan-review` —— 走 [Question]，但 UI 换成紧凑审批卡片（跳过 / 同意执行）。
  *
  * 为什么不并排堆两个卡片：桌面端同一时刻也只有一个卡片占编辑器。两个一起来时
- * 提问优先（它通常要求用户读完整个计划再决定），另一个等下一个回合。
+ * **审批优先**（它卡住的是正在执行的工具，漏答会让整轮停在这里；提问等下一个回合）。
+ * 分派点在 `ChatViewModel.interactive`，这里是结果不是规则。
  */
 @Composable
 internal fun InteractiveWindow(
@@ -99,6 +101,7 @@ internal fun InteractiveWindow(
         is InteractiveComposerRequest.Question -> ComposerShell(
             title = request.headline(),
             accent = request.accent(),
+            bodyMaxHeight = INTERACTIVE_QUESTION_BODY_MAX_HEIGHT,
             actions = {
                 QuestionActions(
                     request = request,
@@ -106,12 +109,17 @@ internal fun InteractiveWindow(
                     onSkip = { onSkip(request.callId) },
                 )
             },
+            pinned = {
+                QuestionPinned(
+                    request = request,
+                    error = error,
+                    onCustomAnswer = onCustomAnswer,
+                )
+            },
         ) {
             QuestionBody(
                 request = request,
-                error = error,
                 onToggleOption = onToggleOption,
-                onCustomAnswer = onCustomAnswer,
             )
         }
     }
@@ -129,16 +137,24 @@ internal fun InteractiveWindow(
  *   `bottomBar` 里会被测量成 0 高。
  * - [actions] 渲染在滚动区**外面**，永远可见。把「提交」放进滚动区等于让用户先滚动再
  *   能确认，桌面端也从不这么干。
+ * - [pinned] 渲染在滚动区与动作区**之间**，同样不随内容滚动。给「其他答案」输入框用：
+ *   选项多的时候滚动区会被选项占满，自定义答案一旦跟着滚，用户就得先发现「这里能滚」
+ *   再滚下去才写得成字——桌面上有鼠标滚轮和视觉渐隐，手机上两样都没有。
  *
  * `INTERACTIVE_BODY_MAX_HEIGHT` 取 220dp 是有意的：卡片总高 = 12 + 36 + 6 + 220 + 8 +
  * 52 + 12 ≈ 346dp，必须留在小窗口（渲染测试的 Robolectric 窗口只有 386px 高）之内，
  * 否则连钉住的动作区都会被窗口裁掉。真机上 930dp 高的屏也远够用。
+ *
+ * 提问卡多一段钉住的「其他答案」（约 56dp），所以它传更小的 [bodyMaxHeight]：
+ * 12 + 36 + 6 + 160 + 56 + 8 + 52 + 12 ≈ 342dp，同样留在 386px 内。
  */
 @Composable
 private fun ComposerShell(
     title: String,
     accent: Color,
     actions: @Composable () -> Unit,
+    bodyMaxHeight: Dp = INTERACTIVE_BODY_MAX_HEIGHT,
+    pinned: @Composable () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     Surface(
@@ -177,11 +193,12 @@ private fun ComposerShell(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = INTERACTIVE_BODY_MAX_HEIGHT)
+                    .heightIn(max = bodyMaxHeight)
                     .verticalScroll(rememberScrollState()),
             ) {
                 content()
             }
+            pinned()
             Spacer(Modifier.height(8.dp))
             actions()
         }
@@ -190,6 +207,14 @@ private fun ComposerShell(
 
 /** 交互窗口正文的滚动高度上限：再高就改为滚动，避免把消息列表挤干净。 */
 private val INTERACTIVE_BODY_MAX_HEIGHT = 220.dp
+
+/**
+ * 提问卡的滚动高度上限：比 [INTERACTIVE_BODY_MAX_HEIGHT] 小，给钉住的「其他答案」留地方。
+ *
+ * 两个值都必须让「卡片总高 < Robolectric 窗口高（386px）」，否则钉住的动作区会被裁掉，
+ * 而 `performClick` 往窗口外注入触摸不抛异常也不触发回调——这条已经害过两轮静默失败。
+ */
+private val INTERACTIVE_QUESTION_BODY_MAX_HEIGHT = 160.dp
 
 /** 权限审批正文：工具名 + 服务端给的理由。动作区见 [ApprovalActions]。 */
 @Composable
@@ -229,13 +254,15 @@ private fun ApprovalBody(
     }
 }
 
-/** 提问正文：题目 + 选项 + 自定义答案。一次只显示一道题（桌面端同规格）。 */
+/**
+ * 提问正文的上半段（会滚动）：题号 + 题目 + 详情 + 选项。
+ *
+ * 一次只显示一道题（桌面端同规格）。
+ */
 @Composable
 private fun QuestionBody(
     request: InteractiveComposerRequest.Question,
-    error: String?,
     onToggleOption: (String, AskQuestion, String) -> Unit,
-    onCustomAnswer: (String, AskQuestion, String) -> Unit,
 ) {
     val index = request.currentIndex()
     val question = request.questions.getOrNull(index) ?: return
@@ -281,7 +308,23 @@ private fun QuestionBody(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-    Spacer(Modifier.height(6.dp))
+}
+
+/**
+ * 提问正文的下半段（钉住不滚）：自定义答案 + 错误。
+ *
+ * 拆出来的原因见 [ComposerShell] 的 [pinned] 说明：选项多于 4 个时滚动区会被占满，
+ * 自定义答案跟着滚就意味着用户必须先发现「这里能滚」。
+ */
+@Composable
+private fun QuestionPinned(
+    request: InteractiveComposerRequest.Question,
+    error: String?,
+    onCustomAnswer: (String, AskQuestion, String) -> Unit,
+) {
+    val index = request.currentIndex()
+    val question = request.questions.getOrNull(index) ?: return
+    val draft = request.draftOf(question.id)
     OutlinedTextField(
         value = draft.custom,
         onValueChange = { onCustomAnswer(request.callId, question, it) },

@@ -3,6 +3,8 @@ package com.revxzxcx.remotewebapp.core.events
 import com.revxzxcx.remotewebapp.core.protocol.RemoteStreamMux
 import com.revxzxcx.remotewebapp.core.protocol.TypertClient
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
+import com.revxzxcx.remotewebapp.core.session.AskAnswer
+import com.revxzxcx.remotewebapp.core.session.wire
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -21,10 +23,10 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 /**
- * 转发事件订阅：**等待回答的审批请求**从这里来，也在这里回答。
+ * 转发事件订阅：**等待回答的审批请求与模型提问**从这里来，也在这里回答。
  *
  * ## 为什么挂在连接上而不是聊天页上
- * 审批请求是 **waterfall**：服务端把请求抛给「第一个愿意回答的远程监听者」，然后**等**。
+ * 这两类请求都是 **waterfall**：服务端把请求抛给「第一个愿意回答的远程监听者」，然后**等**。
  * 如果订阅只存在于聊天页，那么用户在工作区列表页、文件查看页、甚至聊天页正在加载的
  * 那几秒里收到的请求就**没有监听者**——服务端会一直等到请求自己的 `signal` 超时，
  * 表现是「桌面端问我要不要允许，手机毫无反应，过了一会儿工具自己失败了」。
@@ -69,6 +71,22 @@ class RemoteEventsClient(
      */
     val approvals: StateFlow<List<ApprovalRequest>> = _approvals.asStateFlow()
 
+    private val _questions = MutableStateFlow<List<QuestionRequest>>(emptyList())
+
+    /**
+     * 正在等待回答的**模型提问**（`user-questions/request` waterfall）。
+     *
+     * 与 [approvals] 同源同生命周期，但回答方式不同：审批只回
+     * `{kind:'result', value:'allowed-once'}`，提问回的是业务答案
+     * `{kind:'result', value:{answers:[…]}}`，取消则按桌面端
+     * `questionError('ASK_CANCELLED')` 的形状拒绝。
+     *
+     * 这条路上的提问只是「立刻弹卡片」；**权威来源仍是 `userQuestions` 投影**
+     * （`ChatViewModel` 会把两条路合并）。所以 [questions] 里的条目可能没有
+     * `callId`（`wait?` 可选），那种条目由投影那条路兜底。
+     */
+    val questions: StateFlow<List<QuestionRequest>> = _questions.asStateFlow()
+
     private val _error = MutableStateFlow<String?>(null)
 
     /** 订阅或回答失败的中文说明。 */
@@ -77,13 +95,10 @@ class RemoteEventsClient(
     /**
      * 「有新的提问请求到达」的信号：每收到一次 `user-questions/request` waterfall 就 +1。
      *
-     * 为什么不把请求本身放出来：waterfall 帧的 `request` 里 `wait?:{callId}` 是**可选**
-     * 字段（`dsh-api-user-questions/lib/types/record.js`），而 `userQuestions/answer`
-     * 的 args 必须有 `callId`——拿不到 callId 就没法回答。所以真正的提问卡片只能来自
-     * `userQuestions` 投影（`session/projections` / `session/control`），这里只当一个
-     * 「立刻去重读投影」的触发器。
-     *
-     * 回答本身走投影那条路，不经过这里：`$events/result` 只用于审批。
+     * 与 [questions] 并存的原因：[questions] 只在 `wait.callId` 存在时才能直接回答，
+     * 而**权威的提问列表来自 `userQuestions` 投影**（轮询 + `session/control`）。
+     * 这个信号就是「立刻去重读投影」的触发器——投影刷新几秒一次的节奏对
+     * 「模型刚发问」来说太慢。
      */
     private val _questionSignal = MutableStateFlow(0L)
 
@@ -96,27 +111,38 @@ class RemoteEventsClient(
     private val lock = Any()
 
     /**
-     * 已经回答过 / 主动弃置过的 `eventId`。
+     * 已经回答过 / 主动弃置过的 `eventId`（**审批与提问各一本账**）。
      *
-     * [answer] 会立刻把卡片从 [approvals] 移除，于是 [handle] 里那句
+     * [answer] 与 [answerQuestions] 都会立刻把卡片移除，于是 [handle] 里那句
      * 「`current.none { it.eventId == eventId }`」的去重就失效了——服务端补发同一条
      * waterfall 时卡片会被重新插回来，而且**永远点不动**（服务端早已视为已回答）。
      * 所以「已处理」必须独立于「当前在列表里」记账。
      *
-     * 上限 `HANDLED_RING`：一条流里可能有成百上千次审批，全留着就是无界增长。
+     * 上限 `HANDLED_RING`：一条流里可能有成百上千次请求，全留着就是无界增长。
+     *
+     * **为什么分开两本**（R026 审查 P3）：共用一本时，提问的 eventId 会把审批的挤出环外
+     * （反之亦然），被挤掉的那条一旦被服务端补发就会复活成一张点不动的卡片。
      */
     private val handledApprovals = ArrayDeque<String>()
 
     private val handledApprovalsSet = HashSet<String>()
 
+    private val handledQuestions = ArrayDeque<String>()
+
+    private val handledQuestionsSet = HashSet<String>()
+
     /**
-     * 每收到一次 `ready` 帧就 +1。
+     * 每收到一次 `ready` 帧（且 clientId 真的变了）就 +1。
      *
      * 回答必须带**当前**连接 id（`clientId`）；重连后服务端会分配一个新 id，
      * 旧 id 上的 `eventId` 永远答不了（实测：假 id → `gateway/internal:
      * ... identifies no active event stream`）。所以 [answer] 要把发起时的 epoch 记下来，
      * 发现流已经重建过就不要把卡片放回去——那条请求在新的流里早就不存在了。
+     *
+     * `@Volatile`：写在 IO 线程（`handle` 的 ready 分支），读在主线程（`submit`），
+     * 没有 happens-before 的话理论上会漏判流重建、把已失效的卡片放回来。
      */
+    @Volatile
     private var epoch: Long = 0L
 
     /**
@@ -165,13 +191,27 @@ class RemoteEventsClient(
                     // 留着只会让 UI 显示一堆点不动的按钮。
                     synchronized(lock) {
                         _approvals.value = emptyList()
+                        _questions.value = emptyList()
                         handledApprovals.clear()
                         handledApprovalsSet.clear()
+                        handledQuestions.clear()
+                        handledQuestionsSet.clear()
                     }
                     false
                 } else {
                     _clientId.value = null
                     _stats.value = RemoteEventsStats()
+                    // 代次一起递增：这条流已经拆了，在途回答即使失败也不该把卡片放回一个
+                    // 没有订阅者的列表（要等下一次 ready 才被清掉，那期间用户能看到它们）。
+                    epoch += 1
+                    synchronized(lock) {
+                        _approvals.value = emptyList()
+                        _questions.value = emptyList()
+                        handledApprovals.clear()
+                        handledApprovalsSet.clear()
+                        handledQuestions.clear()
+                        handledQuestionsSet.clear()
+                    }
                     delay(backoffMillis(attempt))
                     true
                 }
@@ -199,11 +239,17 @@ class RemoteEventsClient(
                         // 全部清掉（否则新流里同一个 eventId 会被误判为已处理）。
                         synchronized(lock) {
                             _approvals.value = emptyList()
+                            _questions.value = emptyList()
                             handledApprovals.clear()
                             handledApprovalsSet.clear()
+                            handledQuestions.clear()
+                            handledQuestionsSet.clear()
                         }
+                        // 代次只在**真的换了流**时递增：重复的 ready 帧（同一个 clientId）
+                        // 也递增的话，一次在途回答失败时 `startedEpoch != epoch`，
+                        // 卡片就被错误地判定为「属于旧流」而不回滚。
+                        epoch += 1
                     }
-                    epoch += 1
                     _error.value = null
                 }
             }
@@ -212,10 +258,12 @@ class RemoteEventsClient(
                 val eventId = obj.text("eventId") ?: return
                 synchronized(lock) {
                     _approvals.value = _approvals.value.filterNot { it.eventId == eventId }
+                    _questions.value = _questions.value.filterNot { it.eventId == eventId }
                 }
                 // 服务端撤回的请求不会再被投递，但记一笔更稳：万一同一 eventId 又被
-                // 补发一次，也不该弹出一张已经取消的卡片。
-                markHandled(eventId)
+                // 补发一次，也不该弹出一张已经取消的卡片。撤回帧不带类型，两本账都记。
+                markApprovalHandled(eventId)
+                markQuestionHandled(eventId)
             }
 
             "emit" -> {
@@ -247,13 +295,29 @@ class RemoteEventsClient(
                         }
                     }
                 }
-                // `user-questions/request`（模型提问）也是 waterfall。请求本身不带可靠的
-                // `callId`，所以这里只发信号，让 `ChatViewModel` 去重读 `userQuestions`
-                // 投影（那里才有 `callId`）。
                 if (obj.text("event") == "user-questions/request") {
                     synchronized(lock) {
                         _questionSignal.value = _questionSignal.value + 1
-                        _stats.update { it.copy(questionsSeen = it.questionsSeen + 1) }
+                    }
+                    // 请求本身也放出来：弹卡片要的是「立刻」，而 `userQuestions` 投影
+                    // 是轮询出来的（最快也要等下一次刷新）。投影仍是权威来源——
+                    // `ChatViewModel` 把两条路合并，投影缺席时才用这里的内容。
+                    val request = QuestionRequest.parse(
+                        eventId = eventId,
+                        agentId = obj.text("agentId"),
+                        request = obj["request"] as? JsonObject,
+                    )
+                    if (request != null) {
+                        synchronized(lock) {
+                            val current = _questions.value
+                            if (current.none { it.eventId == eventId } && eventId !in handledQuestionsSet) {
+                                _questions.value = current + request
+                                // 与 `approvalsSeen` 同口径：数**去重后真正认出来的请求**，
+                                // 不是数帧。数帧会让诊断页在「收到过一帧但什么都没渲染」时
+                                // 也显示 N≥1，用户对着一张不存在的卡片。
+                                _stats.update { it.copy(questionsSeen = it.questionsSeen + 1) }
+                            }
+                        }
                     }
                 }
             }
@@ -272,74 +336,234 @@ class RemoteEventsClient(
      * 所以这里的策略是「保留卡片 + 说明原因」，由用户决定是否再点。
      */
     suspend fun answer(eventId: String, allow: Boolean) {
+        val outcome = if (allow) ApprovalOutcome.ALLOW_ONCE else ApprovalOutcome.REJECT
+        submit(
+            eventId = eventId,
+            outcome = buildJsonObject {
+                put("kind", JsonPrimitive("result"))
+                put("value", JsonPrimitive(outcome.wire))
+            },
+            kind = AnswerKind.APPROVAL,
+            optimisticRemoval = {
+                val hit = _approvals.value.firstOrNull { it.eventId == eventId }
+                if (hit != null) {
+                    _approvals.value = _approvals.value.filterNot { it.eventId == eventId }
+                }
+                hit
+            },
+            restore = { removed ->
+                val current = _approvals.value
+                if (current.none { it.eventId == eventId }) {
+                    _approvals.value = current + removed
+                }
+            },
+            failureMessage = "授权没能送出",
+        )
+    }
+
+    /**
+     * 回答一个模型提问（`user-questions/request` 的 waterfall）。
+     *
+     * 与 [answer] 的区别只有 `outcome` 的形状：提问回的是业务答案
+     * `{answers:[{id, selected, custom?}]}`，取消则按桌面端
+     * `questionError('ASK_CANCELLED')` 的形状拒绝。乐观移除 / 失败回滚 / epoch 守卫
+     * 三者完全一致，所以走同一个 [submit]。
+     *
+     * @param callId 题组的 callId。**这里收 callId 而不是 eventId**：waterfall 帧带
+     *   `callId` 时 [ChatViewModel] 用它当卡片身份与草稿键，只有取不到时才回落合成
+     *   eventId。参数与调用方保持同一种身份，才不会出现「卡片按 callId 显示、
+     *   回答按 eventId 发」的错位。
+     */
+    suspend fun answerQuestions(callId: String, answers: List<AskAnswer>) {
+        // 身份要**同时**认三种写法：投影/卡片用的真实 callId、waterfall 帧里的 eventId、
+        // 以及 [ChatViewModel] 在拿不到 callId 时合成的 `waterfall:<eventId>`。
+        // 少认任一种都会走到下面的空返：那时候没有任何 outcome 送出、没有任何报错、
+        // 卡片也不退，用户点「提交」看到的是「什么都没发生」（R025 协议层 P1-1）。
+        val key = callId.removePrefix(RemoteEvents.WATERFALL_PREFIX)
+        val hit = synchronized(lock) {
+            _questions.value.firstOrNull {
+                it.callId == callId || it.callId == key || it.eventId == key || it.eventId == callId
+            }
+        } ?: throw IllegalStateException("这一组问题已经不在等待回答了")
+        submit(
+            eventId = hit.eventId,
+            outcome = QuestionOutcome.Answered(answers.wire()).wire(),
+            kind = AnswerKind.QUESTION,
+            optimisticRemoval = {
+                val removed = _questions.value.firstOrNull { it.eventId == hit.eventId }
+                if (removed != null) {
+                    _questions.value = _questions.value.filterNot { it.eventId == hit.eventId }
+                }
+                removed
+            },
+            restore = { removed ->
+                val current = _questions.value
+                if (current.none { it.eventId == hit.eventId }) {
+                    _questions.value = current + removed
+                }
+            },
+            failureMessage = "回答没能送出",
+        )
+    }
+
+    /**
+     * 用户取消提问（等价于桌面端 `ASK_CANCELLED`）。
+     *
+     * 走 [submit] 而不是自己写一遍「取 id / 记 epoch / 移除 / 回滚」：
+     * 这条路上曾经漏了失败回滚，卡片消失后用户既不能取消也不能回答，只能等模型超时。
+     */
+    suspend fun dismissQuestion(eventId: String) {
+        submit(
+            eventId = eventId,
+            outcome = QuestionOutcome.Cancelled.wire(),
+            kind = AnswerKind.QUESTION,
+            optimisticRemoval = {
+                val hit = _questions.value.firstOrNull { it.eventId == eventId }
+                if (hit != null) {
+                    _questions.value = _questions.value.filterNot { it.eventId == eventId }
+                }
+                hit
+            },
+            restore = { removed ->
+                val current = _questions.value
+                if (current.none { it.eventId == eventId }) {
+                    _questions.value = current + removed
+                }
+            },
+            failureMessage = "取消没能送出",
+            counted = false,
+        )
+    }
+
+    /**
+     * 提问已经在别处被回答（投影路 `userQuestions/answer`）时，把 waterfall 上的
+     * 同一条请求摘掉。
+     *
+     * **这条是 P1 级的**：投影组与 waterfall 条目是同一个问题的两个视图
+     * （用 `callId` 对上）。用户答投影组时只动 `_questions`（`ChatViewModel` 那一侧），
+     * waterfall 条目就留在这里；投影组一消失，`interactive` 回退到这条，
+     * 用户看到一张**刚刚亲口答过**的卡片，再点一次就是对同一个 eventId 发第二次 outcome。
+     * 这正是 R020/R024 修过两遍的「卡片复活」，只是这次从两条路之间漏进来。
+     *
+     * @param callId 投影组的 callId。**也认 `waterfall:` 合成键**（R026 审查 P2）：
+     *   waterfall 帧不带 `wait.callId` 时 `ChatViewModel` 那一侧从头到尾用的都是合成键，
+     *   只认真实 callId 的话这一半永远摘不掉。匹配不上任何条目时是 no-op。
+     */
+    fun forgetQuestion(callId: String) {
+        synchronized(lock) {
+            val eventId = _questions.value
+                .firstOrNull {
+                    it.callId == callId ||
+                        it.eventId == callId.removePrefix(RemoteEvents.WATERFALL_PREFIX)
+                }
+                ?.eventId
+                ?: return
+            _questions.value = _questions.value.filterNot { it.eventId == eventId }
+            markQuestionHandled(eventId)
+        }
+    }
+
+    /** 主动丢弃一条审批请求（不回答）。仅在用户明确划掉时调用。 */
+    fun dismiss(eventId: String) {
+        synchronized(lock) {
+            _approvals.value = _approvals.value.filterNot { it.eventId == eventId }
+        }
+        markApprovalHandled(eventId)
+    }
+
+    /**
+     * 送出一个 outcome，附带「乐观移除 → 失败回滚」的完整语义。
+     *
+     * 抽出来是因为审批与提问的唯一差别就是 outcome 形状与列表，其余四步
+     * （取 clientId、记 epoch、乐观移除、按 epoch 守卫回滚）必须逐字一致——
+     * 早先两条路各写一遍，改一处漏一处。
+     */
+    private suspend fun <T> submit(
+        eventId: String,
+        outcome: JsonObject,
+        kind: AnswerKind,
+        optimisticRemoval: () -> T?,
+        restore: (T) -> Unit,
+        failureMessage: String,
+        /** false = 不计入「已回答」（取消 / 弃置走这条）。 */
+        counted: Boolean = true,
+    ) {
         val id = _clientId.value
         if (id == null) {
             _error.value = "还没连上审批通道，请稍候再试"
             return
         }
         val startedEpoch = epoch
-        val outcome = if (allow) ApprovalOutcome.ALLOW_ONCE else ApprovalOutcome.REJECT
-        val args = buildJsonObject {
-            put("clientId", JsonPrimitive(id))
-            put("eventId", JsonPrimitive(eventId))
-            put(
-                "outcome",
-                buildJsonObject {
-                    put("kind", JsonPrimitive("result"))
-                    put("value", JsonPrimitive(outcome.wire))
-                },
-            )
-        }
         // 乐观移除：点了就该立刻消失，否则网络往返的那几百毫秒里用户会再点一次。
         // 同样要整块加锁（见 [handle] 里 waterfall 分支的说明）。
-        val removed = synchronized(lock) {
-            val hit = _approvals.value.firstOrNull { it.eventId == eventId }
-            if (hit != null) {
-                _approvals.value = _approvals.value.filterNot { it.eventId == eventId }
-            }
-            hit
-        }
+        val removed = synchronized(lock) { optimisticRemoval() }
         try {
-            typert.callUnit(RemoteEvents.EVENT_RESULT_ENDPOINT, args)
+            sendOutcome(id, eventId, outcome)
             _error.value = null
-            _stats.update { it.copy(answers = it.answers + 1) }
-            markHandled(eventId)
+            if (counted) {
+                _stats.update { current ->
+                    when (kind) {
+                        AnswerKind.APPROVAL -> current.copy(approvalAnswers = current.approvalAnswers + 1)
+                        AnswerKind.QUESTION -> current.copy(questionAnswers = current.questionAnswers + 1)
+                    }
+                }
+            }
+            markHandled(eventId, kind)
         } catch (cause: CancellationException) {
             throw cause
         } catch (cause: Throwable) {
             // 流在这几百毫秒里重建过（重连 / 新 ready）→ 旧 eventId 在新流里本来就不存在，
             // 放回去只会多一张永远点不动的卡片。
             if (startedEpoch == epoch && removed != null) {
-                synchronized(lock) {
-                    val current = _approvals.value
-                    if (current.none { it.eventId == eventId }) {
-                        _approvals.value = current + removed
-                    }
-                }
+                synchronized(lock) { restore(removed) }
             }
-            _error.value = "授权没能送出：${describe(cause)}"
+            _error.value = "$failureMessage：${describe(cause)}"
         }
     }
 
-    /** 主动丢弃一条请求（不回答）。仅在用户明确划掉时调用。 */
-    fun dismiss(eventId: String) {
-        synchronized(lock) {
-            _approvals.value = _approvals.value.filterNot { it.eventId == eventId }
+    /** 走 unary RPC 把 outcome 送到 `$events/result`。 */
+    private suspend fun sendOutcome(clientId: String, eventId: String, outcome: JsonObject) {
+        val args = buildJsonObject {
+            put("clientId", JsonPrimitive(clientId))
+            put("eventId", JsonPrimitive(eventId))
+            put("outcome", outcome)
         }
-        markHandled(eventId)
+        typert.callUnit(RemoteEvents.EVENT_RESULT_ENDPOINT, args)
     }
 
     /**
      * 记下「这个 eventId 已经处理过了」，并维持环形上限。
      *
-     * 必须在锁外调用（自身会拿锁）；调用点已经持有结果或已经移除卡片。
+     * **可重入**：内部会拿 [lock]，Kotlin 的 `synchronized` 是可重入的，所以在持锁状态下
+     * 调用也安全（`forgetQuestion` 就那么做——它要在同一个临界区里「摘卡片 + 记账」，
+     * 拆成两步反而给并发留了窗口）。调用点必须已经持有结果或已经移除卡片。
+     *
+     * 按 [kind] 记到对应的那一本账上（审批与提问分开，见字段 KDoc）。
      */
-    private fun markHandled(eventId: String) {
+    private fun markHandled(eventId: String, kind: AnswerKind) {
+        when (kind) {
+            AnswerKind.APPROVAL -> markApprovalHandled(eventId)
+            AnswerKind.QUESTION -> markQuestionHandled(eventId)
+        }
+    }
+
+    private fun markApprovalHandled(eventId: String) {
         synchronized(lock) {
             if (handledApprovalsSet.add(eventId)) {
                 handledApprovals.addLast(eventId)
                 while (handledApprovals.size > HANDLED_RING) {
                     handledApprovalsSet.remove(handledApprovals.removeFirst())
+                }
+            }
+        }
+    }
+
+    private fun markQuestionHandled(eventId: String) {
+        synchronized(lock) {
+            if (handledQuestionsSet.add(eventId)) {
+                handledQuestions.addLast(eventId)
+                while (handledQuestions.size > HANDLED_RING) {
+                    handledQuestionsSet.remove(handledQuestions.removeFirst())
                 }
             }
         }
@@ -358,8 +582,11 @@ class RemoteEventsClient(
         _clientId.value = null
         synchronized(lock) {
             _approvals.value = emptyList()
+            _questions.value = emptyList()
             handledApprovals.clear()
             handledApprovalsSet.clear()
+            handledQuestions.clear()
+            handledQuestionsSet.clear()
         }
         _stats.value = RemoteEventsStats()
         _error.value = null

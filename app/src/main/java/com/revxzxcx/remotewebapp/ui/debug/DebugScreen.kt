@@ -148,7 +148,14 @@ fun DebugScreen(viewModel: DebugViewModel, onBack: () -> Unit) {
                 InfoRow(
                     label = "审批请求",
                     value = "见过 ${state.remoteEvents.stats.approvalsSeen} 条 · " +
-                        "已回答 ${state.remoteEvents.stats.answers} 条",
+                        "已回答 ${state.remoteEvents.stats.approvalAnswers} 条",
+                )
+            }
+            item(key = "row-ev-questions") {
+                InfoRow(
+                    label = "提问请求",
+                    value = "收到 ${state.remoteEvents.stats.questionsSeen} 次 · " +
+                        "已回答 ${state.remoteEvents.stats.questionAnswers} 次",
                 )
             }
             item(key = "row-ev-emits") {

@@ -607,7 +607,67 @@ object ChatReducer {
         )
     }
 
-    /** 单选 / 多选某一道题。单选下选项互斥（再点一次取消）。 */
+    /**
+     * 给一组题铺默认草稿，**只铺到「第一道还没有草稿的题」为止**。
+     *
+     * 为什么不能每道题都铺（R025 UI 层 P1-1，真缺陷）：`defaultOf` 预选第一个选项，于是每道
+     * 题的草稿都是 `isAnswered`；`InteractiveComposerRequest.Question.currentIndex()` 用的
+     * 是 `indexOfFirst { drafts[it.id]?.isAnswered != true }`，全部命中时回落到 `lastIndex`
+     * → 多题组只显示最后一道题，前 N-1 道被按预选项自动作答。用户看到的是「我明明只答了
+     * 一题，另外几题去哪了」。
+     *
+     * 桌面端的规格是「当前那道题预选第一个选项」：答完当前题、切到下一题时，下一题才该有
+     * 预选。所以这里按「第一个没有草稿的题」截断，全部有草稿时停在最后一道。
+     */
+    fun seedQuestionDefaults(
+        state: ChatUiState,
+        callId: String,
+        questions: List<AskQuestion>,
+    ): ChatUiState {
+        if (questions.isEmpty()) return state
+        val existing = state.questionDrafts[callId].orEmpty()
+        val upTo = questions.indexOfFirst { !existing.containsKey(it.id) }
+            .let { if (it < 0) questions.lastIndex else it }
+        var current = state
+        questions.take(upTo + 1).forEach { question ->
+            current = enterQuestion(current, callId, question)
+        }
+        return current
+    }
+
+    /**
+     * 这一组里还没有**答案**的题数。提交前用它挡住「静默补空答案」。
+     *
+     * 数的是 `isAnswered`（有选中项或有自定义文本），**不是「有没有草稿键」**
+     * （R026 审查 P1，修复 C 只修一半）：三条路径都会让「键在但没有答案」——
+     * ① 无预设选项的题（`defaultOf` 给 `selected = emptySet()`）；
+     * ② 多选把预选项再点一次取消；③ 自定义答案打进去又删空。
+     * 只数键时这三种都从 `missing` 里漏过去，随后 [answersOf] 又因
+     * `!draft.isAnswered` 返回 null，于是回落成空答案发出——正是要挡的那个现象。
+     */
+    fun unansweredCount(
+        state: ChatUiState,
+        callId: String,
+        questions: List<AskQuestion>,
+    ): Int {
+        val drafts = state.questionDrafts[callId].orEmpty()
+        return questions.count { drafts[it.id]?.isAnswered != true }
+    }
+
+    /**
+     * 单选 / 多选某一道题。
+     *
+     * 单选与自定义答案互斥（桌面端规格）：点选项即清掉自定义文本。
+     * **多选保留自定义答案**：桌面端规格明确「多选题草稿保留已选标签，提交项可同时带
+     * selected 与 custom」，[SessionQuestions.wire] 也确实会同时发两个键。
+     * （R026 审查 P2：早先这里无条件 `custom = ""`，多选下先打自定义答案再点选项，
+     * 用户输入被静默销毁。）
+     *
+     * **单选下点已选项不是「取消」**（R026 真机教训）：第一项是被预选的，用户认同它时
+     * 会顺手点一下确认，早先的实现把这一下解释成取消 → 草稿变空 → 提交出去的是
+     * `{selected: []}`，桌面端拿到「空选择」、什么决定都没收到。单选语义里点已选项
+     * 是幂等的；想表达「都不对」有专门的自定义答案框。
+     */
     fun toggleOption(
         state: ChatUiState,
         callId: String,
@@ -619,12 +679,20 @@ object ChatReducer {
         val selected = if (question.multiSelect) {
             if (label in current.selected) current.selected - label else current.selected + label
         } else {
-            // 单选与自定义答案互斥（桌面端规格）：点选项即清掉自定义文本。
-            if (label in current.selected) emptySet() else setOf(label)
+            setOf(label)
         }
         return state.copy(
             questionDrafts = state.questionDrafts +
-                (callId to (forCall + (question.id to current.copy(selected = selected, custom = "")))),
+                (
+                    callId to (
+                        forCall + (
+                            question.id to current.copy(
+                                selected = selected,
+                                custom = if (question.multiSelect) current.custom else "",
+                            )
+                            )
+                        )
+                    ),
         )
     }
 
