@@ -1,7 +1,12 @@
 package com.revxzxcx.remotewebapp.core.protocol
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -21,6 +26,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
+import java.net.ServerSocket
+import java.security.MessageDigest
+import java.util.Base64
 import java.util.Collections
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -53,6 +61,9 @@ class RemoteStreamMuxTest {
     /** 本测试创建过的 mux，[tearDown] 统一关闭，避免 socket 泄漏。 */
     private val muxes = mutableListOf<RemoteStreamMux>()
 
+    /** 本测试创建过的裸 socket 服务端，[tearDown] 统一关闭（D8：断言失败也要回收）。 */
+    private val rawServers = mutableListOf<ServerSocket>()
+
     /** 服务端收到的客户端文本帧。 */
     private val clientFrames: MutableList<String> = Collections.synchronizedList(mutableListOf())
 
@@ -62,6 +73,7 @@ class RemoteStreamMuxTest {
     @Before
     fun setUp() {
         muxes.clear()
+        rawServers.clear()
         clientFrames.clear()
         clientCloseCode.set(0)
         server = MockWebServer()
@@ -72,17 +84,83 @@ class RemoteStreamMuxTest {
     fun tearDown() {
         runBlocking { muxes.toList().forEach { runCatching { it.close() } } }
         muxes.clear()
+        rawServers.toList().forEach { runCatching { it.close() } }
+        rawServers.clear()
         // 给服务端一点时间感知关闭握手。
         Thread.sleep(150)
         server.close()
     }
 
-    private fun mux(): RemoteStreamMux = RemoteStreamMux(
-        baseUrl = server.url("/").toString().trimEnd('/'),
+    private fun mux(): RemoteStreamMux = muxAt(server.url("/").toString().trimEnd('/'))
+
+    private fun muxAt(baseUrl: String): RemoteStreamMux = RemoteStreamMux(
+        baseUrl = baseUrl,
         deviceId = "dev-42",
         http = http,
         json = DshJson,
     ).also { muxes += it }
+
+    /**
+     * 起一个**裸 TCP** 的 WebSocket 服务端：完成握手、等客户端发出第一帧、然后直接
+     * `close()` 掉 TCP，**不发关闭帧**。
+     *
+     * 为什么需要它：`mockwebserver3` 的 `WebSocket.cancel()` / `close(1001,…)` 实测
+     * 影响不到客户端（客户端收不到任何回调），而复现「桌面端进程退出」这条崩溃路径
+     * 恰恰要求「TCP 断掉、没有关闭帧」。
+     *
+     * 返回 `(服务端 socket, 端口)`；socket 已登记进 [rawServers]，由 [tearDown] 统一关闭
+     *（D8：不能只靠测试体末尾手动 close，断言失败就泄漏了）。
+     */
+    private fun rawWebSocketServerThatDropsTheSocket(): Pair<ServerSocket, Int> {
+        val serverSocket = ServerSocket(0)
+        rawServers += serverSocket
+        val thread = Thread {
+            runCatching {
+                val client = serverSocket.accept()
+                // 超时必须在 accept 之后**立刻**设（D8）：读握手头那一段是无超时循环，
+                // 客户端若连上却不发数据，这个线程会永久阻塞在 read() 并占住一个 FD。
+                client.soTimeout = 5_000
+                try {
+                    // 1) 读握手请求头（到空行为止）。
+                    val input = client.getInputStream()
+                    val header = StringBuilder()
+                    var last4 = ""
+                    while (!last4.endsWith("\r\n\r\n")) {
+                        val b = input.read()
+                        if (b < 0) break
+                        header.append(b.toChar())
+                        last4 = header.takeLast(4).toString()
+                    }
+                    val key = Regex("Sec-WebSocket-Key:\\s*(\\S+)")
+                        .find(header)?.groupValues?.get(1) ?: return@runCatching
+                    val accept = Base64.getEncoder().encodeToString(
+                        MessageDigest.getInstance("SHA-1")
+                            .digest((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").toByteArray()),
+                    )
+                    client.getOutputStream().write(
+                        (
+                            "HTTP/1.1 101 Switching Protocols\r\n" +
+                                "Upgrade: websocket\r\n" +
+                                "Connection: Upgrade\r\n" +
+                                "Sec-WebSocket-Accept: $accept\r\n\r\n"
+                            ).toByteArray(),
+                    )
+                    client.getOutputStream().flush()
+
+                    // 2) 等客户端把 open 帧发过来（说明它已经认定连接可用、`onOpen` 已跑），
+                    //    再断。不读这一帧就断的话，客户端可能还没把 socket 记下来。
+                    runCatching { input.read(ByteArray(1024)) }
+
+                    // 3) 不发关闭帧，直接断 TCP —— 客户端读循环读到流尾抛 EOFException。
+                    client.close()
+                } finally {
+                    runCatching { client.close() }
+                }
+            }
+        }.apply { isDaemon = true }
+        thread.start()
+        return serverSocket to serverSocket.localPort
+    }
 
     /** 装一个升级到 WebSocket 的服务端；[onOpen] 里不要阻塞。 */
     private fun upgrade(onOpen: (WebSocket) -> Unit) {
@@ -146,6 +224,54 @@ class RemoteStreamMuxTest {
         CoroutineScope(Dispatchers.IO).launch {
             runCatching { withTimeout(20_000) { target.open(endpoint).toList() } }
         }
+
+    /**
+     * 复现并钉住本次真机崩溃的**真实逃逸点**（R027 D1）。
+     *
+     * 真机上杀死进程的链条不是「异常从 OkHttp 回调线程逃逸」（OkHttp 的 `loopReader`
+     * 自己 catch 后走 `failWebSocket` → `onFailure`），而是：
+     * `failCarrier` → `channel.close(cause)` → `callbackFlow` 以该 cause 终止 →
+     * **收集协程**在 `Dispatchers.Main.immediate` 上重抛 → `FATAL EXCEPTION: main`。
+     *
+     * 所以真正的修复是收集方那一层 `.catch`，而它此前零覆盖。这条测试用一个带
+     * [CoroutineExceptionHandler] 的 scope 模拟「进程级未捕获异常出口」：
+     *  - 有 `.catch` → 异常被接住，handler 一次都不触发，job 正常结束；
+     *  - 没有 `.catch` → 异常逃到 handler（真机上就是 FATAL）。
+     *
+     * 这是**变异可验证**的：把被测链上的 `.catch` 删掉，本用例立刻失败。
+     */
+    @Test
+    fun collectorWithoutCatchWouldLetTheStreamFailureEscape() = runBlocking {
+        val (_, port) = rawWebSocketServerThatDropsTheSocket()
+        val target = muxAt("http://127.0.0.1:$port")
+
+        val escaped = Collections.synchronizedList(mutableListOf<Throwable>())
+        val handler = CoroutineExceptionHandler { _, cause -> escaped += cause }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + handler)
+        val caught = AtomicInteger(0)
+
+        val job = scope.launch {
+            // 与 `ChatViewModel.watchQuestions()` 同形：`.catch` 接住流的终止异常，
+            // 并原样重抛 `CancellationException`（`onCleared` 取消时不能吞）。
+            target.open("session/control")
+                .catch { cause ->
+                    if (cause is CancellationException) throw cause
+                    caught.incrementAndGet()
+                }
+                .collect { /* 本用例不关心帧 */ }
+        }
+
+        // 等到断流真的被记成故障（此时收集链也已经收到终止 cause）。
+        val sawError = awaitOn(8_000) { target.errors.value.isNotEmpty().takeIf { it } } ?: false
+        assertTrue("8 秒内没有记录断流故障，测试前提不成立", sawError)
+        // 给收集协程一点时间把 cause 走到 `.catch`（或逃到 handler）。
+        withContext(Dispatchers.IO) { job.join() }
+
+        assertEquals("异常逃出了收集协程（真机上就是 FATAL EXCEPTION: main）", 0, escaped.size)
+        assertTrue("`.catch` 没有被触发，说明流的终止原因没有走到收集方", caught.get() >= 1)
+        assertTrue("收集协程没有正常结束", job.isCompleted)
+        scope.cancel()
+    }
 
     @Test
     fun handshakeUrlCarriesDeviceQueryParameter() = runBlocking {
@@ -526,5 +652,60 @@ class RemoteStreamMuxTest {
         // 新的在前 ⇒ id 递减。
         assertTrue(errors[0].id > errors[1].id)
         assertTrue(errors[1].id > errors[2].id)
+    }
+
+    /**
+     * 服务端**不发关闭帧直接断 TCP**时必须被当成一次普通故障，而不是杀死进程。
+     *
+     * 真机实录（OnePlus PKG110 / Android 16）：桌面端进程退出后点开会话，25 秒后
+     * `java.io.EOFException` 从 `RealWebSocket.loopReader → WebSocketReader.processNextFrame`
+     * 冒出来；OkHttp 的 `loopReader` 自己 catch 后走 `failWebSocket(e, null)` → `onFailure`
+     * → `failCarrier` → `channel.close(cause)` → 收集协程在 `Dispatchers.Main.immediate`
+     * 上重抛 → `FATAL EXCEPTION: main` + 进程死 —— 用户看到「点开一个对话软件自动退出」。
+     *
+     * **为什么不用 MockWebServer**：实测 `mockwebserver3` 的 `WebSocket.cancel()` 与
+     * `WebSocket.close(1001, …)` 都影响不到客户端（`framesIn` 恒 0、carrier 停在
+     * `Connected`，等满 15 s 没有任何回调），复现不出「无关闭帧的 TCP 断流」。
+     * 所以这里自己起一个**裸 socket 服务端**：完成 WS 握手、等客户端发出 open 帧、
+     * 然后 `close()` 掉 TCP —— 与桌面端进程退出时完全同一条路径。
+     *
+     * ⚠️ **这条测试只覆盖 mux 层**（D1）：本缺陷真正的逃逸点是 `ChatViewModel.watchQuestions()`
+     * 缺 `.catch`，异常在**收集方**的 `Dispatchers.Main.immediate` 上重抛。把那个 `.catch`
+     * 删掉，这条测试照样绿。收集方那一层目前**没有测试守护**（仓库里没有 `ChatViewModelTest`），
+     * 见 `docs/dev/测试记录.md` 的覆盖缺口。
+     */
+    @Test
+    fun serverDroppingTheSocketWithoutACloseFrameIsRecordedAsAFailureNotACrash() = runBlocking {
+        val (_, port) = rawWebSocketServerThatDropsTheSocket()
+        val target = muxAt("http://127.0.0.1:$port")
+
+        val job = collectAsync(target, "workspace/follow")
+        // `.takeIf { it }` 不能省：[pollUntil] 的契约是「返回第一个**非 null** 值」，
+        // 而 `false` 是非 null —— 漏掉这一层会让第一次轮询就带着 `false` 返回，
+        // 断言看到的是初始状态（实测 `carrier=Idle`，看起来像「断流没被记录」）。
+        //
+        // 预算取 8s 而不是 15s（D2）：`HANDSHAKE_TIMEOUT_MS` 恰好是 15s，用 15s 会让
+        // 「裸服务端没握手成功、客户端干等超时」这条**完全不同的路径**也通过，
+        // 而且是边界 flaky。真实断流实测在毫秒级回来，8s 是数量级的余量。
+        val sawError = awaitOn(8_000) { target.errors.value.isNotEmpty().takeIf { it } } ?: false
+        val failed = target.stats.value
+        job.cancel()
+
+        assertTrue(
+            "8 秒内没有把断流记成故障：carrier=${failed.carrier} " +
+                "opens=${failed.opens} framesIn=${failed.framesIn} framesOut=${failed.framesOut}",
+            sawError,
+        )
+        // 只有「握手真的成功、客户端真的发出了 open 帧之后才断」才满足（D2）。
+        // 没有这两条，握手超时（同 CODE_TRANSPORT、carrier 停在 Connecting）与
+        // 握手被拒（同 CODE_TRANSPORT）都会让上面的断言通过 —— 假阳性。
+        assertEquals("升级没有成功，走的不是断流路径", 1L, failed.opens)
+        assertTrue("客户端没有发出 open 帧：framesOut=${failed.framesOut}", failed.framesOut >= 1L)
+        assertTrue("实际 carrier=${failed.carrier}", failed.carrier !is CarrierState.Connected)
+        // 断流是 transport 级故障，不是 unpaired（后者会走「重新配对」终态）。
+        assertEquals(
+            TypertException.CODE_TRANSPORT,
+            target.errors.value.first().code,
+        )
     }
 }

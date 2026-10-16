@@ -533,42 +533,84 @@ class ChatViewModel(
     private fun watchQuestions() {
         refreshQuestions()
         controlJob = viewModelScope.launch {
-            projections.control().collect { frame ->
-                when (frame) {
-                    is SessionProjectionRepository.ProjectionFrame.Projection -> {
-                        if (frame.sessionId != sessionId) return@collect
-                        when (frame.key) {
-                            KEY_USER_QUESTIONS -> applyQuestions(
-                                SessionProjectionParser.questions(frame.value),
-                            )
-
-                            KEY_PERMISSIONS -> {
-                                _permission.value = SessionProjectionParser.permission(frame.value)
-                                _state.value = ChatReducer.applyPermissionProjection(
-                                    _state.value,
-                                    _permission.value?.preset,
+            projections.control()
+                // 断线后必须**自己重订**。mux 上所有流共享一条 WebSocket，载体一断
+                // `failCarrier` 就用同一个 cause 关掉全部流的 Channel；`callbackFlow` 把它
+                // 作为**流的终止原因**抛给收集方。而 [watchQuestions] 只在 `init` 里调一次，
+                // `start()`（`session/follow`）重连的是它自己那条流，**不会**重订 control ——
+                // 所以这里不重试就等于「这条会话的实时投影永久失效」：桌面端把问题答掉之后，
+                // 手机端不会消失卡片，只能等下一次 `questionSignal` 或生成中轮询兜底。
+                .retryWhen { cause, attempt ->
+                    if (cause is TypertException && cause.isUnpaired) {
+                        // 凭证失效：重试只会每 30s 打一次 403，交给「重新配对」出口。
+                        // 与 [start] 一致，把 unpaired 投影到载波（全局状态条是唯一出口）。
+                        connection.mux.noteRetry(describe(cause), 0L, unpaired = true)
+                        false
+                    } else {
+                        val backoffMs = backoffMillis(attempt)
+                        // 与 [start] / `HomeViewModel` / `RemoteEventsClient` 一致：重试计划
+                        // 由持有它的一方汇报给 mux，否则状态条会停在「已连接」而实际在退避。
+                        connection.mux.noteRetry(describe(cause), backoffMs)
+                        delay(backoffMs)
+                        true
+                    }
+                }
+                // 🔴 必须接住流的终止异常，**这就是真机崩溃的修复点**。
+                // 真机实录（OnePlus PKG110，点开会话 25s 后）：桌面端进程退出让 TCP 断开且
+                // 没有关闭帧，OkHttp 读循环抛 `java.io.EOFException`，`loopReader` 自己 catch
+                // 后走 `failWebSocket` → `MuxListener.onFailure` → `RemoteStreamMux.failCarrier`
+                // 用**同一个 cause** 关闭所有流的 Channel；`callbackFlow` 把它当作**流的终止
+                // 原因**抛给收集方。这里原本没有 `.catch`，而 `viewModelScope` 是
+                // `Dispatchers.Main.immediate` → 异常逃出协程 → `FATAL EXCEPTION: main`
+                // → 进程死。用户看到的就是「点开一个对话软件自动退出」。
+                //
+                // ⚠️ `RemoteStreamMux.MuxListener` 那层 `runCatching` **挡不住这条路径**
+                //（异常不从 OkHttp 回调线程逃逸），它只是纵深防御。所以每个 `mux.open()`
+                // 的消费方都必须自己 `.catch` —— 这条不变式写在 `RemoteStreamMux.open()` 的 KDoc 里。
+                .catch { cause ->
+                    if (cause is kotlinx.coroutines.CancellationException) throw cause
+                    // 不写 `_questionError`：这是**连接级**故障，横幅已经由 carrier 状态条
+                    // 承担，再写一条会把「投影读不到」和「断线了」混成同一句话。
+                    // 走到这里只剩两种：`unpaired`（`retryWhen` 主动放弃，交给重新配对出口）
+                    // 和 `ViewModel.onCleared` 的取消（已被上面重抛）。普通断线在上面的
+                    // `retryWhen` 里就退避重试了，不会到这里。
+                }
+                .collect { frame ->
+                    when (frame) {
+                        is SessionProjectionRepository.ProjectionFrame.Projection -> {
+                            if (frame.sessionId != sessionId) return@collect
+                            when (frame.key) {
+                                KEY_USER_QUESTIONS -> applyQuestions(
+                                    SessionProjectionParser.questions(frame.value),
                                 )
+
+                                KEY_PERMISSIONS -> {
+                                    _permission.value = SessionProjectionParser.permission(frame.value)
+                                    _state.value = ChatReducer.applyPermissionProjection(
+                                        _state.value,
+                                        _permission.value?.preset,
+                                    )
+                                }
                             }
                         }
-                    }
 
-                    is SessionProjectionRepository.ProjectionFrame.Baseline -> {
-                        // baseline 只含桌面端当前选中会话，所以绝大多数时候这里是空操作。
-                        val values = (frame.projections[sessionId] as? JsonObject)
-                            ?.get("values") as? JsonObject
-                        if (values != null) {
-                            userQuestionsOf(values)?.let { applyQuestions(it) }
-                            permissionOf(values)?.let { found ->
-                                _permission.value = found
-                                _state.value = ChatReducer.applyPermissionProjection(
-                                    _state.value,
-                                    found.preset,
-                                )
+                        is SessionProjectionRepository.ProjectionFrame.Baseline -> {
+                            // baseline 只含桌面端当前选中会话，所以绝大多数时候这里是空操作。
+                            val values = (frame.projections[sessionId] as? JsonObject)
+                                ?.get("values") as? JsonObject
+                            if (values != null) {
+                                userQuestionsOf(values)?.let { applyQuestions(it) }
+                                permissionOf(values)?.let { found ->
+                                    _permission.value = found
+                                    _state.value = ChatReducer.applyPermissionProjection(
+                                        _state.value,
+                                        found.preset,
+                                    )
+                                }
                             }
                         }
                     }
                 }
-            }
         }
         viewModelScope.launch {
             // waterfall 帧一到就**同步**铺默认草稿，不能只等 refreshQuestions() 的 unary

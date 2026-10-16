@@ -121,6 +121,24 @@ class RemoteStreamMux(
      * 冷流：每收集一次就新开一条服务端流；收集结束或协程取消时，若该流未正常
      * 终止则自动发 `cancel`（对应 `client.js:417-420`）。服务端 `end` 正常结束，
      * `error` 抛出 [TypertException]。
+     *
+     * 🔴 **调用方必须给收集链加 `.catch`**（并原样重抛 `CancellationException`）。
+     * 这不是可选的防御，而是本类与调用方之间的硬性契约：
+     *  - 载体一断，[failCarrier] 会用**同一个 cause** 关闭所有流的 Channel
+     *    （`channels.forEach { it.close(cause) }`），`callbackFlow` 把它当作**流的终止原因**
+     *    抛给收集方；
+     *  - 收集方通常在 `viewModelScope`（`Dispatchers.Main.immediate`）上，未接住的异常
+     *    直接变成 `FATAL EXCEPTION: main` + 进程死。
+     *
+     * 真机实录（OnePlus PKG110 / Android 16）：桌面端进程退出 → TCP 断开且**没有关闭帧**
+     * → OkHttp 读循环抛 `java.io.EOFException`（栈顶
+     * `RealWebSocket.loopReader → WebSocketReader.processNextFrame`）→ `loopReader` 自己
+     * catch 后走 `failWebSocket(e, null)` → [MuxListener.onFailure] → `failCarrier` →
+     * `live.deferred.completeExceptionally` + `channel.close(cause)` → 收集方在 Main 上重抛
+     * → 用户看到「点开一个对话就自动退出」。
+     *
+     * 注意 `MuxListener` 那层 `runCatching` **挡不住这条路径**（异常并不从 OkHttp 回调线程
+     * 逃逸），所以第 N 个消费方漏写 `.catch` 就会重新引入同一个进程崩溃。
      */
     fun open(endpoint: String, args: JsonObject = JsonObject(emptyMap())): Flow<JsonElement> =
         callbackFlow {
@@ -431,6 +449,16 @@ class RemoteStreamMux(
         }
     }
 
+    /**
+     * OkHttp 的 WebSocket 回调。
+     *
+     * **五个覆写全部自己接住异常**（`onOpen` / `onMessage(String)` / `onMessage(ByteString)`
+     * / `onFailure` / `onClosed`）。这是**纵深防御**，不是某次具体崩溃的修复点：真机上
+     * 杀死进程的是另一条路径（见 [open] 的 KDoc），异常经流的终止原因传到收集协程后
+     * 在 `Dispatchers.Main.immediate` 上重抛。这一层挡的是「回调体自身抛异常」——
+     * 例如 `_stats.update` 或 `recordFailure` 内部的意外，那会让 OkHttp 的回调线程
+     * 直接崩，比协程里崩更早、更难归因。
+     */
     private inner class MuxListener(private val live: Attempt) : WebSocketListener() {
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -438,51 +466,73 @@ class RemoteStreamMux(
             // 已被握手超时或已结束的故障作废。迟到的 socket 在这里就关掉，绝不让它覆盖
             // 后继连接（R006 P1-1 / P2-2）。两道门合起来保证了「同代际的旧 socket 覆盖新
             // socket」不可达：作废一定会递增 generation 或置 dead。
-            if (live.generation != generation || live.dead) {
-                webSocket.close(1000, "stale generation")
-                return
-            }
-            socket = webSocket
-            if (attempt === live) attempt = null
-            live.deferred.complete(webSocket)
-            // 连上了：故障计数归零。不清 [_errors]——调试页需要看到「曾经失败过几次」。
-            _stats.update {
-                it.copy(
-                    opens = it.opens + 1L,
-                    carrier = CarrierState.Connected(System.currentTimeMillis()),
-                    lastFailure = null,
-                    consecutiveFailures = 0L,
-                )
+            runCatching {
+                if (live.generation != generation || live.dead) {
+                    webSocket.close(1000, "stale generation")
+                    return
+                }
+                socket = webSocket
+                if (attempt === live) attempt = null
+                live.deferred.complete(webSocket)
+                // 连上了：故障计数归零。不清 [_errors]——调试页需要看到「曾经失败过几次」。
+                _stats.update {
+                    it.copy(
+                        opens = it.opens + 1L,
+                        carrier = CarrierState.Connected(System.currentTimeMillis()),
+                        lastFailure = null,
+                        consecutiveFailures = 0L,
+                    )
+                }
+            }.onFailure { cause ->
+                // 兜底（D6）：这层 `runCatching` 里的语句实际都不抛，但一旦真抛了，
+                // 不处理会让等待方干等到 `HANDSHAKE_TIMEOUT_MS` 并**被记成一条假的握手超时**
+                // （`waitForSocket` 的超时分支只看「等不到 deferred」，不知道握手其实成功了）。
+                // 这里立刻把失败交给 `failCarrier`：唤醒等待者、让所有流以真原因结束，
+                // 而不是 15 秒后以一个编造的「握手超时」收场。
+                //
+                // 只在 `deferred` 还没完成时才作废：`complete()` 一旦成功，这条 socket 就是
+                // 可用的，后续 `_stats.update` 抛异常不该反过来把健康连接拆掉。
+                noteCallbackCrash(cause)
+                if (!live.deferred.isCompleted) failCarrier(live, cause)
             }
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
-            if (live.generation != generation || live.dead) return
-            _stats.update { it.copy(framesIn = it.framesIn + 1L) }
+            runCatching {
+                if (live.generation != generation || live.dead) return
+                _stats.update { it.copy(framesIn = it.framesIn + 1L) }
 
-            // 1) 先严格校验帧形状 —— 与 `client.js:585` 完全同序：parseRemoteStreamServerMessage
-            //    先抛错，之后才做 streamId 查表。非法帧（含未知 type）必须 4002 关闭整条连接，
-            //    即使它的 streamId 本机并不认识。
-            val frame = validate(text) ?: run {
-                _stats.update { it.copy(invalidFrames = it.invalidFrames + 1L) }
-                failCarrier(
-                    live,
-                    TypertException(TypertException.CODE_INVALID_STREAM_FRAME, INVALID_FRAME_REASON),
-                )
-                webSocket.close(MuxFrame.CLOSE_INVALID_FRAME, INVALID_FRAME_REASON)
-                return
-            }
+                // 1) 先严格校验帧形状 —— 与 `client.js:585` 完全同序：parseRemoteStreamServerMessage
+                //    先抛错，之后才做 streamId 查表。非法帧（含未知 type）必须 4002 关闭整条连接，
+                //    即使它的 streamId 本机并不认识。
+                val frame = validate(text) ?: run {
+                    _stats.update { it.copy(invalidFrames = it.invalidFrames + 1L) }
+                    // 顺序（D5）：**先 close(4002) 再 failCarrier**。反过来的话，`failCarrier`
+                    // 一旦抛异常（`recordFailure` 内部），4002 就永远发不出去，而 `failCarrier`
+                    // 已经把 `socket = null` 丢掉引用——socket 既不关闭也不可达 = 连接泄漏，
+                    // 且异常会被外层 `runCatching` 静默吞掉。协议要求「认不出的帧必须 4002 关闭」，
+                    // 这条不该被一个诊断计数路径的意外挡住。
+                    webSocket.close(MuxFrame.CLOSE_INVALID_FRAME, INVALID_FRAME_REASON)
+                    failCarrier(
+                        live,
+                        TypertException(TypertException.CODE_INVALID_STREAM_FRAME, INVALID_FRAME_REASON),
+                        // 关闭帧刚发出去，别 cancel 掉它（见 failCarrier 的 @param）。
+                        cancelSocket = false,
+                    )
+                    return
+                }
 
-            // 2) 再查表；未知 streamId 静默忽略（`client.js:586-587`）。
-            val channel = streams[frame.streamId] ?: run {
-                _stats.update { it.copy(orphanFrames = it.orphanFrames + 1L) }
-                return
-            }
-            when (frame) {
-                is ServerFrame.Item -> channel.trySend(MuxEvent.Item(frame.value))
-                is ServerFrame.End -> channel.trySend(MuxEvent.End)
-                is ServerFrame.Error -> channel.trySend(MuxEvent.Error(frame.code, frame.message, frame.details))
-            }
+                // 2) 再查表；未知 streamId 静默忽略（`client.js:586-587`）。
+                val channel = streams[frame.streamId] ?: run {
+                    _stats.update { it.copy(orphanFrames = it.orphanFrames + 1L) }
+                    return
+                }
+                when (frame) {
+                    is ServerFrame.Item -> channel.trySend(MuxEvent.Item(frame.value))
+                    is ServerFrame.End -> channel.trySend(MuxEvent.End)
+                    is ServerFrame.Error -> channel.trySend(MuxEvent.Error(frame.code, frame.message, frame.details))
+                }
+            }.onFailure { noteCallbackCrash(it) }
         }
 
         /**
@@ -494,24 +544,76 @@ class RemoteStreamMux(
          * 二进制帧会被无声吞掉，连接状态仍显示健康（R006 P2-7）。
          */
         override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-            if (live.generation != generation || live.dead) return
-            _stats.update { it.copy(framesIn = it.framesIn + 1L, invalidFrames = it.invalidFrames + 1L) }
-            failCarrier(
-                live,
-                TypertException(TypertException.CODE_INVALID_STREAM_FRAME, INVALID_FRAME_REASON),
-            )
-            webSocket.close(MuxFrame.CLOSE_INVALID_FRAME, INVALID_FRAME_REASON)
+            runCatching {
+                if (live.generation != generation || live.dead) return
+                _stats.update { it.copy(framesIn = it.framesIn + 1L, invalidFrames = it.invalidFrames + 1L) }
+                // 同文本分支：先 4002 再 failCarrier（D5）。
+                webSocket.close(MuxFrame.CLOSE_INVALID_FRAME, INVALID_FRAME_REASON)
+                failCarrier(
+                    live,
+                    TypertException(TypertException.CODE_INVALID_STREAM_FRAME, INVALID_FRAME_REASON),
+                )
+            }.onFailure { noteCallbackCrash(it) }
         }
 
+        /**
+         * 连接失败 / 连接被对端关闭。
+         *
+         * `EOFException` 是**最常见的一种 `t`**：服务端进程退出或代理断流时，OkHttp 的读循环
+         * 在没收到关闭帧的情况下读到流尾，就抛 `EOFException` 并回调这里。
+         *
+         * ⚠️ OkHttp **自己**会 catch 读循环里的异常再走 `failWebSocket(e, null)` 进来，
+         * 所以这里不是「异常从 OkHttp 回调线程逃逸」的入口。真机上杀死进程的链条是
+         * `failCarrier` → `deferred.completeExceptionally` + `channel.close(cause)` →
+         * 收集协程在 Main 上重抛（见 [open] 的 KDoc）。本方法的 `runCatching` 只防
+         * `failCarrier` 自身抛异常。
+         */
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            failCarrier(live, handshakeFailure(t, response))
+            runCatching { failCarrier(live, handshakeFailure(t, response)) }
+                .onFailure { noteCallbackCrash(it) }
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            failCarrier(
-                live,
-                TypertException(TypertException.CODE_TRANSPORT, "WebSocket 已关闭：$code $reason"),
-            )
+            runCatching {
+                failCarrier(
+                    live,
+                    TypertException(TypertException.CODE_TRANSPORT, "WebSocket 已关闭：$code $reason"),
+                )
+            }.onFailure { noteCallbackCrash(it) }
+        }
+    }
+
+    /**
+     * 记录一次「WebSocket 回调体自己抛了异常」（D4）。
+     *
+     * 为什么不直接 `Log.w`：本工程**只有** `core/credentials/KeystoreCredentialStore.kt`
+     * 允许 `import android.util.Log`（JVM 单测里 `android.util.Log` 是 not-mocked 的桩，
+     * 在会被单测走到的代码路径上调它会直接让测试炸）。这个类恰恰是单测覆盖最密的一个。
+     *
+     * 所以走本工程自己的可观测通道：塞进调试页的故障环（`_errors`）。
+     * 只改 `_errors`、**不碰** `_stats.failures` 与 `consecutiveFailures`：
+     * 这两项由 [recordFailure] 维护，语义是「载波失败次数」；回调体自身抛异常是
+     * 编程错误而不是链路故障，混进去会让「第 N 次失败」的退避提示失真。
+     *
+     * 自身全程 `runCatching`：这个函数的唯一职责是「不要让一个已经在兜底的路径
+     * 再抛出新的异常」。
+     */
+    private fun noteCallbackCrash(cause: Throwable) {
+        runCatching {
+            val now = System.currentTimeMillis()
+            val summary = "WebSocket 回调异常：${cause.javaClass.simpleName}：${cause.message ?: ""}"
+            _errors.update { previous ->
+                (
+                    listOf(
+                        MuxError(
+                            id = errorSeq.incrementAndGet(),
+                            atMillis = now,
+                            summary = summary,
+                            code = TypertException.CODE_TRANSPORT,
+                        ),
+                    ) + previous
+                    ).take(ERROR_RING_SIZE)
+            }
         }
     }
 
@@ -561,8 +663,13 @@ class RemoteStreamMux(
      *
      * 因此顺序是：先按 `generation` / `dead` 判活并**提前返回**；然后只在
      * `socket === live.socket` 时才清 mux 级引用（不能把后来者的 socket 清掉）。
+     *
+     * @param cancelSocket 是否在丢引用时 `cancel()` 掉 socket。默认 `true`（socket 已经
+     *   死了或必须立刻拆掉）。**非法帧路径必须传 `false`**：它刚调用 `close(4002, …)`，
+     *   优雅关闭的帧还在路上，`cancel()` 会把 TCP 立刻拆掉让 4002 发不出去（R027 首跑
+     *   即挂掉两条 4002 用例）。见 [MuxListener.onMessage]。
      */
-    private fun failCarrier(live: Attempt, cause: Throwable) {
+    private fun failCarrier(live: Attempt, cause: Throwable, cancelSocket: Boolean = true) {
         if (live.generation != generation || live.dead) return
         live.dead = true
         // 同一次断线会有多个回调（非法帧 → onClosed、onFailure → onClosed），只记第一条。
@@ -570,6 +677,16 @@ class RemoteStreamMux(
         live.reported = true
         if (socket === live.socket) socket = null
         if (attempt === live) attempt = null
+        // 丢引用必须伴随关闭（D5），但**不能无条件 cancel**：
+        // `WebSocket.close(code, reason)` 是优雅关闭（排入关闭帧、等对端回），紧接着
+        // `cancel()` 会立刻拆掉 TCP，关闭帧根本发不出去——非法帧路径要求「必须以 4002
+        // 关闭整条连接」，无条件 cancel 会让这条协议要求失效（首跑即挂两条 4002 用例）。
+        // 所以只在**放弃一条还活着的 socket**时 cancel；`onFailure`/`onClosed` 路径
+        // 的 socket 本来就已经死了，`close(4002)` 路径的关闭帧正在飞。
+        if (cancelSocket) {
+            live.socket?.cancel()
+        }
+        live.socket = null
         val code = (cause as? TypertException)?.code ?: TypertException.CODE_TRANSPORT
         if (firstReport) recordFailure(code, cause.message ?: cause.javaClass.simpleName)
         live.deferred.completeExceptionally(cause)
