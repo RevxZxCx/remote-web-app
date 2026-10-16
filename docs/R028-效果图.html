@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>R028 界面整改效果图</title>
+<style>
+/* ============================================================
+   设计令牌 —— 与 app 的 Theme.kt / Type.kt / Shape.kt / Motion.kt 逐字对应
+   ============================================================ */
+:root{
+  --primary:#5AA2FF; --onPrimary:#08131F; --primaryContainer:#1B3E63; --onPrimaryContainer:#D3E5FF;
+  --secondary:#7FA8D4; --secondaryContainer:#1D3348; --onSecondaryContainer:#C9DDF2;
+  --background:#0B1420; --onBackground:#E4ECF6;
+  --surface:#111C2B; --onSurface:#E4ECF6;
+  --surfaceVariant:#1A2942; --onSurfaceVariant:#A6BDD8;
+  --outline:#31485F; --outlineVariant:#22334A;
+  --error:#FF8A80; --errorContainer:#48211F; --onErrorContainer:#FFDAD6;
+  --tertiary:#F2C14E; --tertiaryContainer:#4A3A12; --onTertiaryContainer:#FFE7B0;
+  --running:#4ADE80;
+  --r-xs:6px; --r-sm:10px; --r-md:14px; --r-lg:20px; --r-xl:28px; --r-bubble:18px; --r-pill:999px;
+  --t-fast:140ms; --t-med:240ms; --t-slow:360ms;
+  --ease:cubic-bezier(.2,0,0,1);
+  --mono:"Cascadia Mono",Consolas,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:#05080d; color:#8ea3bd;
+  font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+  padding:40px 32px 80px;
+}
+h1{font-size:26px;color:#e4ecf6;font-weight:600;margin-bottom:6px}
+h2{font-size:17px;color:#e4ecf6;font-weight:600;margin:52px 0 4px;padding-top:20px;border-top:1px solid #17212e}
+h2:first-of-type{border-top:none;margin-top:32px}
+.lede{font-size:13px;line-height:1.75;color:#7d90a8;max-width:1100px;margin-bottom:8px}
+.lede b{color:#c3d3e6;font-weight:600}
+code{font-family:var(--mono);font-size:12px;background:#121b27;border:1px solid #1e2a3a;border-radius:4px;padding:1px 5px;color:#9fc0e0}
+.row{display:flex;flex-wrap:wrap;gap:34px;align-items:flex-start;margin-top:22px}
+.col{display:flex;flex-direction:column;gap:10px;align-items:center}
+.caption{font-size:12px;color:#6f8299;letter-spacing:.3px}
+.caption b{color:#a8bdd6;font-weight:600}
+.notes{font-size:12px;line-height:1.8;color:#7d90a8;max-width:360px}
+.notes li{margin-left:16px}
+.notes b{color:#b9cbe0;font-weight:600}
+.notes .k{color:#8fb8e8;font-family:var(--mono);font-size:11px}
+
+/* ---------- 手机外框 ---------- */
+.phone{
+  width:360px;height:853px;background:var(--background);position:relative;overflow:hidden;
+  border-radius:26px;box-shadow:0 0 0 1px #1b2836, 0 24px 60px rgba(0,0,0,.6);
+  display:flex;flex-direction:column;color:var(--onBackground);
+}
+.sbar{height:28px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;flex:0 0 auto;font-size:11px;color:#c8d6e6;font-weight:500}
+.sbar .icons{display:flex;gap:5px;align-items:center;opacity:.9}
+.sbar svg{display:block}
+
+/* ---------- 顶栏 ---------- */
+.topbar{height:64px;flex:0 0 auto;display:flex;align-items:center;padding:0 4px 0 4px;gap:4px;position:relative}
+.iconbtn{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--onSurface);flex:0 0 auto}
+.title{flex:1 1 auto;min-width:0;padding-left:4px}
+.title .l1{font-size:16px;font-weight:600;line-height:22px;letter-spacing:.1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.title .l2{font-size:11px;line-height:15px;letter-spacing:.3px;color:var(--onSurfaceVariant);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ---------- 连接指示器：三态 ---------- */
+/* 状态 A：小圆点 + 光晕 */
+.conn-dot{
+  width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  position:relative;flex:0 0 auto;
+}
+.conn-dot .core{width:8px;height:8px;border-radius:50%;background:var(--running);position:relative;z-index:2}
+.conn-dot .halo{
+  position:absolute;width:22px;height:22px;border-radius:50%;left:9px;top:9px;z-index:1;
+  background:radial-gradient(circle, rgba(74,222,128,.34) 0%, rgba(74,222,128,.14) 45%, rgba(74,222,128,0) 72%);
+  animation:halo 2600ms var(--ease) infinite;
+}
+.conn-dot .ring{
+  position:absolute;width:8px;height:8px;border-radius:50%;left:16px;top:16px;z-index:1;
+  box-shadow:0 0 0 0 rgba(74,222,128,.55);animation:ping 2600ms var(--ease) infinite;
+}
+@keyframes halo{0%{transform:scale(.72);opacity:.85}55%{transform:scale(1.15);opacity:.5}100%{transform:scale(.72);opacity:.85}}
+@keyframes ping{0%{box-shadow:0 0 0 0 rgba(74,222,128,.5)}70%{box-shadow:0 0 0 11px rgba(74,222,128,0)}100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}
+/* 琥珀（重连）与红（未配对）：同结构换色 */
+.amber .core{background:var(--tertiary)}
+.amber .halo{background:radial-gradient(circle, rgba(242,193,78,.36) 0%, rgba(242,193,78,.15) 45%, rgba(242,193,78,0) 72%)}
+.amber .ring{animation:pingA 1600ms var(--ease) infinite}
+@keyframes pingA{0%{box-shadow:0 0 0 0 rgba(242,193,78,.55)}70%{box-shadow:0 0 0 11px rgba(242,193,78,0)}100%{box-shadow:0 0 0 0 rgba(242,193,78,0)}}
+.red .core{background:var(--error)}
+.red .halo{background:radial-gradient(circle, rgba(255,138,128,.34) 0%, rgba(255,138,128,.14) 45%, rgba(255,138,128,0) 72%);animation:none;opacity:.7}
+.red .ring{animation:none;box-shadow:0 0 0 3px rgba(255,138,128,.16)}
+
+/* 状态 B：胶囊 */
+.conn-pill{
+  height:32px;border-radius:var(--r-pill);display:flex;align-items:center;gap:7px;
+  padding:0 12px 0 10px;background:var(--surface);border:1px solid var(--outlineVariant);
+  flex:0 0 auto;font-size:12px;font-weight:500;letter-spacing:.2px;color:var(--onSurface);
+  box-shadow:0 2px 10px rgba(0,0,0,.35);
+}
+.conn-pill .core{width:8px;height:8px;border-radius:50%;background:var(--running);box-shadow:0 0 8px 1px rgba(74,222,128,.5)}
+.conn-pill.amber .core{background:var(--tertiary);box-shadow:0 0 8px 1px rgba(242,193,78,.5)}
+.conn-pill.red .core{background:var(--error);box-shadow:0 0 8px 1px rgba(255,138,128,.45)}
+.conn-pill .mono{font-family:var(--mono);font-size:11px;color:var(--onSurfaceVariant)}
+
+/* 状态 C：下拉面板 */
+.panel{
+  position:absolute;top:70px;right:8px;width:308px;z-index:20;
+  background:var(--surface);border:1px solid var(--outline);border-radius:var(--r-md);
+  box-shadow:0 18px 44px rgba(0,0,0,.62);overflow:hidden;
+}
+.panel .phead{display:flex;align-items:center;gap:9px;padding:13px 14px 11px}
+.panel .phead .core{width:9px;height:9px;border-radius:50%;background:var(--running);box-shadow:0 0 9px 2px rgba(74,222,128,.5)}
+.panel .phead .st{font-size:14px;font-weight:600;color:var(--onSurface);letter-spacing:.2px}
+.panel .phead .since{font-size:11px;color:var(--onSurfaceVariant);font-family:var(--mono);margin-left:auto}
+.panel .prow{display:flex;align-items:baseline;gap:12px;padding:5px 14px}
+.panel .prow .lb{font-size:11.5px;color:var(--onSurfaceVariant);flex:0 0 60px}
+.panel .prow .vl{font-size:11.5px;color:var(--onSurface);font-family:var(--mono);flex:1 1 auto;text-align:right;word-break:break-all;line-height:16px}
+.panel .prow .vl.warn{color:var(--tertiary)}
+.panel .pfoot{display:flex;gap:8px;padding:11px 14px 13px;margin-top:5px;border-top:1px solid var(--outlineVariant)}
+.pbtn{flex:1 1 0;height:34px;border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:500}
+.pbtn.ghost{background:var(--surfaceVariant);color:var(--onSurface);border:1px solid var(--outlineVariant)}
+.pbtn.danger{background:transparent;color:var(--error);border:1px solid var(--error)}
+.scrim{position:absolute;inset:0;background:rgba(4,8,14,.5);z-index:10}
+
+/* ---------- 首页内容 ---------- */
+.list{padding:8px 12px;display:flex;flex-direction:column;gap:8px;overflow:hidden;flex:1 1 auto}
+.wcard{
+  background:var(--surface);border:1px solid var(--outlineVariant);border-radius:var(--r-md);
+  padding:11px 13px;display:flex;align-items:center;gap:11px;
+}
+.wsq{width:36px;height:36px;border-radius:var(--r-sm);background:var(--secondaryContainer);display:flex;align-items:center;justify-content:center;color:var(--onSecondaryContainer);flex:0 0 auto}
+.wmeta{flex:1 1 auto;min-width:0}
+.wmeta .n{font-size:14px;font-weight:600;color:var(--onSurface);line-height:20px}
+.wmeta .p{font-size:11px;color:var(--onSurfaceVariant);line-height:15px;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wmeta .badges{display:flex;gap:6px;margin-top:5px;align-items:center}
+.pillb{height:20px;border-radius:var(--r-pill);background:var(--surfaceVariant);border:1px solid var(--outlineVariant);display:inline-flex;align-items:center;padding:0 8px;font-size:10.5px;color:var(--onSurfaceVariant)}
+.pillb .num{font-family:var(--mono);font-weight:600;color:var(--onSurface);margin-right:3px}
+.pillb.run{border-color:rgba(74,222,128,.4);color:var(--running)}
+.pillb.run .num{color:var(--running)}
+.chev{color:var(--onSurfaceVariant);flex:0 0 auto;display:flex}
+
+/* 生成指示器（GeneratingGlyph SM：三柱均衡器） */
+.glyph{display:flex;align-items:flex-end;gap:2px;height:12px;width:16px}
+.glyph i{width:3px;border-radius:1px;background:var(--running);display:block;animation:eq 600ms ease-in-out infinite}
+.glyph i:nth-child(1){animation-delay:0ms}
+.glyph i:nth-child(2){animation-delay:200ms}
+.glyph i:nth-child(3){animation-delay:400ms}
+@keyframes eq{0%,100%{height:4px}50%{height:12px}}
+
+/* ---------- 聊天页 ---------- */
+.chatlist{flex:1 1 auto;padding:12px;display:flex;flex-direction:column;gap:8px;overflow:hidden}
+.bubble{max-width:270px;border-radius:var(--r-bubble);padding:8px 12px;font-size:14px;line-height:21px;letter-spacing:.2px}
+.bubble.user{align-self:flex-end;background:var(--primaryContainer);color:var(--onPrimaryContainer);border-bottom-right-radius:6px}
+.bubble.user .foot{font-size:11px;line-height:15px;color:rgba(211,229,255,.6);text-align:right;margin-top:3px;font-family:var(--mono)}
+.assist{display:flex;gap:9px;align-self:stretch}
+.assist .rail{width:2px;border-radius:1px;background:rgba(90,162,255,.35);flex:0 0 auto}
+.assist .body{flex:1 1 auto;min-width:0;font-size:14px;line-height:21px;color:var(--onSurface)}
+.assist .body p{margin-bottom:6px}
+.assist .body .m{font-family:var(--mono);font-size:12.5px;background:var(--surfaceVariant);border-radius:4px;padding:1px 4px;color:#cfe1f5}
+.round{display:flex;align-items:center;gap:10px;margin:4px 0}
+.round .ln{height:1px;background:var(--outlineVariant);flex:1 1 auto}
+.round .tx{font-size:11px;color:var(--onSurfaceVariant);letter-spacing:.3px;white-space:nowrap}
+
+/* 折叠分组卡（R015 标准模式） */
+.gcard{background:var(--surface);border:1px solid var(--outlineVariant);border-radius:var(--r-md);overflow:hidden}
+.gcard.fail{border-color:rgba(255,138,128,.5)}
+.ghead{display:flex;align-items:center;gap:9px;padding:10px 12px}
+.ghead .gtitle{flex:1 1 auto;min-width:0;font-size:13px;color:var(--onSurface);line-height:19px}
+.ghead .gcount{font-family:var(--mono);font-size:11px;color:var(--onSurfaceVariant);background:var(--surfaceVariant);border-radius:var(--r-pill);padding:1px 7px;flex:0 0 auto}
+.ghead .state{font-size:11px;color:var(--running);flex:0 0 auto}
+.grow{border-top:1px solid var(--outlineVariant);padding:9px 12px;display:flex;align-items:center;gap:9px}
+.grow .tool{font-family:var(--mono);font-size:11.5px;color:var(--onSurface);background:var(--surfaceVariant);border-radius:4px;padding:1px 6px;flex:0 0 auto}
+.grow .arg{font-family:var(--mono);font-size:11px;color:var(--onSurfaceVariant);flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tag{height:20px;border-radius:var(--r-pill);font-size:10.5px;display:inline-flex;align-items:center;padding:0 8px;flex:0 0 auto}
+.tag.ok{background:rgba(74,222,128,.14);color:var(--running);border:1px solid rgba(74,222,128,.35)}
+.tag.bad{background:rgba(255,138,128,.12);color:var(--error);border:1px solid rgba(255,138,128,.4)}
+.tag.edit{background:var(--secondaryContainer);color:var(--onSecondaryContainer);border:1px solid var(--outlineVariant)}
+.diffline{font-family:var(--mono);font-size:11px;line-height:17px;padding:0 6px;border-radius:3px;white-space:pre;overflow:hidden}
+.diffline.add{background:rgba(74,222,128,.10);color:#9ce8b8}
+.diffline.del{background:rgba(255,138,128,.10);color:#f0a8a2}
+.diffline.ctx{color:var(--onSurfaceVariant)}
+
+/* ---------- 输入框：收起 / 展开 ---------- */
+.composerwrap{flex:0 0 auto;padding:0 12px 12px;position:relative}
+/* 收起态：一行圆角方框，悬浮（有阴影 + 四周留白） */
+.composer{
+  background:var(--surface);border:1px solid var(--outlineVariant);border-radius:26px;
+  box-shadow:0 8px 26px rgba(0,0,0,.5);
+  display:flex;flex-direction:column;
+}
+.composer .r1{display:flex;align-items:center;gap:2px;padding:6px 6px 6px 6px;min-height:52px}
+.plus{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--onSurfaceVariant);flex:0 0 auto}
+.ph{flex:1 1 auto;font-size:14px;color:var(--onSurfaceVariant);padding:0 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sendbtn{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:0 0 auto;background:var(--surfaceVariant);color:var(--onSurfaceVariant)}
+.sendbtn.on{background:var(--primary);color:var(--onPrimary)}
+/* 展开态：同一个 Surface，圆角收到 20，内容向上长 */
+.composer.exp{border-radius:var(--r-lg)}
+.composer.exp .r1{display:block;padding:10px 14px 0}
+.composer.exp .inputtext{font-size:14px;line-height:21px;color:var(--onSurface);min-height:42px}
+.composer.exp .inputtext .caret{display:inline-block;width:1.5px;height:16px;background:var(--primary);vertical-align:-2px;margin-left:1px}
+.composer .attrow{display:flex;gap:6px;padding:10px 12px 0}
+.thumb{width:46px;height:46px;border-radius:var(--r-xs);background:linear-gradient(135deg,#2a4a6e,#1a2942);border:1px solid var(--outlineVariant);position:relative}
+.thumb .x{position:absolute;top:-5px;right:-5px;width:16px;height:16px;border-radius:50%;background:var(--surface);border:1px solid var(--outline);color:var(--onSurfaceVariant);font-size:10px;display:flex;align-items:center;justify-content:center}
+.thumb.file{display:flex;align-items:center;justify-content:center;font-size:16px;color:var(--onSurfaceVariant)}
+/* 展开态底排：操作按钮排在输入框最下面一排，无分隔线 */
+.composer .r2{display:flex;align-items:center;gap:6px;padding:6px 8px 8px 10px}
+.chip{height:30px;border-radius:var(--r-pill);background:var(--surfaceVariant);border:1px solid var(--outlineVariant);display:inline-flex;align-items:center;gap:6px;padding:0 11px;font-size:11.5px;color:var(--onSurface);white-space:nowrap;flex:0 1 auto;min-width:0;overflow:hidden}
+.chip .dt{width:6px;height:6px;border-radius:50%;background:var(--primary);flex:0 0 auto}
+.chip .txt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.chip .mono{font-family:var(--mono);font-size:11px;color:var(--onSurfaceVariant);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.chip .eff{font-family:var(--mono);font-size:10px;background:var(--surface);border:1px solid var(--outlineVariant);border-radius:3px;padding:0 4px;color:var(--onSurfaceVariant);flex:0 0 auto}
+/* 权限：只留图标（用户 m42063 定案）——32dp 圆，级别只在点开的面板里用文字显示 */
+.chip.ic{width:32px;height:32px;padding:0;justify-content:center;gap:0;flex:0 0 auto;position:relative;background:transparent}
+.chip.ic svg{display:block;color:var(--onSurfaceVariant)}
+.chip.ic .badge{
+  position:absolute;top:-4px;right:-4px;min-width:15px;height:15px;border-radius:999px;
+  background:var(--error);color:#2a0f0d;font-size:9.5px;font-weight:700;line-height:15px;
+  text-align:center;padding:0 4px;font-family:var(--mono);
+}
+.chip.ic.urgent{border-color:var(--error)}
+.chip.ic.urgent svg{color:var(--error)}
+.spacer{flex:1 1 auto}
+/* 审批 / 提问占位窗（保持既有能力，仅换容器） */
+.iw{border:1px solid var(--outlineVariant);border-radius:var(--r-lg);background:var(--surfaceVariant);box-shadow:0 8px 26px rgba(0,0,0,.5);overflow:hidden}
+.iw .ihead{display:flex;align-items:center;gap:9px;padding:12px 14px 6px}
+.iw .ihead .ic{width:22px;height:22px;border-radius:50%;background:rgba(242,193,78,.16);color:var(--tertiary);display:flex;align-items:center;justify-content:center;font-size:12px;flex:0 0 auto}
+.iw .ihead .t{font-size:13px;font-weight:500;color:var(--onSurface)}
+.iw .ibody{padding:0 14px 8px;font-size:13px;line-height:19px;color:var(--onSurface)}
+.iw .ibody .sub{font-size:11.5px;color:var(--onSurfaceVariant);margin-top:4px;line-height:17px}
+.iw .iact{display:flex;gap:8px;padding:8px 14px 14px}
+.iw .iact .b{flex:1 1 0;height:40px;border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500}
+.iw .iact .b.pri{background:var(--primary);color:var(--onPrimary)}
+.iw .iact .b.err{background:transparent;border:1px solid var(--error);color:var(--error)}
+
+/* ---------- 提问面板：自适应高度（需求 ③） ---------- */
+.iq{font-size:13.5px;font-weight:500;line-height:20px;color:var(--onSurface)}
+.iq .qn{display:block;font-size:11px;font-weight:400;color:var(--onSurfaceVariant);margin-bottom:2px}
+.iq .idet{display:block;font-size:11.5px;line-height:17px;color:var(--onSurfaceVariant);margin-top:3px;font-weight:400}
+.iopt{
+  display:flex;align-items:flex-start;gap:9px;padding:9px 10px;margin-top:6px;
+  border:1px solid var(--outlineVariant);border-radius:var(--r-sm);background:var(--surface);
+}
+.iopt.on{border-color:var(--primary)}
+.iopt .rd{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--outline);flex:0 0 auto;margin-top:2px;display:flex;align-items:center;justify-content:center}
+.iopt .rd.chk{border-radius:4px}
+.iopt .rd.on{border-color:var(--primary);background:var(--primary)}
+.iopt .rd.on::after{content:'';width:6px;height:6px;border-radius:50%;background:var(--surface)}
+.iopt .rd.chk.on::after{width:8px;height:4px;border-radius:0;border-left:2px solid var(--surface);border-bottom:2px solid var(--surface);background:transparent;transform:rotate(-45deg) translate(1px,-1px)}
+.iopt .ot{display:block;font-size:13px;line-height:19px;color:var(--onSurface)}
+.iopt .od{display:block;font-size:11.5px;line-height:17px;color:var(--onSurfaceVariant);margin-top:1px}
+.iopt>span:last-child{min-width:0;flex:1 1 auto}
+/* 内容超出上限：底部渐隐 + 右侧细滚动条（这两样就是「到这里为止」的可见信号） */
+.ifade{position:relative}
+.ifade::after{content:'';position:absolute;left:0;right:0;bottom:0;height:24px;background:linear-gradient(to bottom,rgba(26,41,66,0),var(--surfaceVariant));pointer-events:none}
+.isbar{position:absolute;right:2px;top:6px;width:3px;border-radius:2px;background:var(--outline)}
+.icap{font-size:10.5px;font-family:var(--mono);color:var(--onSurfaceVariant);text-align:right;padding:2px 4px 0}
+/* 面板高度对照：三档等宽，直接看出来「短的不会撑满」 */
+.hrow{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap}
+.hrow>.col{flex:0 0 auto;width:360px}
+
+/* ---------- 亮色主题对照 ---------- */
+.light{
+  --background:#F4F7FB;--onBackground:#182430;--surface:#FFFFFF;--onSurface:#182430;
+  --surfaceVariant:#E9EFF7;--onSurfaceVariant:#45586D;--outline:#B9C8D9;--outlineVariant:#DCE5EF;
+  --primary:#1F6FEB;--onPrimary:#FFFFFF;--primaryContainer:#D8E6FF;--onPrimaryContainer:#10305C;
+  --secondaryContainer:#DCE8F6;--onSecondaryContainer:#1B3247;--error:#B3261E;--tertiary:#F2C14E;
+  --running:#15803D;
+}
+/* 亮色下光晕换色 */
+.light .conn-dot .core{background:var(--running)}
+.light .conn-dot .halo{background:radial-gradient(circle, rgba(21,128,61,.30) 0%, rgba(21,128,61,.12) 45%, rgba(21,128,61,0) 72%)}
+.light .conn-dot .ring{animation:pingL 2600ms var(--ease) infinite}
+@keyframes pingL{0%{box-shadow:0 0 0 0 rgba(21,128,61,.45)}70%{box-shadow:0 0 0 11px rgba(21,128,61,0)}100%{box-shadow:0 0 0 0 rgba(21,128,61,0)}}
+.light .conn-pill .core{background:var(--running);box-shadow:0 0 8px 1px rgba(21,128,61,.45)}
+.light .glyph i{background:var(--running)}
+.light .panel .phead .core{background:var(--running);box-shadow:0 0 9px 2px rgba(21,128,61,.4)}
+.light .assist .rail{background:rgba(31,111,235,.3)}
+.light .tag.ok{background:rgba(21,128,61,.10);color:var(--running);border-color:rgba(21,128,61,.3)}
+.light .pillb.run{border-color:rgba(21,128,61,.35);color:var(--running)}
+.light .pillb.run .num{color:var(--running)}
+.zoombar{width:360px;background:var(--background);border-radius:14px;border:1px solid #1b2836;overflow:hidden}
+.light .zoombar{border-color:#c9d6e5}
+/* 单节截图模式：?only=s1 只保留该节 */
+body.only section{display:none}
+body.only section.keep{display:block}
+body.only h1,body.only .lede.top{display:none}
+</style>
+</head>
+<body>
+
+<h1>R028 界面整改 · 效果图</h1>
+<p class="lede top">
+  四块改动：<b>①</b> 首页连接横幅 → 收进顶栏的三态胶囊（圆点 / 胶囊 / 详情面板）；<b>②</b> 会话页与首页风格统一（同一套卡片、导轨、等宽数字），并修好<b>首页会话抽屉</b>的系统返回键；<b>③</b> 答题面板高度自适应（选项多时自动展开，超上限才滚动）；<b>④</b> 输入框重构为「悬浮单行圆角框 ↔ 向上展开、操作按钮落在最下面一排」。<br>
+  全部取值来自现有设计令牌（<code>Theme.kt</code> / <code>Type.kt</code> / <code>Shape.kt</code> / <code>Motion.kt</code>），深浅两套主题都跟随。<b>以下均为静态效果图，尚未写任何代码。</b>
+</p>
+
+<!-- ============================================================ -->
+<section id="s1">
+<h2>① 顶栏连接指示器 · 三态</h2>
+<p class="lede">
+  横幅整条消失，改成一个 <b>40dp 触控区</b> 的指示器，放在顶栏右侧「更多」按钮左边。颜色语义沿用现在的设定：<b>绿＝已连接</b>、<b>琥珀＝连接中/重连中</b>、<b>红＝配对失效</b>。<br>
+  三个状态的切换是连续动画：圆点横向展开成胶囊（宽度 + 文字淡入，140ms）→ 胶囊向下展开成面板（从右上角缩放 + 淡入，240ms）。再次点击或点面板外任意处收起。
+</p>
+<div class="row">
+
+  <div class="col">
+    <div class="phone">
+      <div class="sbar"><span>16:10</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar">
+        <div class="iconbtn">☰</div>
+        <div class="title"><div class="l1">远程 Web</div><div class="l2">工作区 6 · 会话 58</div></div>
+        <div class="conn-dot"><div class="halo"></div><div class="ring"></div><div class="core"></div></div>
+        <div class="iconbtn">⋮</div>
+      </div>
+      <div class="list">
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">Irok</div><div class="p">F:\Irok</div><div class="badges"><span class="pillb"><span class="num">2</span>会话</span></div></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">new work</div><div class="p">F:\new work</div><div class="badges"><span class="pillb"><span class="num">1</span>会话</span><span class="pillb"><span class="num">1</span>归档</span></div></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">bot</div><div class="p">F:\bot</div><div class="badges"><span class="pillb"><span class="num">9</span>会话</span><span class="pillb"><span class="num">4</span>归档</span></div></div><div class="glyph"><i></i><i></i><i></i></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">AstaPS</div><div class="p">F:\Asta\AstaPS</div><div class="badges"><span class="pillb"><span class="num">4</span>会话</span></div></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">test</div><div class="p">F:\vm</div><div class="badges"><span class="pillb"><span class="num">8</span>会话</span><span class="pillb"><span class="num">6</span>归档</span></div></div><div class="chev">›</div></div>
+      </div>
+    </div>
+    <div class="caption"><b>状态 A · 收起</b>　一个小圆点，带光晕呼吸</div>
+  </div>
+
+  <div class="col">
+    <div class="phone">
+      <div class="sbar"><span>16:10</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar">
+        <div class="iconbtn">☰</div>
+        <div class="title"><div class="l1">远程 Web</div><div class="l2">工作区 6 · 会话 58</div></div>
+        <div class="conn-pill"><span class="core"></span>已连接</div>
+        <div class="iconbtn">⋮</div>
+      </div>
+      <div class="list">
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">Irok</div><div class="p">F:\Irok</div><div class="badges"><span class="pillb"><span class="num">2</span>会话</span></div></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">new work</div><div class="p">F:\new work</div><div class="badges"><span class="pillb"><span class="num">1</span>会话</span><span class="pillb"><span class="num">1</span>归档</span></div></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">bot</div><div class="p">F:\bot</div><div class="badges"><span class="pillb"><span class="num">9</span>会话</span><span class="pillb"><span class="num">4</span>归档</span></div></div><div class="glyph"><i></i><i></i><i></i></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">AstaPS</div><div class="p">F:\Asta\AstaPS</div><div class="badges"><span class="pillb"><span class="num">4</span>会话</span></div></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">test</div><div class="p">F:\vm</div><div class="badges"><span class="pillb"><span class="num">8</span>会话</span><span class="pillb"><span class="num">6</span>归档</span></div></div><div class="chev">›</div></div>
+      </div>
+    </div>
+    <div class="caption"><b>状态 B · 展开成胶囊</b>　圆点 + 状态文字</div>
+  </div>
+
+  <div class="col">
+    <div class="phone">
+      <div class="scrim"></div>
+      <div class="sbar"><span>16:10</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar">
+        <div class="iconbtn">☰</div>
+        <div class="title"><div class="l1">远程 Web</div><div class="l2">工作区 6 · 会话 58</div></div>
+        <div class="conn-pill"><span class="core"></span>已连接</div>
+        <div class="iconbtn">⋮</div>
+      </div>
+      <div class="list">
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">Irok</div><div class="p">F:\Irok</div><div class="badges"><span class="pillb"><span class="num">2</span>会话</span></div></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">new work</div><div class="p">F:\new work</div><div class="badges"><span class="pillb"><span class="num">1</span>会话</span><span class="pillb"><span class="num">1</span>归档</span></div></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">bot</div><div class="p">F:\bot</div><div class="badges"><span class="pillb"><span class="num">9</span>会话</span><span class="pillb"><span class="num">4</span>归档</span></div></div><div class="chev">›</div></div>
+      </div>
+      <div class="panel">
+        <div class="phead"><span class="core"></span><span class="st">已连接</span><span class="since">3 分 12 秒</span></div>
+        <div class="prow"><span class="lb">地址</span><span class="vl">127.0.0.1:19387</span></div>
+        <div class="prow"><span class="lb">设备</span><span class="vl">da738b…5c09</span></div>
+        <div class="prow"><span class="lb">通道</span><span class="vl">已就绪</span></div>
+        <div class="prow"><span class="lb">收到帧</span><span class="vl">1 284</span></div>
+        <div class="prow"><span class="lb">发出帧</span><span class="vl">96</span></div>
+        <div class="prow"><span class="lb">最近故障</span><span class="vl">无</span></div>
+        <div class="pfoot"><span class="pbtn ghost">重试</span><span class="pbtn ghost">诊断</span></div>
+      </div>
+    </div>
+    <div class="caption"><b>状态 C · 向下展开详情面板</b>　远程连接情况</div>
+  </div>
+
+  <div class="col">
+    <div class="phone">
+      <div class="sbar"><span>16:10</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar">
+        <div class="iconbtn">☰</div>
+        <div class="title"><div class="l1">远程 Web</div><div class="l2">工作区 6 · 会话 58</div></div>
+        <div class="conn-pill amber"><span class="core"></span>重连中… 18s</div>
+        <div class="iconbtn">⋮</div>
+      </div>
+      <div class="list">
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">Irok</div><div class="p">F:\Irok</div><div class="badges"><span class="pillb"><span class="num">2</span>会话</span></div></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">new work</div><div class="p">F:\new work</div><div class="badges"><span class="pillb"><span class="num">1</span>会话</span><span class="pillb"><span class="num">1</span>归档</span></div></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">bot</div><div class="p">F:\bot</div><div class="badges"><span class="pillb"><span class="num">9</span>会话</span><span class="pillb"><span class="num">4</span>归档</span></div></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">AstaPS</div><div class="p">F:\Asta\AstaPS</div><div class="badges"><span class="pillb"><span class="num">4</span>会话</span></div></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">test</div><div class="p">F:\vm</div><div class="badges"><span class="pillb"><span class="num">8</span>会话</span><span class="pillb"><span class="num">6</span>归档</span></div></div><div class="chev">›</div></div>
+        <div class="wcard"><div class="wsq">›</div><div class="wmeta"><div class="n">default-workspace</div><div class="p">…\deepseek-harness\default-workspace</div><div class="badges"><span class="pillb"><span class="num">7</span>会话</span></div></div><div class="chev">›</div></div>
+      </div>
+    </div>
+    <div class="caption"><b>重连态</b>　胶囊带倒计时，圆点转琥珀</div>
+  </div>
+
+</div>
+<div class="row">
+  <div class="notes">
+    <b>为什么这样更好</b>
+    <ul>
+      <li>横幅整条占 32dp 高、永远压在列表上方；收进顶栏后列表多出一整行，且「连接」这件事本来就属于全局顶栏。</li>
+      <li>三级信息密度：<b>不打扰</b>（圆点）→ <b>想知道状态</b>（胶囊）→ <b>要排查</b>（面板）。原来是一上来就把全部细节摊在脸上。</li>
+      <li>面板里的内容就是诊断页的核心几项（地址 / 设备 / 通道 / 帧数 / 最近故障），日常排查不用再进诊断页。</li>
+      <li>「重试」「诊断」留在面板底部；<b>配对失效时</b>换成红点 + 面板里一个 error 色的「重新配对」（仍然是 AppRoot 统一的那一次二次确认）。</li>
+      <li>顶栏副标题原来写「已连接 · 工作区 6」，与胶囊重复；改成「工作区 6 · 会话 58」。</li>
+    </ul>
+  </div>
+  <div class="col">
+    <div class="zoombar light">
+      <div class="topbar" style="background:#F4F7FB">
+        <div class="iconbtn">☰</div>
+        <div class="title"><div class="l1">远程 Web</div><div class="l2">工作区 6 · 会话 58</div></div>
+        <div class="conn-dot"><div class="halo"></div><div class="ring"></div><div class="core"></div></div>
+        <div class="iconbtn">⋮</div>
+      </div>
+    </div>
+    <div class="caption">亮色主题 · 圆点</div>
+    <div class="zoombar light" style="margin-top:14px">
+      <div class="topbar" style="background:#F4F7FB">
+        <div class="iconbtn">☰</div>
+        <div class="title"><div class="l1">远程 Web</div><div class="l2">工作区 6 · 会话 58</div></div>
+        <div class="conn-pill"><span class="core"></span>已连接</div>
+        <div class="iconbtn">⋮</div>
+      </div>
+    </div>
+    <div class="caption">亮色主题 · 胶囊</div>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s2">
+<h2>② 会话页美化 · 与首页统一风格</h2>
+<p class="lede">
+  现状：会话页的折叠分组是<b>半透明底</b>、工具卡是<b>裸文字块</b>、轮次分隔是一条<span style="color:#c3d3e6">裸灰字</span>，而首页已经是「<b>实底 + 1dp 描边</b>」的卡片体系——两个页面看起来像两个人做的。<br>
+  改法：<b>全部换成同一套卡片语言</b>。① 卡片＝实底 <code>surface</code> + 1dp <code>outlineVariant</code> 描边；② 会话行/助手消息＝无底 + <b>2dp 左侧导轨</b>（用圆角导轨而不是气泡底色表达「谁在说话」）；③ 折叠行与工具卡共用同一个 <code>ghead</code> 结构（标题 / 等宽计数徽标 / chevron 图标）；④ 轮次分隔改成「细线 + 居中标签」；⑤ 所有数字与路径走等宽字体。
+</p>
+<div class="row">
+
+  <div class="col">
+    <div class="phone">
+      <div class="sbar"><span>16:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn">←</div>
+        <div class="title"><div class="l1">查看一下我这个设计的插件，</div><div class="l2">F:\vm</div></div>
+        <div class="conn-dot"><div class="halo"></div><div class="ring"></div><div class="core"></div></div>
+        <div class="iconbtn" style="color:var(--onSurface)">✕</div>
+      </div>
+      <div class="chatlist">
+        <div class="bubble user">查看一下我这个设计的插件，<div class="foot">10 分钟前</div></div>
+
+        <div class="round"><span class="ln"></span><span class="tx">第 2 轮结束</span><span class="ln"></span></div>
+
+        <div class="bubble user">please<div class="foot">9 分钟前</div></div>
+
+        <div class="gcard">
+          <div class="ghead">
+            <span style="color:var(--onSurfaceVariant);display:flex;font-size:12px">›</span>
+            <span class="gtitle">思考过程 · 120 字</span>
+          </div>
+        </div>
+
+        <div class="assist">
+          <div class="rail"></div>
+          <div class="body">
+            <p>我明白了！看起来你的消息可能不完整。你想让我知道什么具体任务或帮助吗？我可以帮你：</p>
+            <p>· 代码审查与开发任务<br>· 文件操作与编辑<br>· 创建自动化计划<br>· 数据分析与处理</p>
+            <p>只要告诉我你想完成什么就行！</p>
+            <div style="font-size:11px;color:var(--onSurfaceVariant);font-family:var(--mono);margin-top:4px">8 分钟前</div>
+          </div>
+        </div>
+
+        <div class="round"><span class="ln"></span><span class="tx">第 3 轮结束</span><span class="ln"></span></div>
+
+        <div class="bubble user">please call ask_user_question to ask me one single choice question continue or stop<div class="foot">6 分钟前</div></div>
+
+        <div class="gcard">
+          <div class="ghead">
+            <span style="color:var(--onSurfaceVariant);display:flex;font-size:12px">›</span>
+            <span class="gtitle">执行了命令，已写入文件，已读取图片等</span>
+            <span class="glyph"><i></i><i></i><i></i></span>
+            <span class="state">进行中</span>
+            <span class="gcount">×52</span>
+          </div>
+        </div>
+      </div>
+      <div class="composerwrap">
+        <div class="composer">
+          <div class="r1">
+            <div class="plus">＋</div>
+            <div class="ph">生成中…（发送会排到当前轮之后）</div>
+            <div class="sendbtn on">↑</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>会话页（新）</b>　同一套卡片语言 + 悬浮输入框</div>
+  </div>
+
+  <div class="col">
+    <div class="phone">
+      <div class="sbar"><span>16:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn">←</div>
+        <div class="title"><div class="l1">查看一下我这个设计的插件，</div><div class="l2">F:\vm</div></div>
+        <div class="conn-dot amber"><div class="halo"></div><div class="ring"></div><div class="core"></div></div>
+        <div class="iconbtn">⋮</div>
+      </div>
+      <div class="chatlist">
+
+        <div class="gcard">
+          <div class="ghead">
+            <span style="color:var(--onSurfaceVariant);display:flex;font-size:12px">›</span>
+            <span class="gtitle">执行了命令，已写入文件</span>
+            <span class="gcount">×12</span>
+          </div>
+          <div class="grow">
+            <span class="tool">write</span>
+            <span class="arg">app/build.gradle.kts</span>
+            <span class="tag edit">已编辑</span>
+          </div>
+          <div class="grow">
+            <span class="tool">pwsh</span>
+            <span class="arg">gradlew.bat :app:assembleDebug</span>
+            <span class="tag ok">完成</span>
+          </div>
+          <div class="grow">
+            <span class="tool">read</span>
+            <span class="arg">ui/theme/Theme.kt</span>
+            <span class="tag edit">已读取</span>
+          </div>
+        </div>
+
+        <div class="gcard fail">
+          <div class="ghead">
+            <span style="color:var(--onSurfaceVariant);display:flex;font-size:12px">›</span>
+            <span class="gtitle">工具 · pwsh</span>
+            <span class="tag bad">失败</span>
+          </div>
+          <div style="padding:0 12px 10px;font-family:var(--mono);font-size:11px;line-height:17px;color:#f0a8a2">UnauthorizedAccessException: 对路径的访问被拒绝。</div>
+        </div>
+
+        <div class="gcard">
+          <div class="ghead">
+            <span style="color:var(--onSurfaceVariant);display:flex;font-size:12px">›</span>
+            <span class="gtitle">第 38 轮：改动 8 个文件</span>
+            <span class="tag ok">+172</span>
+            <span class="tag bad">−2</span>
+          </div>
+          <div style="padding:0 6px 10px">
+            <div class="diffline ctx">@@ -22,7 +22,7 @@</div>
+            <div class="diffline del">-    val conn = container.connection</div>
+            <div class="diffline add">+    val conn = container.connectionOrNull()</div>
+          </div>
+        </div>
+
+      </div>
+      <div class="composerwrap">
+        <div class="composer">
+          <div class="r1">
+            <div class="plus">＋</div>
+            <div class="ph">描述你的任务，或先聊几句…</div>
+            <div class="sendbtn">↑</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>工具卡 / 改动卡（新）</b>　实底 + 描边，失败卡描边走 error 色</div>
+  </div>
+
+  <div class="notes" style="max-width:640px">
+    <b>② 的另一半：<span style="color:#e0a94e">会话抽屉</span>的系统返回键（已复现 · 已定位）</b><br>
+    你 m42278 澄清后我改对了目标：出问题的是<b>首页左上角「三条横线」打开的那个最近会话抽屉</b>，不是会话页。会话页本来就挂了 <code>BackHandler</code>（<code>AppRoot.kt:334</code>），抽屉<b>一个都没有</b>。<br>
+    <b>已复现</b>（MuMu · Android 15 · 864×1920 · 已配对）：首页 → 点 <code>cd="会话列表"</code> 打开抽屉 → <code>adb shell input keyevent 4</code> → <code>topResumedActivity</code> 变成 <code>app.lawnchair/.LawnchairLauncher</code>，<b>Activity 被 finish、应用退回桌面</b>（进程还活着）。<br>
+    <b>对照组</b>：设置页按返回 → 回首页；会话页按返回 → 回首页。<b>两处都不退出</b>。也就是说手写的 <code>BackHandler</code> 全都有效，唯独抽屉这条路没人接。<br>
+    <b>已定位</b>（更正了一版我先前的判断）——<code>logcat | grep CoreBackPreview</code> 显示抽屉打开后<b>没有任何新的返回回调注册</b>，按返回只有一行 <code>Setting back callback null</code>。反编译（<code>javap</code>）定位到具体一行：<br>
+    <span style="color:#e0a94e">① <code>ModalNavigationDrawer</code> 在 material3 1.4.0 里<b>完全不注册</b>返回回调</span>（体内 <code>PredictiveBackHandler</code> 命中 0 次）——我先前写「它内部调了 handler、只是没到达平台」是错的；<br>
+    <span style="color:#e0a94e">② 注册只存在于<b>接收 <code>DrawerState</code> 的新重载</b> <code>ModalDrawerSheet(drawerState = …)</code> 里</span>（offset 738 无条件调 <code>DrawerPredictiveBackHandler</code>）；<br>
+    <span style="color:#e0a94e">③ 而 <code>HomeScreen.kt:156</code> 调的是<b>不带 <code>drawerState</code> 的旧重载</b> <code>ModalDrawerSheet { }</code></span> —— 旧重载给内部参数传 <code>aconst_null</code>，随后被 <code>ifnull</code> 短路，注册路径根本没走。（<code>HomeScreen.kt:122</code> 的 <code>drawerState</code> 就在 <code>HomeScreen$lambda$9</code> 的参数表里、拿得到，只是调重载时没用上。）<br>
+    <b>修法（四种写法均已在设备上实测）</b>：<br>
+    <code>ModalDrawerSheet(drawerState = drawerState) { SessionDrawer(…) }</code> —— <b>推荐，一行改动</b>，直接启用 material3 自带的预测性返回（上游设计意图），不新增 import、不自己写 <code>BackHandler</code>。<br>
+    <span style="color:#8fb8e8">备选是显式接管 <code>BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }</code>（放在 content lambda 内或 <code>ModalNavigationDrawer</code> 之前，两者实测同样有效）。<b>三种不要叠加</b>——双 handler 实测「后注册者优先」，叠加会让语义变晦涩。另加一条「抽屉打开时按返回只关抽屉、不 finish Activity」的回归测试，且要在你的 Android 16 真机上重跑（我全部实验在模拟器 Android 15 上做的）。</span>
+  </div>
+
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s3">
+<h2>③ 答题面板 · 高度自适应</h2>
+<p class="lede">
+  <b>现状（你 m42277 指出的问题）</b>：面板高度是写死的——<code>Approvals.kt:217</code> 的 <code>INTERACTIVE_QUESTION_BODY_MAX_HEIGHT = 160.dp</code>。这是当初为了「卡片总高必须塞进 Robolectric 那个只有 386px 高的测试窗口」而挑的数，于是选项一超过两个，正文区就已经到顶、<b>只能靠滚动看下面的选项</b>。<br>
+  <b>改成</b>：正文区<b>先按内容量自然展开</b>（内容多高就多高），只有超过<b>上限</b>时才切成滚动。<b>上限不再是个写死的常量</b>，而是「屏幕高度 − 输入框与键盘的保留区」算出来的——屏幕越高，能展开的选项越多。短问题<b>不会</b>再被撑成 160dp 的空白框，长问题也不会矮到只能看两行。<br>
+  <b>动作区永远钉在滚动区外面</b>（这是 R023 修过的老问题，不能回退）：「提交 / 跳过」、「其他答案」输入框都固定可见，不跟着内容滚。
+</p>
+<div class="row">
+
+  <div class="col">
+    <div class="phone">
+      <div class="sbar"><span>16:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn">←</div>
+        <div class="title"><div class="l1">请调用</div><div class="l2">F:\vm</div></div>
+        <div class="iconbtn">⋮</div>
+      </div>
+      <div class="chatlist">
+        <div class="bubble user">please call ask_user_question to ask me one single choice question continue or stop<div class="foot">刚刚</div></div>
+      </div>
+      <div class="composerwrap">
+        <div class="iw">
+          <div class="ihead"><span class="ic">!</span><span class="t">需要你回答</span></div>
+          <div class="ibody">
+            <div class="iq">Would you like to continue working or stop the session?</div>
+            <div class="iopt on"><span class="rd on"></span><span><span class="ot">Continue (Recommended)</span><span class="od">I want to continue working and proceed with my current request.</span></span></div>
+            <div class="iopt"><span class="rd"></span><span><span class="ot">Stop</span><span class="od">I want to stop the current session or cancel the task.</span></span></div>
+          </div>
+          <div style="padding:0 14px 8px">
+            <div style="height:42px;border:1px solid var(--outline);border-radius:var(--r-sm);display:flex;align-items:center;padding:0 12px;font-size:12.5px;color:var(--onSurfaceVariant)">其他答案（可留空）</div>
+          </div>
+          <div class="iact" style="justify-content:space-between">
+            <span class="b" style="flex:0 0 auto;padding:0 10px;color:var(--primary)">跳过</span>
+            <span class="b pri" style="flex:0 0 auto;padding:0 22px">提交</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>短问题 · 2 个选项</b>　自然高度，下方<b>没有</b>多余留白</div>
+  </div>
+
+  <div class="col">
+    <div class="phone">
+      <div class="sbar"><span>16:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn">←</div>
+        <div class="title"><div class="l1">请调用</div><div class="l2">F:\vm</div></div>
+        <div class="iconbtn">⋮</div>
+      </div>
+      <div class="chatlist">
+        <div class="bubble user">please call ask_user_question to ask me one multi choice question pick colors red and blue<div class="foot">刚刚</div></div>
+      </div>
+      <div class="composerwrap">
+        <div class="iw">
+          <div class="ihead"><span class="ic">!</span><span class="t">需要你回答</span></div>
+          <div class="ibody">
+            <div class="iq">Please select your preferred color(s):<span class="idet">选项会随内容自动展开；超过上限才滚动。</span></div>
+            <div style="position:relative">
+              <div class="iopt on"><span class="rd chk on"></span><span><span class="ot">Red</span><span class="od">Classic red color with vibrant energy.</span></span></div>
+              <div class="iopt on"><span class="rd chk on"></span><span><span class="ot">Blue</span><span class="od">Trustworthy blue color with calm tone.</span></span></div>
+              <div class="iopt"><span class="rd chk"></span><span><span class="ot">Green</span><span class="od">Green color for nature and freshness.</span></span></div>
+              <div class="iopt"><span class="rd chk"></span><span><span class="ot">Yellow</span><span class="od">Yellow for energy and optimism.</span></span></div>
+              <div class="iopt"><span class="rd chk"></span><span><span class="ot">Purple</span><span class="od">Purple for creativity and imagination.</span></span></div>
+              <div class="iopt" style="margin-bottom:0"><span class="rd chk"></span><span><span class="ot">Orange</span><span class="od">Orange for warmth and enthusiasm.</span></span></div>
+            </div>
+            <div class="icap">6 / 6 项</div>
+          </div>
+          <div style="padding:0 14px 8px">
+            <div style="height:42px;border:1px solid var(--outline);border-radius:var(--r-sm);display:flex;align-items:center;padding:0 12px;font-size:12.5px;color:var(--onSurfaceVariant)">其他答案（可留空）</div>
+          </div>
+          <div class="iact" style="justify-content:space-between">
+            <span class="b" style="flex:0 0 auto;padding:0 10px;color:var(--primary)">跳过</span>
+            <span class="b pri" style="flex:0 0 auto;padding:0 22px">提交</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>6 个选项 · 刚好到上限</b>　选项全部可见，无需滚动</div>
+  </div>
+
+  <div class="col">
+    <div class="phone">
+      <div class="sbar"><span>16:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn">←</div>
+        <div class="title"><div class="l1">查看一下我这个设计的插件，</div><div class="l2">F:\vm</div></div>
+        <div class="iconbtn">⋮</div>
+      </div>
+      <div class="chatlist">
+        <div class="bubble user">Red Blue Green 其他，并给出很长很长的 detail 文字<div class="foot">刚刚</div></div>
+      </div>
+      <div class="composerwrap">
+        <div class="iw">
+          <div class="ihead"><span class="ic">!</span><span class="t">需要你回答</span></div>
+          <div class="ifade">
+            <span class="isbar"></span>
+            <div class="ibody" style="padding-bottom:14px">
+              <div class="iq">【界面布局压力测试】这是一次专门针对提问卡片在小窗口下表现的测试<span class="idet">目的是验证三件事：第一，当问题正文明显超出窗口高度时，卡片内部是否正确出现滚动容器，滚动条是否可见、是否顺滑、滚到底后最下方的选项是否能够完整露出；第二，选项列表下方、卡片底部是否存在「其他」类的自定义答案输入框，它是否与选择题的按钮同屏可见；第三，当窗口被拖到很窄、很矮时，标题、正文、选项、输入框、确认按钮之间的间距是否发生重叠或裁切。</span></div>
+              <div class="iopt on"><span class="rd chk on"></span><span><span class="ot">Red</span><span class="od">Classic red color with vibrant energy.</span></span></div>
+              <div class="iopt on"><span class="rd chk on"></span><span><span class="ot">Blue</span><span class="od">Trustworthy blue color with calm tone.</span></span></div>
+              <div class="iopt"><span class="rd chk"></span><span><span class="ot">Green</span><span class="od">Green color for nature and freshness.</span></span></div>
+            </div>
+          </div>
+          <div class="icap" style="padding:0 14px 4px">已到上限 · 还有 4 项，继续下滑</div>
+          <div style="padding:0 14px 8px">
+            <div style="height:42px;border:1px solid var(--outline);border-radius:var(--r-sm);display:flex;align-items:center;padding:0 12px;font-size:12.5px;color:var(--onSurfaceVariant)">其他答案（可留空）</div>
+          </div>
+          <div class="iact" style="justify-content:space-between">
+            <span class="b" style="flex:0 0 auto;padding:0 10px;color:var(--primary)">跳过</span>
+            <span class="b pri" style="flex:0 0 auto;padding:0 22px">提交</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>内容超限 · 到上限才滚动</b>　底部渐隐 + 计数 + 细滚动条</div>
+  </div>
+
+</div>
+
+<div class="row">
+  <div class="notes" style="max-width:1120px">
+    <b>高度怎么算</b>（<code>androidx.compose.material3.windowsizeclass</code> 不用引入；直接用 <code>BoxWithConstraints</code> 拿可用高度）：<br>
+    <code>bodyMax = (可用高度 − 输入框保留区 − 标题行 − 钉住区 − 动作区).coerceIn(120dp, 380dp)</code><br>
+    其中<b>可用高度</b>取的是本屏 <code>bottomBar</code> 真正能拿到的最大高度（不含键盘时的屏幕高，键盘弹起时自动变小——所以我们还是读 <code>BoxWithConstraints</code> 的 <code>maxHeight</code>，不猜键盘高度）；<code>120dp</code> 是下限（保证至少能看到两三个选项），<code>380dp</code> 是上限（再高就把消息列表挤没了）。<br>
+    <b>两个可见信号</b>（缺了用户就不知道「下面还有」）：到上限时 ① 底部加一段 <b>24dp 的渐隐</b>；② 右侧一条 <b>3dp 细滚动条</b>，并按现有 <code>ChatScrollbar</code> 的画法把滑块比例也画出来；再加一行等宽小字 <code>N / M 项</code>。<br>
+    <b>为什么不直接「全展开 + 整页滚动」</b>：面板在 <code>bottomBar</code> 里，一旦比窗口还高，超出部分是<b>真的拿不到</b>（R023 就是这么把「允许」按钮滚出屏幕的）。所以上限这件事必须存在，只是不该是个写死的 160dp。<br>
+    <span style="color:#8fb8e8">实现要点：<code>heightIn(max = …)</code> 而不是固定 <code>height</code>；<code>verticalScroll</code> 保留；动作区保持在滚动区外；<code>INTERACTIVE_QUESTION_BODY_MAX_HEIGHT</code> 这个常量被替换成运行时算出来的值。</span>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s4">
+<h2>④ 输入框重构 · 悬浮单行 ↔ 向上展开</h2>
+<p class="lede">
+  <b>收起态</b>：一行圆角方框，<b>悬浮</b>在内容之上（四周留白 + 投影，不再是从屏幕底边长出来的一条），<b>＋ 与 发送键都在框内</b>，三者一体、无任何分隔线。<br>
+  <b>展开态</b>：同一个框<b>向上长</b>，输入区在上、<b>操作按钮全部落在框内最下面那一排</b>（权限图标 + 模型胶囊 + ＋ + 发送，同排），全程无分隔线，只用间距分层；输入行数增加时继续向上长（最多 6 行）。<br>
+  <b>权限只留图标</b>（你 m42063 定案）：当前级别本来就不可改，文字没有操作价值。图标占 32dp，宽度立刻宽松很多——但<b>不等于一定放得下</b>，最长的模型名在 360dp 上仍会截断，见下面那张实测表。
+</p>
+<div class="row">
+
+  <div class="col">
+    <div class="phone">
+      <div class="sbar"><span>16:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn">←</div>
+        <div class="title"><div class="l1">app开发 main</div><div class="l2">F:\bot</div></div>
+        <div class="conn-dot"><div class="halo"></div><div class="ring"></div><div class="core"></div></div>
+        <div class="iconbtn">⋮</div>
+      </div>
+      <div class="chatlist">
+        <div class="bubble user">把首页的连接横幅收进顶栏<div class="foot">刚刚</div></div>
+        <div class="assist">
+          <div class="rail"></div>
+          <div class="body"><p>好，我先按你的要求出效果图，不动代码。</p></div>
+        </div>
+      </div>
+      <div class="composerwrap">
+        <div class="composer">
+          <div class="r1">
+            <div class="plus">＋</div>
+            <div class="ph">描述你的任务，或先聊几句…</div>
+            <div class="sendbtn">↑</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>收起态</b>　一行 · 悬浮 · ＋与发送在框内</div>
+  </div>
+
+  <div class="col">
+    <div class="phone">
+      <div class="sbar"><span>16:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn">←</div>
+        <div class="title"><div class="l1">app开发 main</div><div class="l2">F:\bot</div></div>
+        <div class="conn-dot"><div class="halo"></div><div class="ring"></div><div class="core"></div></div>
+        <div class="iconbtn">⋮</div>
+      </div>
+      <div class="chatlist">
+        <div class="bubble user">把首页的连接横幅收进顶栏<div class="foot">刚刚</div></div>
+        <div class="assist">
+          <div class="rail"></div>
+          <div class="body"><p>好，我先按你的要求出效果图，不动代码。</p></div>
+        </div>
+      </div>
+      <div class="composerwrap">
+        <div class="composer exp">
+          <div class="r1">
+            <div class="inputtext">把输入框改成悬浮的单行圆角框，展开时操作按钮放到最下面一排<span class="caret"></span></div>
+          </div>
+          <div class="r2">
+            <span class="chip ic" title="完全权限 · 自动允许"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10z"/></svg></span>
+            <span class="chip"><span class="dt"></span><span class="mono">stepfun/step-5-preview</span><span class="eff">high</span></span>
+            <span class="spacer"></span>
+            <div class="plus">＋</div><div class="sendbtn on">↑</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>展开态</b>　向上长 · 权限图标 + 模型 + ＋/发送 同排落最下</div>
+  </div>
+
+  <div class="col">
+    <div class="phone">
+      <div class="sbar"><span>16:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn">←</div>
+        <div class="title"><div class="l1">app开发 main</div><div class="l2">F:\bot</div></div>
+        <div class="conn-dot"><div class="halo"></div><div class="ring"></div><div class="core"></div></div>
+        <div class="iconbtn">⋮</div>
+      </div>
+      <div class="chatlist">
+        <div class="bubble user">看看这两张图，还有这个文件<div class="foot">刚刚</div></div>
+        <div class="assist">
+          <div class="rail"></div>
+          <div class="body"><p>收到，我看一下。</p></div>
+        </div>
+      </div>
+      <div class="composerwrap">
+        <div class="composer exp">
+          <div class="attrow">
+            <div class="thumb"><div class="x">✕</div></div>
+            <div class="thumb"><div class="x">✕</div></div>
+            <div class="thumb file">📎<div class="x">✕</div></div>
+          </div>
+          <div class="r1" style="padding-top:10px">
+            <div class="inputtext">这两张图<br>第二张的间距再大一点</div>
+          </div>
+          <div class="r2">
+            <span class="chip ic" title="完全权限 · 自动允许"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10z"/></svg></span>
+            <span class="chip"><span class="dt"></span><span class="mono">stepfun/step-5-preview</span><span class="eff">high</span></span>
+            <span class="spacer"></span>
+            <div class="plus">＋</div><div class="sendbtn on">↑</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>展开 + 附件</b>　附件行也在框内，随内容向上长</div>
+  </div>
+
+  <div class="col">
+    <div class="phone">
+      <div class="sbar"><span>16:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn">←</div>
+        <div class="title"><div class="l1">app开发 main</div><div class="l2">F:\bot</div></div>
+        <div class="conn-dot"><div class="halo"></div><div class="ring"></div><div class="core"></div></div>
+        <div class="iconbtn">⋮</div>
+      </div>
+      <div class="chatlist">
+        <div class="bubble user">把 sandbox 提权到 danger-full-access<div class="foot">刚刚</div></div>
+      </div>
+      <div class="composerwrap">
+        <div class="iw">
+          <div class="ihead"><span class="ic">!</span><span class="t">需要授权</span></div>
+          <div class="ibody">
+            <div style="font-family:var(--mono);font-size:12.5px;color:#cfe1f5">pwsh</div>
+            <div class="sub">escalate sandbox to danger-full-access: 你明确要求把沙箱提升到 danger-full-access 并执行一条命令验证提权生效。</div>
+          </div>
+          <div class="iact"><span class="b pri">允许一次</span><span class="b err">拒绝</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>审批态（既有能力）</b>　只换容器，行为不变</div>
+  </div>
+
+</div>
+
+<div class="row">
+  <div class="col">
+    <div class="zoombar light">
+      <div class="composer" style="margin:16px 12px 20px">
+        <div class="r1">
+          <div class="plus">＋</div>
+          <div class="ph">描述你的任务，或先聊几句…</div>
+          <div class="sendbtn">↑</div>
+        </div>
+      </div>
+    </div>
+    <div class="caption">亮色主题 · 收起态</div>
+  </div>
+  <div class="col">
+    <div class="zoombar light">
+      <div class="composer exp" style="margin:16px 12px 20px">
+        <div class="r1"><div class="inputtext">把输入框改成悬浮的单行圆角框<span class="caret"></span></div></div>
+        <div class="r2">
+          <span class="chip ic" title="完全权限 · 自动允许"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10z"/></svg></span>
+          <span class="chip"><span class="dt"></span><span class="mono">stepfun/step-5-preview</span><span class="eff">high</span></span>
+          <span class="spacer"></span>
+          <div class="plus">＋</div><div class="sendbtn on">↑</div>
+        </div>
+      </div>
+    </div>
+    <div class="caption">亮色主题 · 展开态</div>
+  </div>
+  <div class="notes">
+    <b>与现状的差别</b>
+    <ul>
+      <li>现状是<b>贴底通栏</b>、顶边一条 1dp 分隔线；新版<b>四周留白 + 投影</b>，视觉上「浮」在内容之上。</li>
+      <li>现状收起态就已经是「＋ | 输入框 | 发送」三块<b>并排且各有自己的圆底</b>；新版三者在同一个框里，＋ 去掉圆底，只保留发送键的圆形强调。</li>
+      <li>现状展开态把权限/模型<b>另起一行放在框外</b>；新版移进框内最下面一排，与 ＋/发送同排，整体感更强。</li>
+      <li><b>权限改图标</b>：32dp 圆钮，图标用 <code>Icons.Default.Lock</code>（已核实 <code>material-icons-core</code> 里有；<code>Shield</code>/<code>VerifiedUser</code> <b>不在</b>这 49 枚里，用不了）。级别（完全权限 / 可写工作区 / 只读）仍在<b>点开的面板</b>里用文字显示，与现状一致。有请求待批时圆钮描边转 error 色并挂一枚计数角标。</li>
+      <li>圆角：收起 26dp（52dp 高的单行上即视觉全圆角），展开 20dp，两态同族、动画连续（140ms）。</li>
+      <li>附件行、附件提示、草稿内容全部在框内；<b>无任何分隔线</b>，只靠 6/10/14dp 三档间距分层。</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 底排定案：权限只留图标后实测 -->
+<div class="row">
+  <div style="max-width:1120px">
+    <div class="caption" style="font-size:13px;color:#c3d3e6;margin-bottom:6px"><b>底排定案：权限改图标后，单排基本放得下（附实测）</b></div>
+    <div class="lede" style="margin-bottom:8px">
+      权限由文字徽标（约 132dp）改成 <b>32dp 图标</b>后，360dp 机型上最下面一排只用掉 <code>32 + 6 + 模型 + 6 + 40 + 6 + 40</code>。我在无头 Chrome 里按真实字号逐宽度量了一遍（行内可内容宽度 360dp 时约 334dp），结论是<b>大多数模型放得下，但不是全部</b> —— 所以下面这张表照实给：
+    </div>
+  </div>
+</div>
+<div class="row">
+  <div class="notes" style="max-width:1120px">
+    <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+      <tr style="color:#8fb8e8;text-align:left">
+        <th style="padding:4px 8px 4px 0;font-weight:600">模型（实测取自你的会话）</th>
+        <th style="padding:4px 8px;font-weight:600">全名 + 档位</th>
+        <th style="padding:4px 8px;font-weight:600">全名（无档位）</th>
+        <th style="padding:4px 8px;font-weight:600">去 provider 前缀 + 档位</th>
+      </tr>
+      <tr><td style="padding:4px 8px 4px 0"><code>stepfun/step-5-preview</code></td>
+        <td style="padding:4px 8px;color:#F2C14E">360dp 截断</td><td style="padding:4px 8px;color:#4ADE80">完整</td><td style="padding:4px 8px;color:#4ADE80">完整</td></tr>
+      <tr><td style="padding:4px 8px 4px 0"><code>buddy/deepseek-v4.1-flash</code> <span style="color:#8fb8e8">← 最长</span></td>
+        <td style="padding:4px 8px;color:#F2C14E">截断</td><td style="padding:4px 8px;color:#F2C14E">截断</td><td style="padding:4px 8px;color:#F2C14E">截断</td></tr>
+      <tr><td style="padding:4px 8px 4px 0"><code>qoder/qfmodel</code></td>
+        <td style="padding:4px 8px;color:#4ADE80">完整</td><td style="padding:4px 8px;color:#4ADE80">完整</td><td style="padding:4px 8px;color:#4ADE80">完整</td></tr>
+    </table>
+    <div style="margin-top:8px">
+      <b>取值口径（你 m42277 已定：第一个口径）</b>：<code>360dp</code> 机型 = 大多数安卓手机；<code>411dp</code> 机型（你的 OnePlus 1080@420dpi）上三种写法<b>全部完整</b>。上表按更苛刻的 360dp 给。<br>
+      <b>定案</b>：底排单行保留「权限图标 + 模型胶囊（全名 + 档位）」，<b>允许模型名在 360dp 上省略号截断</b>（如 <code>buddy/deepseek-v4.1-…</code>，档位 <code>high</code> 徽标始终完整）——完整 id 在点开的模型选择器里本来就能看到，且底排宽度会随机型变化，硬套短名反而在 411dp 上浪费空间。<br>
+      <span style="color:#8fb8e8">注意：我先前在效果图里写过「38dp 图标 + 154dp 模型 = 198dp，一定放得下」，那个换算是错的（模型胶囊真实宽度 217dp，不是 154dp）。这张表是重新实测的结果。</span>
+    </div>
+  </div>
+</div>
+<div class="row">
+
+  <div class="col">
+    <div class="phone" style="height:238px;border-radius:18px">
+      <div class="composerwrap" style="padding:14px 12px">
+        <div class="composer exp">
+          <div class="r1" style="padding-top:10px"><div class="inputtext">把输入框改成悬浮的单行圆角框<span class="caret"></span></div></div>
+          <div class="r2" style="padding-bottom:6px">
+            <span class="chip ic" title="完全权限 · 自动允许"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10z"/></svg></span>
+            <span class="chip"><span class="dt"></span><span class="mono">stepfun/step-5-preview</span><span class="eff">high</span></span>
+            <span class="spacer"></span>
+            <div class="plus">＋</div><div class="sendbtn on">↑</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>最终版 · 单行</b>　权限图标 + 模型胶囊 + ＋ + 发送，全在最下面一排</div>
+  </div>
+
+  <div class="col">
+    <div class="phone" style="height:238px;border-radius:18px">
+      <div class="composerwrap" style="padding:14px 12px">
+        <div class="composer exp">
+          <div class="r1" style="padding-top:10px"><div class="inputtext">把输入框改成悬浮的单行圆角框<span class="caret"></span></div></div>
+          <div class="r2" style="padding-bottom:6px">
+            <span class="chip ic urgent" title="有 2 个请求待批"><svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10z"/></svg><span class="badge">2</span></span>
+            <span class="chip"><span class="dt"></span><span class="mono">stepfun/step-5-preview</span><span class="eff">high</span></span>
+            <span class="spacer"></span>
+            <div class="plus">＋</div><div class="sendbtn on">↑</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>待批态 · 单行</b>　权限图标转红 + 计数角标（点开仍是既有面板）</div>
+  </div>
+
+  <div class="notes" style="max-width:400px">
+    <b>为什么不再给三个方案</b><br>
+    之前那三个方案（两排 / 横滑 / 只留模型）全部是为「权限文字太宽」让路的。你指出权限只留图标就够——宽度问题<b>当场消失</b>，于是：<br>
+    <ul>
+      <li>不再需要横滑，也就不需要渐隐提示，手势冲突一并消失；</li>
+      <li>不再需要把权限藏进「＋」的弹层，少一层点击；</li>
+      <li>展开态比「两排」方案<b>矮约 34dp</b>，也就是你最初想要的那一排。</li>
+    </ul>
+    <span style="color:#8fb8e8">唯一的信息损失：当前权限级别默认不再直接可见，要点开图标才看得到。因为它是只读的，我按你的判断接受这个代价。</span>
+  </div>
+
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s5">
+<h2>风格基线（两页共用的那套东西）</h2>
+<div class="row">
+  <div class="notes" style="max-width:720px">
+    <b>颜色</b>：主色 <code>#5AA2FF</code>、背景 <code>#0B1420</code>、卡片底 <code>#111C2B</code>、描边 <code>#22334A</code>、次要文字 <code>#A6BDD8</code>；运行绿 <code>#4ADE80</code>、等待琥珀 <code>#F2C14E</code>、错误 <code>#FF8A80</code>。亮色主题一一对应（运行绿 <code>#15803D</code>）。<br>
+    <b>圆角</b>：6 / 10 / 14 / 20 / 28，气泡 18，胶囊 999。<br>
+    <b>字号</b>：标题 16/22、正文 14/21、脚注 11/15；数字与路径一律等宽。<br>
+    <b>动效</b>：原地变化 140ms、进出 240ms、容器形变 360ms，缓动统一 <code>cubic-bezier(.2,0,0,1)</code>；每屏同时可见的无限动画不超过 2 个。<br>
+    <b>卡片</b>：一律实底 + 1dp 描边（不再用半透明叠加）；会话/助手行用 2dp 左侧导轨代替底色。
+  </div>
+</div>
+</section>
+
+<script>
+  const q = new URLSearchParams(location.search);
+  const only = q.get('only');
+  if (only) {
+    document.body.classList.add('only');
+    const el = document.getElementById(only);
+    if (el) el.classList.add('keep');
+  }
+</script>
+</body>
+</html>

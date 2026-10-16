@@ -159,36 +159,46 @@ class ComposerLayoutRenderTest {
     // ---- ② 审批权限徽标 ----
 
     @Test
-    fun `权限徽标显示当前策略`() {
+    fun `权限徽标只留图标不再显示策略文字`() {
+        // R028 ④（用户 m42063）：「可以将权限只用图标表示，因为目前也不能修改，展示实际的
+        // 文字也没有很大的作用，主要起到一个显示的作用」。这条断言是那次改动的守护——
+        // 文字一旦回来，底排就又要挤成两行（m42248/m42277 明确不要两行）。
         setComposer(
             draft = "hi",
             permission = SessionPermission(approvalPolicy = ApprovalPolicy.ASK),
         )
         compose.onNodeWithContentDescription("审批权限").assertExists()
-        compose.onNodeWithText("权限 未知 · 审批 每次询问").assertExists()
-    }
-
-    @Test
-    fun `自动放行策略写成不同文案`() {
-        // `never` 与 `ask` 是同一枚徽标上的两种完全不同的行为，文案必须能区分。
-        setComposer(
-            draft = "hi",
-            permission = SessionPermission(approvalPolicy = ApprovalPolicy.NEVER),
-        )
-        compose.onNodeWithText("权限 未知 · 审批 自动允许").assertExists()
+        compose.onNodeWithText("权限 未知 · 审批 每次询问").assertDoesNotExist()
         compose.onNodeWithText("每次询问").assertDoesNotExist()
     }
 
     @Test
-    fun `一条权限事件都没收到时显示未知`() {
-        // 全 null 是「会话日志里没有任何权限事件」的正常状态，不能显示成空白。
-        setComposer(draft = "hi", permission = SessionPermission())
-        compose.onNodeWithText("权限未知").assertExists()
+    fun `策略不同也不影响图标形态`() {
+        // `never` 与 `ask` 是两种完全不同的行为，但**图标不表达它**——级别只在点开后的
+        // 面板里用文字说明（那里是权威展示位）。这里钉住「图标不随策略变形」，
+        // 免得下一个人又想「顺手在图标旁边补两个字」。
+        setComposer(
+            draft = "hi",
+            permission = SessionPermission(approvalPolicy = ApprovalPolicy.NEVER),
+        )
+        compose.onNodeWithContentDescription("审批权限").assertExists()
+        compose.onNodeWithText("权限 未知 · 审批 自动允许").assertDoesNotExist()
+        compose.onNodeWithText("自动允许").assertDoesNotExist()
     }
 
     @Test
-    fun `有待批请求时徽标变成计数`() {
-        // 徽标在有待批请求时切到「待批 N」——用户不必展开面板就知道有几件事等着。
+    fun `没有待批请求时不显示角标`() {
+        // 全 null 是「会话日志里没有任何权限事件」的正常状态。没有待批时**不许**有数字——
+        // 一个常驻的「0」会让用户以为需要处理什么。
+        setComposer(draft = "hi", permission = SessionPermission())
+        compose.onNodeWithContentDescription("审批权限").assertExists()
+        compose.onNodeWithText("0").assertDoesNotExist()
+    }
+
+    @Test
+    fun `有待批请求时角标显示数量`() {
+        // 「待批 N」的**数量**不能跟着文字一起砍掉：它是「现在有东西卡住了，去点它」的
+        // 唯一信号（R028 ① 之后横幅与抽屉都已经不再承担这件事）。
         compose.setContent {
             PermissionChip(
                 permission = SessionPermission(approvalPolicy = ApprovalPolicy.ASK),
@@ -196,7 +206,22 @@ class ComposerLayoutRenderTest {
                 onClick = {},
             )
         }
-        compose.onNodeWithText("待批 2").assertExists()
+        compose.onNodeWithText("2").assertExists()
+    }
+
+    @Test
+    fun `策略文字在点开的面板里完整保留`() {
+        // 图标化的**唯一信息损失**是级别默认不可见，所以面板必须真的把它写出来——
+        // 否则「只留图标」就从「省宽度」变成了「丢信息」。
+        compose.setContent {
+            PermissionSheet(
+                permission = SessionPermission(approvalPolicy = ApprovalPolicy.ASK),
+                pendingCount = 0,
+                error = null,
+                onDismissRequest = {},
+            )
+        }
+        compose.onNodeWithText("权限 未知 · 审批 每次询问").assertExists()
     }
 
     @Test
@@ -459,5 +484,101 @@ class ComposerLayoutRenderTest {
         setComposer(interactive = questionRequest())
         compose.onNodeWithText("需要你回答").assertExists()
         compose.onNodeWithContentDescription("发送按钮").assertDoesNotExist()
+    }
+
+    // ---- R028 ④ 底排：四件同一排（用户 m42277 定案）----
+    //
+    // 用户 m41448 第 4 条原话：「添加文件按钮和发送按钮放在输入框内，三者合为一体…
+    // 各种操作按钮排布在输入框的最下面一排」。m42063 又把权限降成纯图标，
+    // m42277 据此确认「按你的方向、第一个口径」= 权限图标 + 模型胶囊 + ＋ + 发送
+    // **同一排**。这条是那次定案的几何守护——「排布在最下面一排」不是修辞，
+    // 四件的纵向中心必须对齐。
+
+    /** 展开态的四个入口必须在同一排（纵向中心对齐到 2dp 内）。 */
+    @Test
+    fun `展开态底排四件在同一排`() {
+        setComposer(draft = "hi")
+        val attach = compose.onNodeWithContentDescription("添加附件").getBoundsInRoot()
+        val send = compose.onNodeWithContentDescription("发送按钮").getBoundsInRoot()
+        val permission = compose.onNodeWithContentDescription("审批权限").getBoundsInRoot()
+        val model = compose.onNodeWithText("stepfun/step-5-preview").getBoundsInRoot()
+
+        val centers = listOf(
+            "添加附件" to (attach.top.value + attach.bottom.value) / 2f,
+            "发送按钮" to (send.top.value + send.bottom.value) / 2f,
+            "审批权限" to (permission.top.value + permission.bottom.value) / 2f,
+            "模型胶囊" to (model.top.value + model.bottom.value) / 2f,
+        )
+        val max = centers.maxOf { it.second }
+        val min = centers.minOf { it.second }
+        assertTrue("底排四件不在同一排：${centers.joinToString { "${it.first}=${it.second}" }}", max - min <= 2f)
+    }
+
+    /**
+     * 收起态只有 ＋ 与发送在框内，权限与模型都不许出现。
+     *
+     * 用户 m27990 要的「未输入时输入框会收束成一行圆角方框」——配置项一露头就变成两行，
+     * 这一条同时守着「收起态不许有附件行 / 提示行 / 底排」三件事。
+     */
+    @Test
+    fun `收起态只有加号与发送在框内`() {
+        setComposer()
+        compose.onNodeWithContentDescription("添加附件").assertExists()
+        compose.onNodeWithContentDescription("发送按钮").assertExists()
+        compose.onNodeWithContentDescription("审批权限").assertDoesNotExist()
+        compose.onNodeWithText("stepfun/step-5-preview").assertDoesNotExist()
+    }
+
+    /** 收起态里 ＋、发送、占位符三件的纵向中心也要对齐（用户要的「三者合为一体」）。 */
+    @Test
+    fun `收起态三件在同一行`() {
+        setComposer()
+        val attach = compose.onNodeWithContentDescription("添加附件").getBoundsInRoot()
+        val send = compose.onNodeWithContentDescription("发送按钮").getBoundsInRoot()
+        val placeholder = compose.onNodeWithText("描述你的任务，或先聊几句…").getBoundsInRoot()
+        val centers = listOf(
+            (attach.top.value + attach.bottom.value) / 2f,
+            (send.top.value + send.bottom.value) / 2f,
+            (placeholder.top.value + placeholder.bottom.value) / 2f,
+        )
+        assertTrue("收起态三件不在同一行：$centers", centers.max() - centers.min() <= 2f)
+    }
+
+    /**
+     * 生成中发一条排队消息：占位符要换成能解释「现在发会怎样」的文案。
+     *
+     * 这条守住 R028 ④ 重构时的**回归**：把输入区从 `OutlinedTextField` 换成
+     * `TextField` + 透明指示线时，占位符的分派很容易被漏在旧函数里。
+     */
+    @Test
+    fun `生成中占位符在收起态也正确`() {
+        setComposer(generating = true)
+        compose.onNodeWithText("描述你的任务，或先聊几句…").assertExists()
+    }
+
+    /**
+     * 点输入框必须真的把它展开，而且**展开之后不许自己缩回去**。
+     *
+     * 这条是本轮真机验收抓到的缺陷的守护（R028 ④）：早先的写法是
+     * `if (!expanded) { Row{＋,输入框,发送} } else { 输入框 }`——输入框在两个分支里
+     * 是两个不同的调用点，Compose 视作**不同节点**。于是点一下：聚焦 → `expanded` 变真
+     * → 重建出没有焦点的新节点 → `collectIsFocusedAsState` 立刻变假 → `expanded` 变假 →
+     * 回到原分支。用户的观感是「点输入框毫无反应、永远展不开」，而当时 18 条渲染测试
+     * 全绿——因为它们都用 `draft`/`pending` 把界面直接摆到展开态，没有一条走**交互**
+     * 这条路。所以这一条必须靠点击，不能靠传参。
+     *
+     * 判据用配置行（展开态独有）而不是输入框本身：输入框两态都在，它出现不能说明任何事。
+     */
+    @Test
+    fun `点输入框会展开并且不会自己缩回去`() {
+        setComposer()
+        compose.onNodeWithText("描述你的任务，或先聊几句…").performClick()
+        compose.waitForIdle()
+        // 展开态的证据：配置行（权限图标 + 模型胶囊）出现。
+        compose.onNodeWithContentDescription("审批权限").assertExists()
+        compose.onNodeWithText("stepfun/step-5-preview").assertExists()
+        // 再等一次空闲：如果展开态会因焦点丢失而反弹，这一步之后配置行就消失了。
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("审批权限").assertExists()
     }
 }

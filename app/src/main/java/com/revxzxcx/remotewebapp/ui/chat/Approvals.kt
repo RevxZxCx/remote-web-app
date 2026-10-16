@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
@@ -26,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -101,7 +104,7 @@ internal fun InteractiveWindow(
         is InteractiveComposerRequest.Question -> ComposerShell(
             title = request.headline(),
             accent = request.accent(),
-            bodyMaxHeight = INTERACTIVE_QUESTION_BODY_MAX_HEIGHT,
+            hasPinned = true,
             actions = {
                 QuestionActions(
                     request = request,
@@ -141,80 +144,115 @@ internal fun InteractiveWindow(
  *   选项多的时候滚动区会被选项占满，自定义答案一旦跟着滚，用户就得先发现「这里能滚」
  *   再滚下去才写得成字——桌面上有鼠标滚轮和视觉渐隐，手机上两样都没有。
  *
- * `INTERACTIVE_BODY_MAX_HEIGHT` 取 220dp 是有意的：卡片总高 = 12 + 36 + 6 + 220 + 8 +
- * 52 + 12 ≈ 346dp，必须留在小窗口（渲染测试的 Robolectric 窗口只有 386px 高）之内，
- * 否则连钉住的动作区都会被窗口裁掉。真机上 930dp 高的屏也远够用。
+ * ## 高度上限是**运行时算出来的**，不是常量（用户 m42277 需求 ③）
  *
- * 提问卡多一段钉住的「其他答案」（约 56dp），所以它传更小的 [bodyMaxHeight]：
- * 12 + 36 + 6 + 160 + 56 + 8 + 52 + 12 ≈ 342dp，同样留在 386px 内。
+ * 原来正文上限写死成 220dp（提问卡 160dp），那两个数字的来历是「让卡片总高留在
+ * Robolectric 渲染测试的 386px 窗口内」——一个**测试窗口**的尺寸。后果是用户
+ * m42277 的原话：「当前的提问回答界面虽然占据了输入面板，但是展开的高度太小了，
+ * 如果选项比较多（超过两个），基本上只能通过滚轮看下面的选项了」。
+ *
+ * 现在改成：正文先按内容自然展开，**超过上限才滚**，而上限由 [interactiveBodyMaxHeight]
+ * 从**本组件拿到的可用高度**减去固定开销算出来（见该函数的推导与 [BODY_MIN]/[BODY_MAX]）。
+ * 用 `BoxWithConstraints` 取 `maxHeight`，不引入 material3 windowsizeclass，
+ * 也**不猜键盘高度**（MuMu + 搜狗 IME 高度恒 0，猜它会让面板在真机上突然被压扁）。
  */
 @Composable
 private fun ComposerShell(
     title: String,
     accent: Color,
     actions: @Composable () -> Unit,
-    bodyMaxHeight: Dp = INTERACTIVE_BODY_MAX_HEIGHT,
+    /** 是否有钉住区（提问卡的「其他答案」）。算上限时必须把它的高度扣掉。 */
+    hasPinned: Boolean = false,
     pinned: @Composable () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(22.dp)
-                        .clip(CircleShape)
-                        .background(accent.copy(alpha = 0.16f)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Warning,
-                        contentDescription = null,
-                        tint = accent,
-                        modifier = Modifier.size(14.dp),
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val bodyMaxHeight = interactiveBodyMaxHeight(maxHeight, hasPinned)
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            shape = RoundedCornerShape(20.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(22.dp)
+                            .clip(CircleShape)
+                            .background(accent.copy(alpha = 0.16f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = accent,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
                     )
                 }
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
+                Spacer(Modifier.height(6.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = bodyMaxHeight)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    content()
+                }
+                pinned()
+                Spacer(Modifier.height(8.dp))
+                actions()
             }
-            Spacer(Modifier.height(6.dp))
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = bodyMaxHeight)
-                    .verticalScroll(rememberScrollState()),
-            ) {
-                content()
-            }
-            pinned()
-            Spacer(Modifier.height(8.dp))
-            actions()
         }
     }
 }
 
-/** 交互窗口正文的滚动高度上限：再高就改为滚动，避免把消息列表挤干净。 */
-private val INTERACTIVE_BODY_MAX_HEIGHT = 220.dp
+/** 正文区下限：至少要能同时看到两三个选项，不然「能滚」这件事本身都发现不了。 */
+internal val INTERACTIVE_BODY_MIN_HEIGHT = 120.dp
 
 /**
- * 提问卡的滚动高度上限：比 [INTERACTIVE_BODY_MAX_HEIGHT] 小，给钉住的「其他答案」留地方。
- *
- * 两个值都必须让「卡片总高 < Robolectric 窗口高（386px）」，否则钉住的动作区会被裁掉，
- * 而 `performClick` 往窗口外注入触摸不抛异常也不触发回调——这条已经害过两轮静默失败。
+ * 正文区上限：再高就把消息列表挤没了——面板占住整个输入区，用户还是要看得见上下文。
+ * 380dp 在 640dp 以上的屏上等于「六七个选项不用滚」。
  */
-private val INTERACTIVE_QUESTION_BODY_MAX_HEIGHT = 160.dp
+internal val INTERACTIVE_BODY_MAX_HEIGHT = 380.dp
+
+/**
+ * 外壳里除正文以外的固定开销，用来从可用高度反推正文能占多少。
+ *
+ * 逐项（与上面的 `Column` 一一对应，改布局必须同步改这里）：
+ * 12(上内边距) + 36(标题行) + 6(标题后间距) + [56(钉住区，仅提问卡)] +
+ * 8(正文后间距) + 52(动作区，两个 40dp 按钮) + 12(下内边距) = 126dp / 182dp
+ *
+ * 另外多扣 [SAFE_GAP]：`maxHeight` 是**上限**而不是实际可用高度（Scaffold 的 bottomBar
+ * 拿到的是整屏高度），贴着上限算出来的卡片会正好等于窗口高，再有任何 1px 的取整误差
+ * 就会把动作区挤出窗口——而 `performClick` 往窗口外注入触摸**不抛异常也不触发回调**，
+ * 这条静默失败已经害过两轮（见 `InteractiveWindowGeometryTest`）。
+ */
+private val SHELL_OVERHEAD_WITHOUT_PINNED = 126.dp
+private val SHELL_OVERHEAD_WITH_PINNED = 182.dp
+private val SHELL_SAFE_GAP = 12.dp
+
+/**
+ * 算出正文区的滚动高度上限（纯函数，便于 JVM 单测钉住）。
+ *
+ * [availableHeight] 传 `BoxWithConstraints` 的 `maxHeight`。上界/下界见
+ * [INTERACTIVE_BODY_MIN_HEIGHT] / [INTERACTIVE_BODY_MAX_HEIGHT]。
+ */
+internal fun interactiveBodyMaxHeight(availableHeight: Dp, hasPinned: Boolean): Dp {
+    val overhead = if (hasPinned) SHELL_OVERHEAD_WITH_PINNED else SHELL_OVERHEAD_WITHOUT_PINNED
+    val spare = availableHeight - overhead - SHELL_SAFE_GAP
+    return spare.coerceIn(INTERACTIVE_BODY_MIN_HEIGHT, INTERACTIVE_BODY_MAX_HEIGHT)
+}
 
 /** 权限审批正文：工具名 + 服务端给的理由。动作区见 [ApprovalActions]。 */
 @Composable
@@ -477,7 +515,23 @@ private fun OptionRow(
     }
 }
 
-/** 配置行里的审批权限徽标（只读信息 + 面板入口）。 */
+/**
+ * 底排上的审批权限入口：**纯图标**（用户 m42063 定案）。
+ *
+ * 原话：「对于排布于下面一排的方法，可以将权限只用图标表示，因为目前也不能修改，展示实际的
+ * 文字也没有很大的作用，主要起到一个显示的作用。如果仅展示图标，我认为宽度应该够了」。
+ * 于是 32dp 圆钮 + 锁图标，**不再显示 `permission.summary()` 的文字**——那个改动换来的正是
+ * 「权限 + 模型 + ＋ + 发送 能回到同一排」（用户 m42248/m42277 要的「操作按钮排布在输入框
+ * 的最下面一排」）。**唯一的信息损失**是级别默认不再直接可见，完整策略在点开后见
+ * [PermissionSheet]，桌面端也仍是权威来源（D54：手机端只读）。
+ *
+ * 「待批 N」这个**数量**不能一并砍掉：它是「现在有东西卡住了，去点它」的唯一信号，
+ * 而抽屉/横幅都已经收走（R028 ①）。所以改成图标右上角的 error 色角标（与原实现
+ * 「urgent 时整枚变 error 色」等价，只是把数字挪到角上腾出宽度）。
+ *
+ * 语义：`contentDescription = "审批权限"` 必须保留且**恒定**——M5 的设备验收与多条渲染
+ * 测试都靠它定位；待批状态由角标的数字承担。
+ */
 @Composable
 internal fun PermissionChip(
     permission: SessionPermission,
@@ -485,38 +539,55 @@ internal fun PermissionChip(
     onClick: () -> Unit,
 ) {
     val urgent = pendingCount > 0
-    val accent = if (urgent) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
-    val label = if (urgent) "待批 $pendingCount" else permission.summary()
-    Row(
+    val accent = if (urgent) {
+        MaterialTheme.colorScheme.error
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Box(
         modifier = Modifier
-            .heightIn(min = 32.dp)
-            .clip(RoundedCornerShape(50))
-            .background(MaterialTheme.colorScheme.surface)
+            .size(32.dp)
+            .clip(CircleShape)
+            .background(Color.Transparent)
             .border(
                 1.dp,
                 if (urgent) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outlineVariant,
-                RoundedCornerShape(50),
+                CircleShape,
             )
             .semantics { contentDescription = "审批权限" }
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
     ) {
         Icon(
-            imageVector = Icons.Default.Warning,
+            // `Lock` 是 material-icons-core 1.7.8 里**唯一**可用的锁形图标：
+            // Shield / Security / VerifiedUser / Key 都不在这 49 枚里（已用 `jar tf` 核实）。
+            imageVector = Icons.Default.Lock,
             contentDescription = null,
             tint = accent,
             modifier = Modifier.size(15.dp),
         )
-        Spacer(Modifier.width(5.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            fontFamily = FontFamily.Monospace,
-            color = accent,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        if (urgent) {
+            // 角标用 `offset` 挂在右上角，不参与 32dp 的测量，因此不会把圆钮撑大
+            // （撑大就会把底排又挤回两行，正是这一轮要修掉的东西）。
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(x = 3.dp, y = (-3).dp)
+                    .heightIn(min = 15.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.error)
+                    .padding(horizontal = 4.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = pendingCount.toString(),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.surface,
+                )
+            }
+        }
     }
 }
 

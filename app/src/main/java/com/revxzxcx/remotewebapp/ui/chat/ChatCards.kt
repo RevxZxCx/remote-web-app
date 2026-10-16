@@ -215,101 +215,110 @@ internal fun ChangesCard(
     val summary = (entry as? ChangesEntry.Loaded)?.summary
     var expanded by rememberSaveable(turn) { mutableStateOf(true) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                shape = RoundedCornerShape(8.dp),
-            )
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+    // R028 ②（用户 m41448 批准的效果图 s2）：「卡片＝实底 surface + 1dp outlineVariant 描边」。
+    // 原来这里是 `surfaceVariant.copy(alpha = 0.5f)` 的**半透明底色**——与首页那套实底描边
+    // 卡片不是一个语言，而且半透明底压在消息列表上时边界发糊（同一件事在 R016/R018 已经
+    // 在 GroupRow / 工具卡上修过，这张卡当时漏了）。
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = when {
-                    summary != null && summary.total == 0 -> "第 ${turn + 1} 轮：没有改动文件"
-                    summary != null -> "第 ${turn + 1} 轮：改动 ${summary.total} 个文件"
-                    entry is ChangesEntry.Failed -> "本轮改动读取失败"
-                    entry is ChangesEntry.Unavailable -> "本轮改动的记录已不可用"
-                    // entry == null 且 loading == false：既没有摘要、也没有在飞行的请求。
-                    // 快照裁剪后（重连、或卡片离开了窗口）会短暂落到这里，若还说「正在
-                    // 读取…」就是永不结束的加载（R005 P3 补遗）——如实说「还没取到」并给重试。
-                    loading -> "正在读取本轮改动…"
-                    else -> "本轮改动尚未读取"
-                },
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.weight(1f),
-            )
-            if (summary != null && summary.total > 0) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "+${summary.added} -${summary.deleted}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-
-        if (summary != null && summary.total > 0) {
-            TextButton(onClick = { expanded = !expanded }) {
-                Text(if (expanded) "收起" else "展开", style = MaterialTheme.typography.labelSmall)
-            }
-            AnimatedVisibility(visible = expanded) {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    // 只渲染前 MAX_LISTED_FILES 条：单个 LazyColumn item 里塞 500 行
-                    // 会让展开时整块一起测量、且无法被列表回收（R005 P3-3）。
-                    summary.files.take(MAX_LISTED_FILES).forEachIndexed { index, file ->
-                        ChangedFileRow(file) { onOpenFile(file.path, file.display, index) }
-                    }
-                    val hidden = summary.total - minOf(summary.files.size, MAX_LISTED_FILES)
-                    if (hidden > 0) {
-                        Text(
-                            text = "还有 $hidden 个文件未列出",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 4.dp),
-                        )
-                    }
-                }
-            }
-        }
-
-        // 取不到摘要时必须说清原因，否则用户会以为「这轮真没改文件」。两种失败
-        // 的归因完全不同：404 是记录真的随 Host 进程没了，其它是网络/解析问题。
-        when (entry) {
-            is ChangesEntry.Unavailable -> Text(
-                text = ChangesLimitations.HOST_RESTART,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-
-            is ChangesEntry.Failed -> Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(top = 4.dp),
-            ) {
-                Text(
-                    text = entry.reason,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
+                    text = when {
+                        summary != null && summary.total == 0 -> "第 ${turn + 1} 轮：没有改动文件"
+                        summary != null -> "第 ${turn + 1} 轮：改动 ${summary.total} 个文件"
+                        entry is ChangesEntry.Failed -> "本轮改动读取失败"
+                        entry is ChangesEntry.Unavailable -> "本轮改动的记录已不可用"
+                        // entry == null 且 loading == false：既没有摘要、也没有在飞行的请求。
+                        // 快照裁剪后（重连、或卡片离开了窗口）会短暂落到这里，若还说「正在
+                        // 读取…」就是永不结束的加载（R005 P3 补遗）——如实说「还没取到」并给重试。
+                        loading -> "正在读取本轮改动…"
+                        else -> "本轮改动尚未读取"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = FontFamily.Monospace,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = onRetry) {
-                    Text("重试", style = MaterialTheme.typography.labelSmall)
+                if (summary != null && summary.total > 0) {
+                    Text(
+                        text = "+${summary.added} -${summary.deleted}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
 
-            // entry == null 且已经没有在飞行的请求：不能就这么停在「正在读取…」，
-            // 给一个明确的重试入口（R005 P3 补遗）。
-            null -> if (!loading) {
-                TextButton(onClick = onRetry) {
-                    Text("读取改动", style = MaterialTheme.typography.labelSmall)
+            if (summary != null && summary.total > 0) {
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(if (expanded) "收起" else "展开", style = MaterialTheme.typography.labelSmall)
+                }
+                AnimatedVisibility(visible = expanded) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        // 只渲染前 MAX_LISTED_FILES 条：单个 LazyColumn item 里塞 500 行
+                        // 会让展开时整块一起测量、且无法被列表回收（R005 P3-3）。
+                        summary.files.take(MAX_LISTED_FILES).forEachIndexed { index, file ->
+                            ChangedFileRow(file) { onOpenFile(file.path, file.display, index) }
+                        }
+                        val hidden = summary.total - minOf(summary.files.size, MAX_LISTED_FILES)
+                        if (hidden > 0) {
+                            Text(
+                                text = "还有 $hidden 个文件未列出",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                        }
+                    }
                 }
             }
 
-            else -> Unit
+            // 取不到摘要时必须说清原因，否则用户会以为「这轮真没改文件」。两种失败
+            // 的归因完全不同：404 是记录真的随 Host 进程没了，其它是网络/解析问题。
+            when (entry) {
+                is ChangesEntry.Unavailable -> Text(
+                    text = ChangesLimitations.HOST_RESTART,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+
+                is ChangesEntry.Failed -> Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(top = 4.dp),
+                ) {
+                    Text(
+                        text = entry.reason,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onRetry) {
+                        Text("重试", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+
+                // entry == null 且已经没有在飞行的请求：不能就这么停在「正在读取…」，
+                // 给一个明确的重试入口（R005 P3 补遗）。
+                null -> if (!loading) {
+                    TextButton(onClick = onRetry) {
+                        Text("读取改动", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+
+                else -> Unit
+            }
         }
-    }
+        }
 }
 
 /** 摘要里的一行文件。 */

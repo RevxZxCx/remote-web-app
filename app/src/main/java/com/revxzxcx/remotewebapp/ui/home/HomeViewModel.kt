@@ -8,6 +8,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.revxzxcx.remotewebapp.core.cache.DshCache
 import com.revxzxcx.remotewebapp.core.connection.DshConnection
 import com.revxzxcx.remotewebapp.core.protocol.CarrierState
+import com.revxzxcx.remotewebapp.core.protocol.MuxStats
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
 import com.revxzxcx.remotewebapp.core.session.SessionActionRepository
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
@@ -17,6 +18,8 @@ import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.workspace.Workspace
 import com.revxzxcx.remotewebapp.core.workspace.WorkspaceRepository
 import com.revxzxcx.remotewebapp.core.workspace.WorkspaceSnapshot
+import com.revxzxcx.remotewebapp.ui.common.ConnectionDetails
+import com.revxzxcx.remotewebapp.ui.common.maskDeviceId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -25,6 +28,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.stateIn
@@ -138,6 +142,42 @@ class HomeViewModel(
     val carrier: StateFlow<CarrierState> = connection.mux.stats
         .map { it.carrier }
         .stateIn(viewModelScope, SharingStarted.Eagerly, connection.mux.stats.value.carrier)
+
+    /**
+     * 顶栏连接指示器要展示的细节（R028 ①）。
+     *
+     * 与 [carrier] 分开是因为两者**刷新频率差几个数量级**：载波状态只在连接建立/断开时变，
+     * 而这里要跟着每一帧收发更新。合成一条会让状态条的每一次重组都白算一遍打码。
+     *
+     * 打码在 [connectionDetailsOf] 里做一次，不留「顺手显示完整 deviceId」的口子。
+     *
+     * **代价已知**：`maskDeviceId` 仍在 `combine` 内**每帧重算**（R028 审查 P3-12 指出这与
+     * 「拆开是为了不每次白算打码」的自述理由不符）。保留原样是因为真实成本只有一次
+     * SHA 前缀拼接级的字符串操作，而把它提出去要引入额外缓存与失效逻辑——不值得。
+     * 自述理由已在上面改成准确表述：拆开是为了**限制重组范围**（消费端见 HomeScreen 的
+     * `actions` lambda），不是为了省这次打码。
+     */
+    val connectionDetails: StateFlow<ConnectionDetails> = connection.mux.stats
+        .combine(connection.remoteEvents.clientId) { stats, clientId -> stats to clientId }
+        .map { (stats, clientId) -> connectionDetailsOf(stats, clientId) }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            // 初值走**同一个**构造入口（R028 审查 P3-6）：早先这里逐字重复了一遍
+            // `ConnectionDetails(...)`，`ConnectionDetails` 新增字段时两处必然漂移，
+            // 而漂移方向恰好是「初值少一个字段 → 首帧闪一下空值」这种难查的形态。
+            connectionDetailsOf(connection.mux.stats.value, connection.remoteEvents.clientId.value),
+        )
+
+    private fun connectionDetailsOf(stats: MuxStats, clientId: String?): ConnectionDetails =
+        ConnectionDetails(
+            baseUrl = connection.baseUrl,
+            maskedDeviceId = maskDeviceId(connection.deviceId),
+            channelReady = clientId != null,
+            framesIn = stats.framesIn,
+            framesOut = stats.framesOut,
+            lastFailure = stats.lastFailure,
+        )
 
     private var job: Job? = null
     private var sessionJob: Job? = null

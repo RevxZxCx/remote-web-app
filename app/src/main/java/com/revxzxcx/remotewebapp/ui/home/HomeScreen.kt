@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DrawerState
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -82,7 +83,7 @@ import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.workspace.Workspace
 import com.revxzxcx.remotewebapp.ui.common.AppIconButton
 import com.revxzxcx.remotewebapp.ui.common.CacheNotice
-import com.revxzxcx.remotewebapp.ui.common.ConnectionBanner
+import com.revxzxcx.remotewebapp.ui.common.ConnectionIndicator
 import com.revxzxcx.remotewebapp.ui.common.GeneratingGlyph
 import com.revxzxcx.remotewebapp.ui.common.GlyphSize
 import com.revxzxcx.remotewebapp.ui.common.OverflowItem
@@ -116,7 +117,6 @@ fun HomeScreen(
     onOpenSettings: (() -> Unit)? = null,
 ) {
     val state by viewModel.state.collectAsState()
-    val carrier by viewModel.carrier.collectAsState()
     val actionBusy by viewModel.actionBusy.collectAsState()
     val actionError by viewModel.actionError.collectAsState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -134,9 +134,13 @@ fun HomeScreen(
     // 但若确认框的可见性挂在 remember 上，旋屏会让它静默消失 = 防护被绕过。
     var menuOpen by rememberSaveable { mutableStateOf(false) }
 
-    // 抽屉的开合由 `drawerState` 自己持有（`ModalNavigationDrawer` 已经处理了手势与返回键），
-    // 不再镜像到 ViewModel —— 早先那个 `drawerOpen` 字段没有任何回写点，恒为 false，
-    // 只会留下错误的心智模型（R003 P3-2）。
+    // 抽屉的开合由 `drawerState` 自己持有，不再镜像到 ViewModel —— 早先那个 `drawerOpen`
+    // 字段没有任何回写点，恒为 false，只会留下错误的心智模型（R003 P3-2）。
+    //
+    // 系统返回键（R028 ②）：**必须**把 `drawerState` 传给 `ModalDrawerSheet`。material3 1.4.0
+    // 只在接收 `DrawerState` 的那个重载里注册预测性返回回调；不带参数的旧重载会给内部
+    // 参数传 null 并被短路，于是抽屉打开时**零回调注册**，返回落到系统默认 = finish Activity。
+    // 行号与结论都经反编译核实（详见 docs/dev 的 R028 记录），不要改回无参重载。
 
     val openSession: (SessionSummary, Workspace?) -> Unit = { session, workspace ->
         val handler = onOpenSession
@@ -153,7 +157,7 @@ fun HomeScreen(
         drawerState = drawerState,
         gesturesEnabled = true,
         drawerContent = {
-            ModalDrawerSheet {
+            HomeDrawerSheet(drawerState = drawerState) {
                 SessionDrawer(
                     state = state,
                     onOpenSession = { session, workspace ->
@@ -199,8 +203,17 @@ fun HomeScreen(
                                 val subtitle = when {
                                     state.loading -> "连接中…"
                                     state.error != null -> state.error.orEmpty()
-                                    state.fromCache -> "缓存内容 · 工作区 ${state.snapshot?.items?.size ?: 0}"
-                                    else -> "已连接 · 工作区 ${state.snapshot?.items?.size ?: 0}"
+                                    state.fromCache -> {
+                                        // R028 ①：副标题不再重复胶囊里的「已连接」，
+                                        // 改成两个只有这里有的事实（工作区数、会话数）。
+                                        val workspaces = state.snapshot?.items?.size ?: 0
+                                        "缓存内容 · 工作区 $workspaces · 会话 ${state.sessions.items.size}"
+                                    }
+
+                                    else -> {
+                                        val workspaces = state.snapshot?.items?.size ?: 0
+                                        "工作区 $workspaces · 会话 ${state.sessions.items.size}"
+                                    }
                                 }
                                 Text(
                                     subtitle,
@@ -212,10 +225,35 @@ fun HomeScreen(
                             }
                         },
                         actions = {
+                            // R028 ①：连接状态收进顶栏，放在「更多」**左边**。
+                            // 原来顶栏下面永远压着一条整宽状态条（ConnectionBanner），
+                            // 不管健不健康都占一整行；现在三级信息密度：
+                            // 圆点（不打扰）→ 胶囊（想知道）→ 面板（要排查）。
+                            //
+                            // 两个 `collectAsState` 刻意写在 `actions` 这个 lambda **里面**
+                            // （R028 审查 P2-3）：`connectionDetails` 跟着每一帧收发更新，
+                            // 若在 `HomeScreen` 函数体顶层读取，Compose 会把失效范围记在
+                            // 整个 HomeScreen 的重组作用域上——每一帧都重建顶栏与列表，
+                            // 恰好抵消了把 `carrier` 与 `connectionDetails` 拆开省下的开销。
+                            // 放进 lambda 后高频失效只波及顶栏右侧这一格。
+                            val carrier by viewModel.carrier.collectAsState()
+                            val connectionDetails by viewModel.connectionDetails.collectAsState()
+                            ConnectionIndicator(
+                                carrier = carrier,
+                                details = connectionDetails,
+                                // 「重新配对」= 退出配对 + 重新配对，是破坏性操作（会擦凭证）。
+                                // AppRoot 层的 onUnpair 只置位 pendingUnpair，确认框由
+                                // AppRoot 统一渲染（R018 P1-1）——面板里不能另开一条不确认的路。
+                                onRepairRequest = onUnpair,
+                                onRetry = viewModel::retry,
+                                onOpenDebug = onOpenDebug,
+                            )
                             // R017 ①：actions **只准一个**图标按钮。刷新曾是一个独立的
                             // Refresh 图标钮，与 MoreVert 并排——那样顶栏右端有两个图标，
                             // 既违反规范也让「刷新」离「退出配对」只差几十像素（误触风险）。
                             // 现在刷新收进溢出菜单，放在第一项（最高频）。
+                            // （连接指示器不是「图标按钮」，它自带状态语义，R028 明确要求
+                            // 它常驻顶栏。）
                             OverflowMenuIconButton(
                                 expanded = menuOpen,
                                 onExpandedChange = { menuOpen = it },
@@ -257,15 +295,9 @@ fun HomeScreen(
                             }
                         },
                     )
-                    ConnectionBanner(
-                        carrier = carrier,
-                        // 「重新配对」= 退出配对 + 重新配对，是破坏性操作（会擦凭证）。
-                        // AppRoot 层的 onUnpair 现在只置位 pendingUnpair，确认框由
-                        // AppRoot 统一渲染（R018 P1-1）。
-                        onRepairRequest = onUnpair,
-                        onRetry = viewModel::retry,
-                    )
 
+                    // R028 ①：整宽状态条已收进顶栏，只剩缓存提示（它与连接状态可以同时为真，
+                    // 合成一条会丢掉其中一半信息，所以保留独立一条）。
                     if (state.fromCache) {
                         CacheNotice("正在同步：当前显示的是上次的缓存内容。")
                     }
@@ -729,6 +761,29 @@ private fun SessionRowItem(
             onUnpin = { onUnpin(summary.sessionId) },
         )
     }
+}
+
+/**
+ * 抽屉侧板。**存在的唯一理由是让 R028 ② 的返回键修复可以被单测钉住。**
+ *
+ * 为什么必须抽出来：material3 1.4.0 只在不带/带 `DrawerState` 的**两个** `ModalDrawerSheet`
+ * 重载里注册预测性返回回调——不带参数的那个给内部 `drawerPredictiveBackState` 传
+ * `aconst_null`，随后在 `DrawerSheet-cm3T3N0` 里被 `ifnull` 短路，于是抽屉打开时
+ * **平台侧零回调注册**，系统返回落到默认行为 = `finish()` Activity（进程存活）。
+ *
+ * 也就是说，这一整条链上「抽屉返回键是否可用」**只由一个实参决定**：`drawerState`
+ * 传没传。这个错误用眼过一遍代码是发现不了的（`drawerState` 就在同一个函数里、
+ * 到处都在用），设备上复现也只是「按返回退出应用」——和「回首页」看起来一样像
+ * 正常导航。所以把它抽成一个签名上就要求 `drawerState` 的 `internal` 组合函数，
+ * 让 `HomeDrawerSheetTest` 能在 Robolectric 下断言「抽屉打开时返回关闭抽屉而不是
+ * finish Activity」。删掉这个参数会让那条测试失败，而不是等到用户来报。
+ */
+@Composable
+internal fun HomeDrawerSheet(
+    drawerState: DrawerState,
+    content: @Composable () -> Unit,
+) {
+    ModalDrawerSheet(drawerState = drawerState) { content() }
 }
 
 /**

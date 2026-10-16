@@ -307,7 +307,7 @@ fun GeneratingStatus(
  * 但**状态本身不消失**——「正在生成」这个信息永远要能看见。
  */
 @Composable
-private fun rememberAnimationsEnabled(): Boolean {
+internal fun rememberAnimationsEnabled(): Boolean {
     val context = LocalContext.current
     return remember(context) {
         runCatching {
