@@ -57,6 +57,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -152,7 +153,6 @@ import com.revxzxcx.remotewebapp.ui.common.decodeScaled
 import com.revxzxcx.remotewebapp.ui.files.FileTarget
 import com.revxzxcx.remotewebapp.ui.home.TimeText
 import com.revxzxcx.remotewebapp.ui.home.rememberNow
-import com.revxzxcx.remotewebapp.ui.markdown.CopyIconButton
 import com.revxzxcx.remotewebapp.ui.markdown.MdBlocks
 import com.revxzxcx.remotewebapp.ui.markdown.MdStream
 
@@ -1902,9 +1902,9 @@ private const val MAX_INLINE_RESULT_CHARS = 4_000
 /**
  * 一条消息的完整渲染（用户气泡 / 助手气泡 / 各类卡片）。
  *
- * `internal` 而不是 `private`：`UserCopyButtonTest` 要走「用户消息 → 复制按钮」这条
- * 真实路径才能守住 R029 审查 P2-1（首版只在助手分支渲染按钮，用户在的那一支被静默丢弃）。
- * 只测 `Bubble` 本体不行——它拿不到 `ChatItemRow` 传不传 `copyText` 这件事。
+ * `internal` 而不是 `private`：`MessageSelectionTest` 要走「消息 → 是否可长按选择」这条
+ * 真实路径，才能守住「正文可选、工具卡不可选」这个分流（R030）。
+ * 只测 `Bubble` 本体不行——它拿不到 `ChatItemRow` 给每条消息传的 `selectable`。
  */
 @Composable
 internal fun ChatItemRow(
@@ -1934,8 +1934,6 @@ internal fun ChatItemRow(
             time = item.time,
             now = now,
             modifier = modifier,
-            // 只发图不发字的消息没有可复制的文本（`text` 为空 → 不显示按钮）。
-            copyText = item.text.takeIf { it.isNotBlank() },
         ) {
             Column(
                 modifier = Modifier.fillMaxWidth(),
@@ -1972,13 +1970,6 @@ internal fun ChatItemRow(
             // 实测 182:182 一一对应，不滤就渲染两遍。
             val visible = visibleAssistantBlocks(item.blocks, item.interrupted)
             if (visible.isEmpty()) return
-            // 复制的是**正文**（Text 块），不含思考与工具调用：用户复制一条回复是为了
-            // 拿去用，把几千字推理和工具参数一起塞进剪贴板反而要他自己删。
-            val copyText = remember(item.blocks) {
-                item.blocks.filterIsInstance<ContentBlock.Text>()
-                    .joinToString("\n\n") { it.text }
-                    .takeIf { it.isNotBlank() }
-            }
             // R016：助手正文不设背景。内容自带层次（Markdown 标题 / 代码块 / 分隔线），
             // 再套色块只会把层次糊掉。用户气泡仍然有底色，那才是「谁说的」的分界。
             Bubble(
@@ -1991,7 +1982,6 @@ internal fun ChatItemRow(
                 wide = true,
                 modifier = modifier,
                 railColor = railColor,
-                copyText = copyText,
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     visible.forEach { block -> BlockView(block, onOpenFile, attachments, sessionId) }
@@ -2008,6 +1998,8 @@ internal fun ChatItemRow(
             // 工具卡自己就是「实底 + 1dp 描边」的卡（R017），再画一条导轨会和卡的
             // 左描边叠成 3dp，且让「卡」读起来像「行」。导轨只给纯内容气泡。
             railColor = null,
+            // 卡里有展开按钮与文件跳转，包进选择容器会让长按抢走点击（R030）。
+            selectable = false,
         ) {
             ToolCallCard(item, onOpenFile = { path -> onOpenFile(FileTarget(path)) })
         }
@@ -2019,6 +2011,7 @@ internal fun ChatItemRow(
             now = now,
             modifier = modifier,
             railColor = null,
+            selectable = false,
         ) {
             ToolResultCard(item)
         }
@@ -2556,12 +2549,18 @@ internal fun Bubble(
     railColor: Color? = MaterialTheme.colorScheme.outline,
     pulseKey: Any? = null,
     /**
-     * 非 null 时在消息底部给一个复制按钮（用户 m45428 第 6 条：「对话界面应该要可以复制」）。
+     * 消息内容是否可长按选择。
      *
-     * 传**已经组装好的纯文本**而不是让 `Bubble` 自己去遍历 content：`content` 是任意
-     * Composable 树，从里面反抽文本是不可能的。调用方本来就知道这条消息的文本是什么。
+     * 默认 true：正文用 [SelectionContainer] 包住，长按即出系统的选择手柄与「复制」菜单
+     * （用户 m01082 修正：「用户可以长按复制界面中的内容」）。
+     *
+     * 工具调用 / 工具结果卡传 false——它们的展开体动辄几千字的原始参数，包进选择容器会让
+     * 整张卡吞掉点击事件，而那里本来也没有需要逐句复制的正文。
+     *
+     * 注意 `ChatItem.Notice` 与 `ChatItem.Changes` **不经过本组件**（前者是分隔行、后者是
+     * `ChangesCard`），它们与 `selectable` 无关，不要以为这里漏传了参数。
      */
-    copyText: String? = null,
+    selectable: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     val caption = buildString {
@@ -2644,28 +2643,19 @@ internal fun Bubble(
                         .padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    content()
-                    // 底部一行：左边时间戳，右边复制按钮。复制按钮**只在有文本时出现**
-                    // （纯图片消息没有可复制的内容，给一个按了没反应的按钮更糟）。
-                    //
-                    // 布局用 Row + weight 而不是把按钮绝对定位：时间戳长度会变
-                    // （「刚刚」/「12 分钟前」/「昨天 11:46」），绝对定位会撞上去。
-                    if (caption.isNotBlank() || copyText != null) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (caption.isNotBlank()) {
-                                Text(
-                                    text = caption,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                                    modifier = Modifier.weight(1f),
-                                )
-                            } else {
-                                Spacer(Modifier.weight(1f))
-                            }
-                            if (copyText != null) {
-                                CopyMessageButton(text = copyText)
-                            }
+                    if (selectable) {
+                        SelectionContainer(modifier = Modifier.testTag(MessageSelectableTestTag)) {
+                            content()
                         }
+                    } else {
+                        content()
+                    }
+                    if (caption.isNotBlank()) {
+                        Text(
+                            text = caption,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                        )
                     }
                 }
             }
@@ -2683,29 +2673,19 @@ internal fun Bubble(
                     Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    content()
-                    // 用户气泡同样要能复制（R029 审查 P2-1）。首版只在 `background == null`
-                    // 的助手分支渲染了 `copyText`，用户消息传进来的值被**静默丢弃**——
-                    // 而用户自己发的消息（路径、命令、贴进去的报错）正是最常被复制的一类。
-                    //
-                    // 布局与助手分支一致：时间戳 `weight(1f)` 占左、按钮贴右，不用绝对定位
-                    // （时间戳文案长度会变，绝对定位会撞上去）。
-                    if (caption.isNotBlank() || copyText != null) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (caption.isNotBlank()) {
-                                Text(
-                                    text = caption,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                                    modifier = Modifier.weight(1f),
-                                )
-                            } else {
-                                Spacer(Modifier.weight(1f))
-                            }
-                            if (copyText != null) {
-                                CopyMessageButton(text = copyText)
-                            }
+                    if (selectable) {
+                        SelectionContainer(modifier = Modifier.testTag(MessageSelectableTestTag)) {
+                            content()
                         }
+                    } else {
+                        content()
+                    }
+                    if (caption.isNotBlank()) {
+                        Text(
+                            text = caption,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                        )
                     }
                 }
             }
@@ -2723,21 +2703,13 @@ internal fun Bubble(
 internal const val ChatRailTestTag = "chat-bubble-rail"
 
 /**
- * 消息底部的复制按钮（用户 m45428 第 6 条：「对话界面应该要可以复制」）。
+ * 「正文可长按选择」那一层 [SelectionContainer] 的测试标签。
  *
- * 与代码块的复制按钮共用同一套图标与反馈（[com.revxzxcx.remotewebapp.ui.markdown.CopyIconButton]），
- * 但尺寸更小：消息底部的时间戳是 `labelSmall`（11sp），按钮 32dp 已经比它高出一截，
- * 再大就会把每条消息的底部撑出一片空白。
+ * `SelectionContainer` 会把 modifier 应用到自己那个布局节点上，所以 tag 可查（实测
+ * 配置为 `TestTag` + `Focused` + `RequestFocus`）。**但子树里没有任何节点带
+ * `SemanticsActions.CopyText`**——想靠「有没有 CopyText」判断可选性是行不通的。
  *
- * 为什么不做成「长按消息气泡弹菜单」：长按会被 `LazyColumn` 的滚动与文本选择手势竞争，
- * 而且用户已经习惯了「复制按钮就在内容旁边」。代价是每条助手消息多占 32dp 高度——
- * 换来的是「想复制时立刻找得到」。
+ * 「这一条消息是否真的可选」的判据因此是 `RequestFocus`：普通容器没有这个动作，
+ * 换成 `Box` 后断言即变红（已做变异验证）。
  */
-@Composable
-private fun CopyMessageButton(text: String) {
-    CopyIconButton(
-        text = text,
-        contentDescription = "复制消息",
-        modifier = Modifier.size(32.dp),
-    )
-}
+internal const val MessageSelectableTestTag = "chat-message-selectable"

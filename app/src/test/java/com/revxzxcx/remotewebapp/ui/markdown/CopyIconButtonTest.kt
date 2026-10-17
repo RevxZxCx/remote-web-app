@@ -63,9 +63,9 @@ class CopyIconButtonTest {
     fun `按钮带可访问名`() {
         compose.setContent {
             DshAssistantTheme {
-                CopyIconButton(text = "x", contentDescription = "复制消息")
+                CopyIconButton(text = "x", contentDescription = "复制代码")
             }
         }
-        compose.onNodeWithContentDescription("复制消息").assertExists()
+        compose.onNodeWithContentDescription("复制代码").assertExists()
     }
 }
