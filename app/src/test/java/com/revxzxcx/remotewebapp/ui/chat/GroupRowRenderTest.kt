@@ -131,7 +131,9 @@ class GroupRowRenderTest {
         compose.onNodeWithText("已读取文件").performClick()
         compose.runOnIdle { }
 
-        assertEquals(1, compose.onAllNodesWithText("工具 · read", substring = true).count())
+        // R028b（用户 m44550 第二张图）：组内成员改成**行式**——工具名单独是一个
+        // 等宽 chip（`read`），不再是 `工具 · read` 那样一整句。判据相应改成 chip 本身。
+        assertEquals(1, compose.onAllNodesWithText("read", substring = false).count())
         compose.onNodeWithText("结果文本").assertExists()
     }
 
@@ -142,12 +144,33 @@ class GroupRowRenderTest {
 
         compose.onNodeWithText("已读取文件").performClick()
         compose.runOnIdle { }
-        assertEquals(1, compose.onAllNodesWithText("工具 · read", substring = true).count())
+        assertEquals(1, compose.onAllNodesWithText("read", substring = false).count())
 
         compose.onNodeWithText("已读取文件").performClick()
         compose.runOnIdle { }
 
-        assertEquals(0, compose.onAllNodesWithText("工具 · read", substring = true).count())
+        assertEquals(0, compose.onAllNodesWithText("read", substring = false).count())
+    }
+
+    @Test
+    fun `组内工具条目是行式而不是一张张卡片`() {
+        // 这是用户 m44550 第二条的原话要求：「操作和工具调用的样式还是和之前一样，
+        // 你需要查看原型图中的表现，做对应的更改」。原型 `docs/R028-效果图.html` 的
+        // `.grow` 是一行：`[tool chip] [arg] ....... [tag]`，不是带描边的卡。
+        val members = listOf(
+            toolCall(1, "write", """{"file_path":"app/build.gradle.kts","content":"x"}"""),
+        )
+        setGroup(members, running = false)
+        compose.onNodeWithText("已写入文件").performClick()
+        compose.runOnIdle { }
+
+        // 工具名 chip：等宽、裸文本，没有 `工具 · ` 前缀。
+        compose.onNodeWithText("write", substring = false).assertExists()
+        assertEquals(0, compose.onAllNodesWithText("工具 · write", substring = true).count())
+        // 参数摘要：等宽路径。
+        compose.onNodeWithText("app/build.gradle.kts", substring = true).assertExists()
+        // 状态 tag。
+        compose.onNodeWithText("已编辑").assertExists()
     }
 
     @Test

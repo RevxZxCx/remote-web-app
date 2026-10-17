@@ -28,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -57,9 +58,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.core.session.AskQuestion
 import com.revxzxcx.remotewebapp.core.session.InteractiveComposerRequest
+import com.revxzxcx.remotewebapp.core.events.ApprovalPolicy
+import com.revxzxcx.remotewebapp.core.events.SandboxMode
 import com.revxzxcx.remotewebapp.core.events.SessionPermission
 
 /**
@@ -545,10 +550,15 @@ internal fun PermissionChip(
         MaterialTheme.colorScheme.onSurfaceVariant
     }
     Box(
+        // 🔴 `clip` 不能挂在父 Box 上（R028b 审查 P1-2）：角标用 `offset(x=3dp, y=-3dp)`
+        // 挂在 32dp 圆外，父级一旦裁剪，红点只剩内侧一角、数字读不出来——而「有待批」
+        // 正是最需要被看见的信号（用户 m44550 第 4 条就是在意这个按钮的表达）。
+        //
+        // 现在只让**背景层**自裁成圆（`background(color, CircleShape)`），父 Box 不裁剪，
+        // 角标才能完整露在外面；描边走 `border`，它本身不裁剪子项。
         modifier = Modifier
             .size(32.dp)
-            .clip(CircleShape)
-            .background(Color.Transparent)
+            .background(Color.Transparent, CircleShape)
             .border(
                 1.dp,
                 if (urgent) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outlineVariant,
@@ -558,12 +568,15 @@ internal fun PermissionChip(
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
+        val look = permissionIcon(permission)
         Icon(
-            // `Lock` 是 material-icons-core 1.7.8 里**唯一**可用的锁形图标：
-            // Shield / Security / VerifiedUser / Key 都不在这 49 枚里（已用 `jar tf` 核实）。
-            imageVector = Icons.Default.Lock,
+            imageVector = look.icon,
             contentDescription = null,
-            tint = accent,
+            // 颜色承担第二个维度：审批策略为「自动允许」→ primary 高亮。
+            // 那意味着敏感工具不再询问，与「每次询问」是两种不同的风险姿态，
+            // 而图标只能表达沙箱模式（两维共 6 种组合，49 枚图标里没有任何枚能同时
+            // 表达两维，见 [permissionIcon]）。
+            tint = if (urgent) accent else if (look.autoApprove) MaterialTheme.colorScheme.primary else accent,
             modifier = Modifier.size(15.dp),
         )
         if (urgent) {
@@ -573,6 +586,9 @@ internal fun PermissionChip(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .offset(x = 3.dp, y = (-3).dp)
+                    // testTag 放在 `offset` 之后：渲染测试要量的是**偏移后**的位置，
+                    // 只有这样才能判断它有没有伸出 32dp 圆钮（R028b 审查 P1-2 的守护）。
+                    .testTag(PermissionBadgeTestTag)
                     .heightIn(min = 15.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.error)
@@ -590,6 +606,54 @@ internal fun PermissionChip(
         }
     }
 }
+
+/**
+ * 按**沙箱模式**选图标、按**审批策略**决定高亮（用户 m44550）。
+ *
+ * 原话：「对于权限按钮，我不希望只显示一个锁的图标，而是不同权限情况下，有不同的图标」。
+ *
+ * ## 为什么图标只表达一个维度
+ * [SessionPermission] 有两个正交维度（D54 之前已论证不能合成一个档位）：
+ * 沙箱模式（只读 / 工作区内可写 / 完全权限）与审批策略（每次询问 / 自动允许）。
+ * 两维共 6 种组合，而 material-icons-core 1.7.8 只有 49 枚图标，**没有任何一枚能同时
+ * 表达两维**（`Shield` / `Security` / `VerifiedUser` / `Key` 全都不存在，已用 `jar tf`
+ * 核实）。所以图标承担语义最强的维度（沙箱模式），颜色承担审批策略。
+ *
+ * ## 图标映射
+ * - [SandboxMode.READ_ONLY] → `Lock`：闭合的锁＝只读，最直接对应；
+ * - [SandboxMode.WORKSPACE_WRITE] → `Edit`：铅笔＝可写（仍受限在本工作区），
+ *   49 枚里唯一表达「写入」的图标；
+ * - [SandboxMode.DANGER_FULL_ACCESS] → `Warning`：三角感叹号＝越出沙箱，语义最重；
+ * - 未知 → `Lock`：保守默认。宁可显示「像只读」也不要显示「像完全权限」——
+ *   后者会让用户以为权限已经被放开。
+ *
+ * 沙箱模式缺席时回落 `preset`（`permission/preset` 会同时设两者，但只有 preset
+ * 事件能告诉我们是哪个档位），与 [SessionPermission.summary] 的口径一致。
+ */
+internal fun permissionIcon(permission: SessionPermission): PermissionIconLook {
+    val mode = permission.sandboxMode ?: permission.preset
+    val icon = when (mode) {
+        SandboxMode.READ_ONLY -> Icons.Default.Lock
+        SandboxMode.WORKSPACE_WRITE -> Icons.Default.Edit
+        SandboxMode.DANGER_FULL_ACCESS -> Icons.Default.Warning
+        null -> Icons.Default.Lock
+    }
+    return PermissionIconLook(
+        icon = icon,
+        autoApprove = permission.approvalPolicy == ApprovalPolicy.NEVER,
+    )
+}
+
+/**
+ * [permissionIcon] 的结果。
+ *
+ * @param icon 沙箱模式对应的图标。
+ * @param autoApprove 审批策略是否为「自动允许」（决定图标是否用 primary 高亮）。
+ */
+internal data class PermissionIconLook(
+    val icon: ImageVector,
+    val autoApprove: Boolean,
+)
 
 /** 审批权限面板：只读展示当前策略，并说明为什么手机端改不了。 */
 @Composable
@@ -669,3 +733,12 @@ private fun InteractiveComposerRequest?.accent(): Color = when (this) {
     is InteractiveComposerRequest.Approval -> MaterialTheme.colorScheme.error
     else -> MaterialTheme.colorScheme.primary
 }
+
+/**
+ * 待批角标的语义标签（R028b 审查 P1-2 的守护）。
+ *
+ * 存在的唯一理由：角标是个裸 `Box` + `Text`，而 `PermissionChip` 的根带 `clickable`
+ * 会把子节点语义合并进去——测试拿 `onNodeWithText("2")` 量到的是合并后的圆钮本身
+ * （bounds 恒等于 32dp），测不出「有没有伸出圆钮」。加一个 testTag 才能精确量它。
+ */
+internal const val PermissionBadgeTestTag = "permission-pending-badge"

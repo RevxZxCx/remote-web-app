@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
@@ -51,6 +52,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -101,9 +103,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -1079,9 +1084,15 @@ internal fun Composer(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(start = 10.dp, end = 8.dp, top = 2.dp, bottom = 8.dp),
+                            .padding(start = 8.dp, end = 8.dp, top = 2.dp, bottom = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        // 用户 m44550：「将加号按钮移动到最左边，这样显得整体更为协调一些」。
+                        // 于是底排顺序从「权限 · 模型 · …… · ＋ · 发送」改为
+                        // 「＋ · 权限 · 模型 · …… · 发送」——＋ 与发送分居两端，中间是
+                        // 两个只读徽标，视觉上两侧对称。
+                        AttachButton(onClick = { showAttachSheet = true })
+                        Spacer(Modifier.width(6.dp))
                         permissionChip()
                         Spacer(Modifier.width(6.dp))
                         // 模型胶囊用**唯一**一个弹性槽吃掉剩余宽度：它自己按自然宽度画，
@@ -1090,11 +1101,10 @@ internal fun Composer(
                         // 早先写成 `Box(weight(1f, fill = false)) { chip }` + `Spacer(weight(1f))`，
                         // 两个 1f 兄弟把剩余宽度对半分，而 spacer 一个像素都用不掉——实测 360dp 上
                         // 胶囊只拿到约一半空间，`buddy/deepseek-v4.1-flash` 被截成「buddy/de…」，
-                        // 比「允许截断」的口径难看得多。现在 ＋/发送 由这个槽顶到最右，胶囊拿到
+                        // 比「允许截断」的口径难看得多。现在发送键由这个槽顶到最右，胶囊拿到
                         // 全部剩余宽度（效果图里 `.chip{flex:0 1 auto}` + `.spacer{flex:1 1 auto}`
                         // 的等价写法）。
                         Box(modifier = Modifier.weight(1f)) { modelChip() }
-                        AttachButton(onClick = { showAttachSheet = true })
                         Spacer(Modifier.width(6.dp))
                         ComposerSendButton(
                             draft = draft,
@@ -1507,6 +1517,9 @@ internal fun GroupRow(
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     val summary = remember(members, running) { summarizeGroup(members, running) }
+    // 展开区左侧那道 1dp 层级导轨的颜色，在组合作用域里取出来供 `drawBehind` 用
+    // （DrawScope 不是 @Composable，拿不到 MaterialTheme）。
+    val railLineColor = MaterialTheme.colorScheme.outlineVariant
     // R017 / D47：折叠卡改「实底 + 1dp 描边」。原来是
     // `surfaceVariant.copy(alpha = 0.45f)`——半透明叠加在消息列表的 surface 上，
     // 深色浅色两套主题各自糊成不同灰度，且与「助手气泡无底色」的形态没有区分度。
@@ -1617,24 +1630,49 @@ internal fun GroupRow(
                 // R017：左边那道 1dp 竖线是「层级导轨」。展开区里的每个成员自己已经是
                 // 一张卡/一条带导轨的气泡，外面再套一条线是为了回答「这些是从哪儿展开
                 // 来的」——没有它，展开区看起来像平白多出来的一堆卡片。
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    Box(
-                        Modifier
-                            .padding(top = 4.dp, bottom = 4.dp)
-                            .width(1.dp)
-                            .fillMaxHeight()
-                            .background(MaterialTheme.colorScheme.outlineVariant),
-                    )
+                //
+                // 🔴 画法：`drawBehind` 而不是「一个 width(1.dp).fillMaxHeight() 的 Box」
+                // （R028b 审查 P1-1 的正解）。
+                //
+                // 为什么不能用 Box + fillMaxHeight：这个 Row 住在聊天 LazyColumn 的 item
+                // 里，高度约束是 `Infinity`，`fillMaxHeight()` 在无界高度下取 `minHeight`
+                // = **0**，导轨一个像素都画不出来（同文件 `Bubble` 犯过同一个错）。
+                //
+                // 为什么也不能用 `height(IntrinsicSize.Min)`：那会向 Row 的子项请求**固有
+                // 高度**，而子项里有一个 `LazyColumn`——`SubcomposeLayout` 家族一律不支持
+                // 固有测量，直接抛 `IllegalStateException: Asking for intrinsic measurements
+                // of SubcomposeLayout layouts is not supported`。（这一条是变异验证抓到的：
+                // 加 IntrinsicSize 后 GroupRowRenderTest 三条全崩。）
+                //
+                // `drawBehind` 在**布局完成之后**才画，此时 `size.height` 已经是实测高度，
+                // 既不需要固有测量、也不需要 fillMaxHeight——零额外测量开销。
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .drawBehind {
+                            // 线宽 1dp，上下各留 4dp（与原 padding 口径一致）。
+                            val inset = 4.dp.toPx()
+                            drawRect(
+                                color = railLineColor,
+                                topLeft = Offset(0f, inset),
+                                size = Size(1.dp.toPx(), (size.height - inset * 2).coerceAtLeast(0f)),
+                            )
+                        },
+                ) {
                     LazyColumn(
                         modifier = Modifier
                             .padding(start = 10.dp, top = 10.dp)
                             .heightIn(max = 360.dp)
                             .fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        // R028b（用户 m44550 第二张图）：成员改为**行式**后必须去掉
+                        // 条目间距。行与行之间由各自的 1dp 上分隔线连接，若还留 8dp 空隙，
+                        // 分隔线会浮在两段空白中间（看起来像断开的短横线）。
+                        verticalArrangement = Arrangement.spacedBy(0.dp),
                     ) {
-                        itemsIndexed(members, key = { _, member -> member.seq }) { _, item ->
-                            ChatItemRow(
+                        itemsIndexed(members, key = { _, member -> member.seq }) { index, item ->
+                            GroupMemberRow(
                                 item = item,
+                                showTopDivider = index > 0,
                                 now = now,
                                 changes = changes[item.seq],
                                 changesLoading = item.seq in changesLoading,
@@ -1651,6 +1689,107 @@ internal fun GroupRow(
     }
 }
 
+/**
+ * 折叠分组内的一条成员。
+ *
+ * 与 [ChatItemRow] 的区别只有一处、但是 R028b 的全部内容：**工具调用/工具结果在
+ * 分组内走行式（[ToolCallRow] / [ToolResultRow]），而不是各自一张带描边的卡**。
+ *
+ * 为什么必须分成两个函数而不是给 [ChatItemRow] 加一个 `inGroup` 布尔：卡片形态在
+ * 分组外仍然是对的（一条零散的工具事件单独出现时需要自己的边框），而分组内几十条
+ * 卡片会叠成一面带横线的色块——用户 m44550 第二张图看到的正是这个（「操作和工具调用
+ * 的样式还是和之前一样」）。两者的**点击语义也不同**：卡片点标题展开，行式点整行进
+ * 文件页。用布尔开关会把两套语义混进一个函数。
+ */
+@Composable
+private fun GroupMemberRow(
+    item: ChatItem,
+    showTopDivider: Boolean,
+    now: Long,
+    changes: ChangesEntry?,
+    changesLoading: Boolean,
+    onOpenFile: (FileTarget) -> Unit,
+    onRetryChanges: (Long) -> Unit,
+    attachments: SessionAttachmentRepository,
+    sessionId: String,
+) {
+    when (item) {
+        is ChatItem.ToolCall -> {
+            var expanded by rememberSaveable(item.seq) { mutableStateOf(false) }
+            // 路径只解析一次，同时喂给行组件与「展开体可见性」（R028b 审查 P2-6）：
+            // 早先这里与 `ToolCallRow` 各解析一遍，同一条 arguments 每帧跑两遍 JSON。
+            val path = remember(item.seq, item.arguments) {
+                ToolFilePaths.extract(item.name, item.arguments)
+            }
+            Column(modifier = Modifier.fillMaxWidth()) {
+                ToolCallRow(
+                    item = item,
+                    path = path,
+                    showTopDivider = showTopDivider,
+                    onToggle = { expanded = !expanded },
+                    onOpenFile = { target -> onOpenFile(FileTarget(target)) },
+                )
+                // 展开体是**原始参数**，与有没有路径无关（审查 P2-3 的配套修复）：
+                // 早先 `expanded && path == null` 让 `write` / `edit` 这类带路径的调用
+                // 永远看不到 content / old_string，而那正是审查工具调用时最想看的东西。
+                AnimatedVisibility(visible = expanded) {
+                    Text(
+                        text = item.arguments.ifBlank { "（无参数）" }.take(MAX_INLINE_ARGUMENTS_CHARS),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                    )
+                }
+            }
+        }
+
+        is ChatItem.ToolResult -> {
+            var expanded by rememberSaveable(item.seq) { mutableStateOf(false) }
+            Column(modifier = Modifier.fillMaxWidth()) {
+                ToolResultRow(
+                    item = item,
+                    showTopDivider = showTopDivider,
+                    onToggle = { expanded = !expanded },
+                )
+                AnimatedVisibility(visible = expanded) {
+                    Text(
+                        text = item.text.ifBlank { "（无输出）" }.take(MAX_INLINE_RESULT_CHARS),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = if (item.isError) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                    )
+                }
+            }
+        }
+
+        // 其余成员（助手消息的思考/正文、改动卡、提示行……）保持原有形态，但**不画导轨**：
+        // 分组展开区外面已经有一道 1dp 层级导轨（审查 P2-9）。
+        else -> ChatItemRow(
+            item = item,
+            now = now,
+            changes = changes,
+            changesLoading = changesLoading,
+            onOpenFile = onOpenFile,
+            onRetryChanges = onRetryChanges,
+            attachments = attachments,
+            sessionId = sessionId,
+            railColor = null,
+        )
+    }
+}
+
+/** 分组内展开的原始参数最多显示这么多字符（比卡片形态的 2000 短：行内空间更小）。 */
+private const val MAX_INLINE_ARGUMENTS_CHARS = 1_200
+
+/** 分组内展开的工具输出最多显示这么多字符。 */
+private const val MAX_INLINE_RESULT_CHARS = 4_000
+
 @Composable
 private fun ChatItemRow(
     item: ChatItem,
@@ -1662,6 +1801,15 @@ private fun ChatItemRow(
     attachments: SessionAttachmentRepository,
     sessionId: String,
     modifier: Modifier = Modifier,
+    /**
+     * 助手正文左侧导轨的颜色；`null` = 不画。
+     *
+     * 分组内的成员必须传 `null`（R028b 审查 P2-9）：`GroupRow` 的展开区外面已经有
+     * 一道 1dp 的层级导轨，组内每条正文再画一条 2dp 导轨，两者相距仅 10dp，
+     * 看起来是「一条细线 + 每条内容各一条粗线」——与用户 m44550 第 1 条要的
+     * 「一条导轨」正好相反。默认值保持 `outline`，分组外仍然要导轨。
+     */
+    railColor: Color? = MaterialTheme.colorScheme.outline,
 ) {
     when (item) {
         is ChatItem.User -> Bubble(
@@ -1717,6 +1865,7 @@ private fun ChatItemRow(
                 // 助手正文常有代码块与表格，320dp 太窄。
                 wide = true,
                 modifier = modifier,
+                railColor = railColor,
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     visible.forEach { block -> BlockView(block, onOpenFile, attachments, sessionId) }
@@ -2258,7 +2407,7 @@ internal fun QueuedRow(
  * 布局上多了一层。可空让「没有背景」成为一个真实状态而不是一个透明颜色。
  */
 @Composable
-private fun Bubble(
+internal fun Bubble(
     alignEnd: Boolean,
     background: Color?,
     time: Long,
@@ -2313,13 +2462,33 @@ private fun Bubble(
                     railPulse.animateTo(2f, tween(300, easing = Motion.Emphasized))
                 }
             }
-            Row(modifier = Modifier.then(if (wide) Modifier.fillMaxWidth() else Modifier.widthIn(max = 340.dp))) {
+            // 导轨铺满整条消息（用户 m44550 第一张图：旧实现只画出短一截）。
+            //
+            // 导轨铺满整条消息（用户 m44550 第一张图：旧实现只画出短一截）。
+            //
+            // 🔴 这里必须用 `IntrinsicSize.Min`，而且**不是**可选优化——真机上导轨完全
+            // 消失就是漏了它。原因：这一行住在 `LazyColumn` 的 item 里，高度约束是
+            // **无界**的（`Constraints.Infinity`），而 `fillMaxHeight()` 在无界高度下的
+            // 语义是「取 maxHeight，否则取 minHeight」= **0**。于是导轨被压成 0 高，
+            // 宽度 2dp 的框一个像素都画不出来。
+            //
+            // `height(IntrinsicSize.Min)` 把这一行的高度约束改写成「子项固有高度」，
+            // 变成有界值，`fillMaxHeight()` 才有东西可填。这在真机（LazyColumn）与
+            // 渲染测试（有界根视图）里表现不同——**渲染测试当初是绿的，真机是空的**，
+            // 所以 `BubbleRailRenderTest` 必须自己用无界高度的 Column 复现这个场景，
+            // 否则它守护的是一个真机上不存在的布局。
+            Row(
+                modifier = Modifier
+                    .then(if (wide) Modifier.fillMaxWidth() else Modifier.widthIn(max = 340.dp))
+                    .height(IntrinsicSize.Min),
+            ) {
                 if (railColor != null) {
                     Box(
                         Modifier
+                            .testTag(ChatRailTestTag)
                             .padding(top = 3.dp, bottom = 3.dp)
                             .width(railPulse.value.dp)
-                            .heightIn(min = 14.dp)
+                            .fillMaxHeight()
                             .clip(RoundedCornerShape(1.dp))
                             .background(railColor),
                     )
@@ -2366,3 +2535,12 @@ private fun Bubble(
         }
     }
 }
+
+/**
+ * 助手消息左侧导轨的语义标签（R028b，用户 m44550 第一张图）。
+ *
+ * 存在的唯一理由是让「导轨必须铺满整条消息」这条契约能被渲染测试钉住：
+ * 导轨是个裸 `Box`、没有任何文本或 contentDescription，测试无从定位它。
+ * 断言方式见 `BubbleRailRenderTest`。
+ */
+internal const val ChatRailTestTag = "chat-assistant-rail"

@@ -5,14 +5,18 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowRight
@@ -30,6 +34,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
@@ -41,8 +46,14 @@ import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
 import com.revxzxcx.remotewebapp.core.changes.ChangesLimitations
 import com.revxzxcx.remotewebapp.core.session.ChatItem
 import com.revxzxcx.remotewebapp.core.session.ToolFilePaths
+import com.revxzxcx.remotewebapp.ui.theme.LocalStatusRunning
 import com.revxzxcx.remotewebapp.ui.theme.Motion
 import com.revxzxcx.remotewebapp.ui.theme.groupShape
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * 工具调用卡片（需求 FR-5.3）。
@@ -457,6 +468,269 @@ private fun summarize(text: String): String {
         else -> "${firstLine.take(60)} · $lines 行"
     }
 }
+
+// ---------------------------------------------------------------------------
+// 折叠分组内的「行式」工具条目（用户 m44550 第二张图）
+//
+// 与上面的 [ToolCallCard] / [ToolResultCard] 是**两种形态，各有其位**：
+//  - 分组内（[com.revxzxcx.remotewebapp.ui.chat.GroupRow] 的成员）：一行一条，
+//    左起「工具 · 名称」等宽 chip → 参数摘要 → 状态 tag。几十条叠起来仍然是一张
+//    卡片的内部结构，不是几十张卡片。
+//  - 分组外（无折叠的零散工具事件）：仍用卡片形态，因为它单独出现时需要自己的边框。
+//
+// 形态取自 `docs/R028-效果图.html` 的 `.grow` / `.tool` / `.arg` / `.tag` 一族：
+// `.grow{border-top:1px solid outlineVariant;padding:9px 12px;gap:9px}`、
+// `.tool{mono 11.5px;onSurface;surfaceVariant 底;radius 4px;padding 1px 6px}`、
+// `.arg{mono 11px;onSurfaceVariant;flex:1;ellipsis}`、
+// `.tag{height 20px;pill;10.5px;padding 0 8px}`。
+// ---------------------------------------------------------------------------
+
+/**
+ * 分组内的一条工具调用行。
+ *
+ * 点整行进文件查看页（有路径时）或展开原始参数。原先分组内每条工具调用都是一张
+ * 独立卡片，展开一个 `×52` 的分组会看到 52 张带描边的卡——用户看到的正是「样式还是
+ * 和之前一样」。
+ *
+ * @param showTopDivider 组内第一条不画上分隔线（否则它与分组标题行之间会多一道横线）。
+ */
+@Composable
+internal fun ToolCallRow(
+    item: ChatItem.ToolCall,
+    path: String?,
+    showTopDivider: Boolean,
+    onToggle: () -> Unit,
+    onOpenFile: (String) -> Unit,
+) {
+    // 摘要要 `remember`（R028b 审查 P2-5）：流式期分组每秒重组数十次，`firstArgumentHint`
+    // 每次都要解析一遍 JSON + 编译正则。`path` 由调用方 remember 后传进来（P2-6）——
+    // 早先这里和 `GroupMemberRow` 各解析一次，同一条 arguments 每帧跑两遍。
+    val argument = remember(item.seq, item.arguments) { firstArgumentHint(item.name, item.arguments) }
+    // tag 是**状态**（原型 `.grow` 里是「已编辑 / 完成 / 已读取」），不是操作提示。
+    // 早先无路径时写「详情 / 收起」，那是把「能不能展开」当成了状态——展开由整行点击
+    // 承担，tag 再写一遍既重复又占宽度。
+    val tag = when {
+        path == null -> "已调用"
+        ToolFilePaths.isMutating(item.name) -> "已编辑"
+        else -> "已读取"
+    }
+    ToolRow(
+        tool = item.name,
+        argument = path ?: argument,
+        tag = tag,
+        tagStyle = if (path != null) ToolTagStyle.EDIT else ToolTagStyle.NEUTRAL,
+        showTopDivider = showTopDivider,
+        // 整行点击**永远是展开参数**（R028b 审查 P2-3）：早先有路径时整行跳文件页，于是
+        // `write` / `edit` 这类调用用户再也看不到模型到底传了什么（content / old_string），
+        // 而那正是审查工具调用时最需要的信息。文件跳转改由右侧 tag 承担——它本来就是
+        // 第二个点击目标，且「已编辑 / 已读取」这个文案本身就在暗示可以点。
+        onClick = onToggle,
+        onTagClick = if (path != null) {
+            { onOpenFile(path) }
+        } else {
+            null
+        },
+    )
+}
+
+/** 分组内的一条工具结果行。失败时 tag 走 error 色。 */
+@Composable
+internal fun ToolResultRow(
+    item: ChatItem.ToolResult,
+    showTopDivider: Boolean,
+    onToggle: () -> Unit,
+) {
+    val summary = remember(item.seq, item.text) { summarize(item.text) }
+    ToolRow(
+        tool = if (item.isError) "工具出错" else "工具结果",
+        argument = summary,
+        // 🔴 tag 是**状态**而不是操作提示。原型 `docs/R028-效果图.html` 的 `.grow` 里
+        // 三条分别是「已编辑」「完成」「已读取」——全是状态；早先这里写「详情 / 收起」，
+        // 那是操作提示，且被涂成绿色（OK 配色）后语义彻底错位：绿色 = 成功，
+        // 而「详情」跟成功毫无关系。用户 m44550 第 2 条「样式还是和之前一样」，
+        // 这是其中一处。
+        //
+        // 展开能力由整行点击承担（`onClick = onToggle`），不需要 tag 再写一遍。
+        tag = if (item.isError) "失败" else "完成",
+        tagStyle = if (item.isError) ToolTagStyle.BAD else ToolTagStyle.OK,
+        showTopDivider = showTopDivider,
+        onClick = onToggle,
+    )
+}
+
+/** 行内 tag 的配色（对应效果图 `.tag.edit` / `.tag.ok` / `.tag.bad` / 中性）。 */
+internal enum class ToolTagStyle { EDIT, OK, BAD, NEUTRAL }
+
+/**
+ * 行式工具条目的骨架：`[工具名 chip] [参数摘要] ......... [tag]`。
+ *
+ * 整行可点（点击热区包含左侧分隔线的整条宽度，`clickable` 在 `padding` 之前）。
+ *
+ * @param onTagClick 非 null 时 tag 自己也是一个点击目标（用于「点 tag 进文件页」）。
+ *   行点击与 tag 点击是两个不同的动作，所以 tag 单独包一层 `clickable` 而不是让
+ *   行点击去猜——`clickable` 在子项上会先消费事件，不会冒泡到行。
+ */
+@Composable
+private fun ToolRow(
+    tool: String,
+    argument: String,
+    tag: String,
+    tagStyle: ToolTagStyle,
+    showTopDivider: Boolean,
+    onClick: () -> Unit,
+    onTagClick: (() -> Unit)? = null,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        if (showTopDivider) {
+            // 分隔线用 `outlineVariant` 而不是 `onSurfaceVariant.copy(alpha=…)`：
+            // 后者叠加在不同底色上会得到不同灰度（R016 起全 App 统一用实色令牌）。
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(9.dp),
+        ) {
+            ToolChip(tool)
+            Text(
+                text = argument.ifBlank { "（无参数）" },
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (onTagClick != null) {
+                Box(modifier = Modifier.clickable(onClick = onTagClick)) {
+                    ToolTag(tag, tagStyle)
+                }
+            } else {
+                ToolTag(tag, tagStyle)
+            }
+        }
+    }
+}
+
+/**
+ * 等宽小 chip，例如 `read` / `pwsh`。
+ *
+ * `widthIn(max = 120.dp)` + `Ellipsis` 是必需的（R028b 审查 P2-7）：非 weight 子项先量，
+ * 一个 `mcp__xxx__long_tool_name` 会吃满整行，把中间那块参数摘要（原型的主体）
+ * 压成 0 宽再省略。
+ */
+@Composable
+private fun ToolChip(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+        color = MaterialTheme.colorScheme.onSurface,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .widthIn(max = 120.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(horizontal = 6.dp, vertical = 1.dp),
+    )
+}
+
+/** 行尾状态 tag（`已编辑` / `已读取` / `详情` / `失败`）。 */
+@Composable
+private fun ToolTag(text: String, style: ToolTagStyle) {
+    val fg: Color
+    val bg: Color
+    val border: Color
+    when (style) {
+        ToolTagStyle.EDIT -> {
+            fg = MaterialTheme.colorScheme.onSecondaryContainer
+            bg = MaterialTheme.colorScheme.secondaryContainer
+            border = MaterialTheme.colorScheme.outlineVariant
+        }
+        ToolTagStyle.OK -> {
+            fg = LocalStatusRunning.current
+            bg = LocalStatusRunning.current.copy(alpha = 0.14f)
+            border = LocalStatusRunning.current.copy(alpha = 0.35f)
+        }
+        ToolTagStyle.BAD -> {
+            fg = MaterialTheme.colorScheme.error
+            bg = MaterialTheme.colorScheme.error.copy(alpha = 0.12f)
+            border = MaterialTheme.colorScheme.error.copy(alpha = 0.4f)
+        }
+        ToolTagStyle.NEUTRAL -> {
+            fg = MaterialTheme.colorScheme.onSurfaceVariant
+            bg = Color.Transparent
+            border = MaterialTheme.colorScheme.outlineVariant
+        }
+    }
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall,
+        color = fg,
+        maxLines = 1,
+        modifier = Modifier
+            .heightIn(min = 20.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(bg)
+            .border(1.dp, border, RoundedCornerShape(999.dp))
+            .padding(horizontal = 8.dp, vertical = 1.dp),
+    )
+}
+
+/**
+ * 没有文件路径时的参数摘要：取 `arguments`（JSON 字符串）里第一个标量值。
+ *
+ * 为什么不用正则捞 `"command"`：实测同一个工具（`write`）的 `arguments` **键序都不
+ * 固定**（一次 `file_path` 在前、一次 `content` 在前），且值里可能含转义引号。
+ * 解析失败时退回整串前 [TOOL_HINT_CHARS] 字符——总比什么都不显示好。
+ */
+internal fun firstArgumentHint(toolName: String, arguments: String): String {
+    if (arguments.isBlank()) return ""
+    val parsed = runCatching {
+        val el = Json.parseToJsonElement(arguments)
+        val obj = el as? JsonObject ?: return@runCatching null
+        // 优先级：命令 > 路径 > 查询词 > 第一个标量。
+        val preferred = listOf("command", "cmd", "path", "file_path", "query", "pattern", "url", "jobId")
+        preferred.firstNotNullOfOrNull { key -> obj[key]?.scalarOrNull() }
+            ?: obj.values.firstNotNullOfOrNull { it.scalarOrNull() }
+    }.getOrNull()
+    // `{}` / 全是 null 的对象：没有可显示的参数。此时**不要**退回原始 JSON 字符串——
+    // 那会把 `{}` 或 `{"file_path":null}` 原样显示成摘要，比留空更让人困惑。
+    // 只有「解析彻底失败」（不是 JSON）才退回原串，因为那说明服务端给的不是 JSON。
+    val text = parsed
+        ?: arguments.takeIf { runCatching { Json.parseToJsonElement(it) }.isFailure }
+        ?: ""
+    return text.replace(WHITESPACE_RUN, " ").trim().take(TOOL_HINT_CHARS)
+}
+
+/**
+ * 连续空白（含换行/制表）——提成顶层常量。
+ *
+ * `Regex` 构造有编译成本，早先写在 `firstArgumentHint` 函数体内，流式期每次重组
+ * 都重新编译一次（R028b 审查 P2-5）。
+ */
+private val WHITESPACE_RUN = Regex("\\s+")
+
+/**
+ * [JsonElement] 直接是标量时取它的文本（对象/数组/null 返回 null）。
+ *
+ * 🔴 `JsonNull` 也是 `JsonPrimitive` 的子类，`isString` 为 false、`content` 是字面量
+ * `"null"`——不显式排除的话 `{"file_path":null}` 会显示成「参数是字符串 null」。
+ * 这与 R007 在 `ToolFilePaths` 里踩过的是同一个坑（当时 `{"file_path":null}` 被提取成
+ * 路径 `"null"`），那里用 `takeIf { it.isString }` 修掉，这里必须同时排掉 `JsonNull`。
+ */
+private fun JsonElement.scalarOrNull(): String? {
+    if (this is JsonNull) return null
+    if (this !is JsonPrimitive) return null
+    // 字符串与数字/布尔都照原样显示（例如 `{"timeout":30}`、`{"ok":true}`）。
+    return content.takeIf { it.isNotBlank() }
+}
+
+/** 行内参数摘要最多显示这么多字符。 */
+private const val TOOL_HINT_CHARS = 80
 
 /** 展开后参数最多显示这么多字符。 */
 private const val MAX_ARGUMENTS_CHARS = 2_000

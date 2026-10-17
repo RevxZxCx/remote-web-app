@@ -9,6 +9,7 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import com.revxzxcx.remotewebapp.core.events.ApprovalPolicy
+import com.revxzxcx.remotewebapp.core.events.SandboxMode
 import com.revxzxcx.remotewebapp.core.events.SessionPermission
 import com.revxzxcx.remotewebapp.core.session.AskIntent
 import com.revxzxcx.remotewebapp.core.session.AskOption
@@ -580,5 +581,96 @@ class ComposerLayoutRenderTest {
         // 再等一次空闲：如果展开态会因焦点丢失而反弹，这一步之后配置行就消失了。
         compose.waitForIdle()
         compose.onNodeWithContentDescription("审批权限").assertExists()
+    }
+
+    // ---- R028b（用户 m44550）：＋ 在最左，权限按钮按权限换图标 ----
+
+    /**
+     * 用户 m44550 原话：「将加号按钮移动到最左边，这样显得整体更为协调一些」。
+     *
+     * 判据用横坐标比较而不是写死 dp：底排左右内边距将来可能微调，
+     * 但「＋ 在权限徽标左边、且是这一排最左的那个」是不变量。
+     */
+    @Test
+    fun `展开态加号在最左边`() {
+        setComposer(draft = "hi")
+        val attach = compose.onNodeWithContentDescription("添加附件").getBoundsInRoot()
+        val permission = compose.onNodeWithContentDescription("审批权限").getBoundsInRoot()
+        val model = compose.onNodeWithText("stepfun/step-5-preview").getBoundsInRoot()
+        val send = compose.onNodeWithContentDescription("发送按钮").getBoundsInRoot()
+
+        assertTrue(
+            "加号 (${attach.left.value}) 必须在权限徽标 (${permission.left.value}) 左边",
+            attach.left.value < permission.left.value,
+        )
+        assertTrue(
+            "加号 (${attach.left.value}) 必须在模型胶囊 (${model.left.value}) 左边",
+            attach.left.value < model.left.value,
+        )
+        assertTrue(
+            "加号 (${attach.left.value}) 必须在发送键 (${send.left.value}) 左边",
+            attach.left.value < send.left.value,
+        )
+    }
+
+    /** ＋ 与发送必须分居两端（中间是两个只读徽标），否则「最左边」只是把拥挤挪了个位置。 */
+    @Test
+    fun `发送键仍在最右边`() {
+        setComposer(draft = "hi")
+        val model = compose.onNodeWithText("stepfun/step-5-preview").getBoundsInRoot()
+        val send = compose.onNodeWithContentDescription("发送按钮").getBoundsInRoot()
+        assertTrue(
+            "发送键 (${send.left.value}) 必须在模型胶囊 (${model.left.value}) 右边",
+            send.left.value > model.left.value,
+        )
+    }
+
+    /**
+     * 用户 m44550 原话：「对于权限按钮，我不希望只显示一个锁的图标，而是不同权限情况下，
+     * 有不同的图标」。三种沙箱模式必须给出三个**不同**的图标。
+     *
+     * 这条断言 `permissionIcon` 这个纯函数而不是渲染结果：渲染层只能看到像素，
+     * 看不到「换没换图标」；纯函数比 `ImageVector` 更快也更准。
+     */
+    @Test
+    fun `三种沙箱模式给出三个不同的权限图标`() {
+        val icons = listOf(
+            SessionPermission(sandboxMode = SandboxMode.READ_ONLY),
+            SessionPermission(sandboxMode = SandboxMode.WORKSPACE_WRITE),
+            SessionPermission(sandboxMode = SandboxMode.DANGER_FULL_ACCESS),
+        ).map { permissionIcon(it).icon }
+        assertEquals(
+            "三种沙箱模式必须给出三个不同图标，实际只有 ${icons.toSet().size} 种",
+            3,
+            icons.toSet().size,
+        )
+    }
+
+    /** 未知权限必须落到保守图标（锁），不能落到「完全权限」那个警告图标。 */
+    @Test
+    fun `未知权限回落到锁图标`() {
+        val unknown = permissionIcon(SessionPermission())
+        val danger = permissionIcon(SessionPermission(sandboxMode = SandboxMode.DANGER_FULL_ACCESS))
+        assertEquals("权限未知", SessionPermission().summary())
+        assertTrue("未知权限不该显示成完全权限", unknown.icon !== danger.icon)
+    }
+
+    /** `permission/preset` 是另一条写入路径：只要 preset 在，图标也要跟着走。 */
+    @Test
+    fun `只有 preset 时图标也跟着沙箱模式走`() {
+        val byMode = permissionIcon(SessionPermission(sandboxMode = SandboxMode.WORKSPACE_WRITE))
+        val byPreset = permissionIcon(SessionPermission(preset = SandboxMode.WORKSPACE_WRITE))
+        assertEquals(byMode.icon, byPreset.icon)
+    }
+
+    /** 审批策略「自动允许」时高亮，与「每次询问」区分开（颜色承担第二维）。 */
+    @Test
+    fun `自动允许时权限图标要高亮`() {
+        assertTrue(
+            permissionIcon(SessionPermission(approvalPolicy = ApprovalPolicy.NEVER)).autoApprove,
+        )
+        assertTrue(
+            !permissionIcon(SessionPermission(approvalPolicy = ApprovalPolicy.ASK)).autoApprove,
+        )
     }
 }

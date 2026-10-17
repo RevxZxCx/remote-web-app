@@ -1,5 +1,6 @@
 package com.revxzxcx.remotewebapp.core.pairing
 
+import com.revxzxcx.remotewebapp.core.net.TlsFingerprintHint
 import com.revxzxcx.remotewebapp.core.protocol.DshJson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -55,7 +56,11 @@ class PairingApi(
         } catch (e: IOException) {
             throw PairingException(
                 PairingException.CODE_NETWORK,
-                "连接不上 ${hostOf(baseUrl)}：${e.message ?: e.javaClass.simpleName}",
+                TlsFingerprintHint.augment(
+                    baseUrl,
+                    "连接不上 ${hostOf(baseUrl)}：${e.message ?: e.javaClass.simpleName}",
+                    e,
+                ),
                 cause = e,
             )
         }
@@ -94,7 +99,11 @@ class PairingApi(
         } catch (e: IOException) {
             throw PairingException(
                 PairingException.CODE_NETWORK,
-                "连接不上 ${hostOf(baseUrl)}：${e.message ?: e.javaClass.simpleName}",
+                TlsFingerprintHint.augment(
+                    baseUrl,
+                    "连接不上 ${hostOf(baseUrl)}：${e.message ?: e.javaClass.simpleName}",
+                    e,
+                ),
                 cause = e,
             )
         }
