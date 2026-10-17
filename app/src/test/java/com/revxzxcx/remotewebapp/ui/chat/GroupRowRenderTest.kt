@@ -212,4 +212,68 @@ class GroupRowRenderTest {
         compose.onNodeWithText("已完成分析").assertExists()
         assertEquals(0, compose.onAllNodesWithText("进行中").count())
     }
+
+    @Test
+    fun `先思考再调工具的成员里思考也是行式`() {
+        // 🔴 这条钉住「第 2 条首版没生效」那个根因。
+        //
+        // 真实会话（f3c843ab）里 `[reasoning, tool-call]` 占 5738/12221 条，是主流形态。
+        // 首版判据拿 `item.blocks` 原样做 `all { it is Reasoning }`，被那个 tool-call 块
+        // 判假 → 整条落到 `ChatItemRow`，思考被画成 `ReasoningBlock` 卡片
+        // （「思考过程 · N 字」+ 实底描边）。设备验收一眼可见：组内其余成员是行，
+        // 唯独思考是一张卡。
+        val members = listOf(
+            ChatItem.Assistant(
+                seq = 1, time = 0L, turn = 1L, step = 1L,
+                blocks = listOf(
+                    ContentBlock.Reasoning("先读一遍文件，再决定怎么改。"),
+                    ContentBlock.ToolCall(id = "c1", name = "bash", arguments = "{}"),
+                ),
+            ),
+        )
+        setGroup(members, running = false)
+        compose.onNodeWithText("已完成分析").performClick()
+        compose.runOnIdle { }
+
+        // 行式：`思考过程` 是裸 chip 文本。
+        compose.onNodeWithText("思考过程", substring = false).assertExists()
+        // 卡片形态的标题带字数（`思考过程 · N 字`），这里必须一个都没有。
+        assertEquals(
+            0,
+            compose.onAllNodesWithText("思考过程 · ", substring = true).count(),
+        )
+        // 折叠态的行式思考显示首行预览。
+        compose.onNodeWithText("先读一遍文件，再决定怎么改。", substring = true).assertExists()
+    }
+
+    @Test
+    fun `正文与思考并存的成员仍是卡片`() {
+        // 用户原话的后半句：「没有被折叠的思考过程保持原有的样式即可」。
+        // 模型边想边说（`[reasoning, text]`）时思考是这条回复的一部分，
+        // 拆成一行会把一条回复劈开——这条守住那个边界。
+        val members = listOf(
+            ChatItem.Assistant(
+                seq = 1, time = 0L, turn = 1L, step = 1L,
+                blocks = listOf(
+                    ContentBlock.Reasoning("我在想。"),
+                    ContentBlock.Text("这是正文。"),
+                ),
+            ),
+        )
+        // 🔴 必须真的组合 `GroupRow`（R029 审查 P3-2）。
+        //
+        // 首版这条测试只对 `visibleAssistantBlocks` 断言 `size == 2` 与
+        // `all { it is Reasoning } == false`——那等价于重复测一个既有纯函数，
+        // 既没组合 UI 也没点开分组。若有人把 `ChatScreen.kt` 的行式判据改成
+        // `visible.all { it is Reasoning || it is Text }` 这种错误写法，这条测试照样绿。
+        setGroup(members, running = false)
+        compose.onNodeWithText("已完成分析").performClick()
+        compose.runOnIdle { }
+
+        // 卡片形态：`ReasoningBlock` 的标题带「· N 字」后缀（[ReasoningRow] 的行式 chip
+        // 是裸的「思考过程」+ 独立字数徽标，没有这个间隔号）。
+        compose.onNodeWithText("思考过程 · 4 字").assertExists()
+        // 正文照常渲染。
+        compose.onNodeWithText("这是正文。").assertExists()
+    }
 }

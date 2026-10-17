@@ -1,5 +1,6 @@
 package com.revxzxcx.remotewebapp.ui.chat
 
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -145,6 +146,63 @@ class ChatHistoryFollowRenderTest {
 
         // 新消息到来变成 20 项（溢出），但用户没有滚动 —— 仍然不该翻。
         count = 20
+        compose.waitForIdle()
+        assertEquals(0, loadMoreCalls)
+    }
+
+    /**
+     * 用户 m45428 第 1 条的正解：**已经停在顶部**时再拉一次，仍要触发加载。
+     *
+     * 旧实现只观察 `firstVisibleItemIndex`，而索引一直是 0 → 流没有第二次发射 →
+     * 永远不触发。用户的原话是「要先往上拉，再迅速下拉，似乎是需要有一定速度才能触发」，
+     * 那是惯性让索引短暂变成 1 又回 0 制造了一次变化，纯属副作用。
+     *
+     * 新判据 2 用 `isScrollInProgress` 由 false 变 true 且在顶部 → 触发。
+     * 这条测试先滚到顶触发第一次，再在顶部发起一次滚动，断言会触发第二次。
+     */
+    @Test
+    fun `已经停在顶部时再次滚动仍会触发加载`() {
+        setList(items = 20, viewportDp = 200)
+        // 必须先离开顶部再回来：`setList` 的初始位置就是 0，`distinctUntilChanged` 之后
+        // 再 `scrollToItem(0)` 不产生新发射（这一条我首跑就踩了，断言「应至少触发一次」失败）。
+        compose.runOnIdle {
+            kotlinx.coroutines.runBlocking { state?.scrollToItem(19) }
+        }
+        compose.waitForIdle()
+        assertEquals("前置条件：滚到底部时不应触发", 0, loadMoreCalls)
+
+        // 第一次：滚到顶。
+        compose.runOnIdle {
+            kotlinx.coroutines.runBlocking { state?.scrollToItem(0) }
+        }
+        compose.waitForIdle()
+        val first = loadMoreCalls
+        assertTrue("滚到顶应至少触发一次，实际 $first", first >= 1)
+
+        // 第二次：仍在顶部，用户又发起一次滚动（下拉）。
+        compose.runOnIdle {
+            kotlinx.coroutines.runBlocking { state?.scrollBy(40f) }
+        }
+        compose.waitForIdle()
+
+        assertTrue(
+            "已经在顶部时再拉一次应该再触发加载（旧实现这里永远是 $first）",
+            loadMoreCalls > first,
+        )
+    }
+
+    /** 没有更早历史时，在顶部反复拉也不该触发（`hasMore` 是硬前提）。 */
+    @Test
+    fun `没有更早历史时在顶部反复拉也不翻`() {
+        setList(items = 20, viewportDp = 200)
+        hasMore.value = false
+        compose.runOnIdle {
+            kotlinx.coroutines.runBlocking { state?.scrollToItem(0) }
+        }
+        compose.waitForIdle()
+        compose.runOnIdle {
+            kotlinx.coroutines.runBlocking { state?.scrollBy(40f) }
+        }
         compose.waitForIdle()
         assertEquals(0, loadMoreCalls)
     }

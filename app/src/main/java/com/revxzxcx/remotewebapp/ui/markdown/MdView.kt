@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -57,6 +58,18 @@ internal const val MAX_LIST_ITEMS: Int = 200
 
 /** 单个表格最多画多少行。表格每行还要乘列数，所以比列表更早收手。 */
 internal const val MAX_TABLE_ROWS: Int = 100
+
+/**
+ * 表格每列的**最小**宽度。
+ *
+ * 表格总宽取 `maxOf(可用宽度, 本值 × 列数)`（用户 m45428 第 4 条）：
+ *  - 列少时总宽 = 可用宽度 → 铺满整行，各列按 `weight(1f)` 均分；
+ *  - 列多时总宽 = 本值 × 列数 → 超过可用宽度，靠横向滚动看全。
+ *
+ * 旧实现把总宽写死成 `96 * columns`，于是 2 列表格在 360dp 屏上只有 192dp，
+ * 右边留一大片空白、表格被挤成窄窄一条。
+ */
+internal const val TABLE_MIN_COLUMN_WIDTH: Int = 96
 
 /**
  * 把 [MdBlock] 列表渲染成 Compose UI（需求 FR-5.1 / FR-5.2）。
@@ -269,16 +282,26 @@ private fun TableView(
         table.headers.size,
         table.rows.maxOfOrNull { it.size } ?: 0,
     ).coerceAtLeast(1)
-    // 每列至少 96dp，内容长的表格靠横向滚动看全。
-    val width = (96 * columns).dp
     var expanded by rememberSaveable { mutableStateOf(false) }
     val limit = if (expanded) Int.MAX_VALUE else MAX_TABLE_ROWS
     val visible = table.rows.take(limit)
     val remaining = table.rows.size - visible.size
 
+    // 🔴 表格宽度必须是「至少撑满可用宽度，列多时才横向滚动」，
+    // 不能是固定的 `96 * columns`（用户 m45428 第 4 条）。
+    //
+    // 旧实现写死每列 96dp：2 列表格在 360dp 屏上只有 192dp 宽，右边留一大片空白，
+    // 表格被挤成窄窄一条——用户原话「有的时候不会占满整个屏幕的宽度，导致表被挤成
+    // 比较窄的一条」。
+    //
+    // 现在用 `BoxWithConstraints` 拿真实可用宽度：`maxOf(可用宽度, 96 * columns)`。
+    // 列少 → 铺满整行（各列按 weight 均分）；列多 → 超过可用宽度，横向滚动看全。
     Surface2 {
-        Column(modifier = Modifier.horizontalScroll(scroll)) {
-            Row(modifier = Modifier.width(width)) {
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val minTableWidth = (TABLE_MIN_COLUMN_WIDTH * columns).dp
+            val width = maxOf(maxWidth, minTableWidth)
+            Column(modifier = Modifier.horizontalScroll(scroll)) {
+                Row(modifier = Modifier.width(width)) {
                 table.headers.forEach { cell ->
                     TableCell(cell, header = true, onLinkClick, onFilePathClick, Modifier.weight(1f))
                 }
@@ -293,8 +316,9 @@ private fun TableView(
                     }
                 }
             }
-            if (remaining > 0) {
-                OverflowNote(remaining = remaining, unit = "个数据行", expanded = expanded) { expanded = true }
+                if (remaining > 0) {
+                    OverflowNote(remaining = remaining, unit = "个数据行", expanded = expanded) { expanded = true }
+                }
             }
         }
     }
@@ -365,24 +389,33 @@ private fun CodeBlockView(block: MdBlock.CodeBlock) {
     Surface2 {
         Column {
             val label = block.language?.trim().orEmpty()
-            if (label.isNotEmpty() || !block.closed) {
-                Row(
-                    modifier = Modifier.padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
+            // 代码块的标题行**总是渲染**（用户 m45428 第 6 条：要一个独立的复制按钮）。
+            // 早先没有语言标签时整行都不画，于是无语言围栏的代码块没有地方放复制按钮。
+            Row(
+                modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = label.ifEmpty { "代码" },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                if (!block.closed) {
                     Text(
-                        text = label.ifEmpty { "代码" },
+                        text = "生成中…",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(end = 4.dp),
                     )
-                    if (!block.closed) {
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = "生成中…",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
+                }
+                // 复制按钮只在代码已经收尾时出现：流式过程中内容还在变，
+                // 复制到半截代码没有意义，而且会让按钮在眼前反复闪。
+                if (block.closed) {
+                    CopyIconButton(
+                        text = block.code,
+                        contentDescription = "复制代码",
+                    )
                 }
             }
             Box(Modifier.horizontalScroll(rememberScrollState())) {

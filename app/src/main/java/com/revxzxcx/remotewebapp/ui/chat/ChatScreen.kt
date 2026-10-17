@@ -25,6 +25,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -85,6 +86,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -95,6 +97,7 @@ import androidx.compose.runtime.MonotonicFrameClock
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -103,11 +106,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -147,6 +152,7 @@ import com.revxzxcx.remotewebapp.ui.common.decodeScaled
 import com.revxzxcx.remotewebapp.ui.files.FileTarget
 import com.revxzxcx.remotewebapp.ui.home.TimeText
 import com.revxzxcx.remotewebapp.ui.home.rememberNow
+import com.revxzxcx.remotewebapp.ui.markdown.CopyIconButton
 import com.revxzxcx.remotewebapp.ui.markdown.MdBlocks
 import com.revxzxcx.remotewebapp.ui.markdown.MdStream
 
@@ -173,6 +179,29 @@ fun ChatScreen(
     val draft by viewModel.draft.collectAsState()
     val listState = rememberLazyListState()
     val now = rememberNow()
+
+    // 用户在滑动对话列表时收起输入框（用户 m45428 第 5 条）。计数器每滑一次 +1，
+    // 由 [Composer] 的 `collapseSignal` 消费。
+    //
+    // 🔴 判据必须是**真实的用户拖动**，不能用 `listState.isScrollInProgress`
+    // （R029 审查 P2-2，第一版就是这么写的，是错的）。那个量不只由手指驱动：
+    // [ChatScrollFollow] 在贴底时会**随每个流式 token** 调 `scrollToBottom(...)`，
+    // 而它内部是 `scrollToItem` + `scroll(MutatePriority.Default)`，两者都会把
+    // `isScrollInProgress` 置真。于是「模型正在输出 + 列表贴底」这个生成中的默认状态里，
+    // 收缩信号会随 token 不断自增，`Composer` 的 `LaunchedEffect(collapseSignal)`
+    // 反复重启并调窗口级 `focusManager.clearFocus()`——用户想「生成中先排队打一句话」，
+    // 键盘会被下一个 token 顶掉。
+    //
+    // 也不能用 `scrollOffset`：它在每次布局变化（新消息到达）时也会变，同样是误判。
+    //
+    // `interactionSource` 的 `DragInteraction` 只由**指针输入**产生，程序化滚动不发它，
+    // 这才是「用户手指在拖」的定义。`isScrollInProgress` 与它的差别正好是「谁发起的滚动」。
+    var scrollCollapseSignal by remember { mutableIntStateOf(0) }
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions
+            .filterIsInstance<DragInteraction.Start>()
+            .collect { scrollCollapseSignal++ }
+    }
 
     // 模型选择器的显示开关。目录本身由 ViewModel 拉（[ChatUiState.catalog]），
     // 这里只负责「弹不弹」——目录没到时对话框显示为空而不是崩。
@@ -316,6 +345,7 @@ fun ChatScreen(
                 Composer(
                     draft = draft,
                     generating = state.generating,
+                    collapseSignal = scrollCollapseSignal,
                     sending = state.sending,
                     pending = pending,
                     attachNotice = attachNotice,
@@ -839,6 +869,15 @@ private fun effortOf(model: com.revxzxcx.remotewebapp.core.session.CatalogModel,
 internal fun Composer(
     draft: String,
     generating: Boolean,
+    /**
+     * 每变一次就让输入框**收起并清焦点**（用户 m45428 第 5 条：「当用户上下滑动对话的时候
+     * 应该要折叠输入框」）。
+     *
+     * 为什么传一个计数而不是布尔：收起是一个**一次性动作**，不是一种状态。布尔会在
+     * 「true → false」时又触发一次别的逻辑，而且两次滑动之间布尔值不变、不会重新触发。
+     * 计数器每滑一次 +1，`LaunchedEffect` 每次都能收到新的 key。
+     */
+    collapseSignal: Int = 0,
     sending: Boolean,
     pending: List<PromptAttachment>,
     attachNotice: String?,
@@ -883,6 +922,21 @@ internal fun Composer(
     // 比任何间接信号都可靠。
     val fieldInteraction = remember { MutableInteractionSource() }
     val focused by fieldInteraction.collectIsFocusedAsState()
+
+    // 用户滑动对话时收起输入框（用户 m45428 第 5 条：「输入框被点击的时候，会自动展开，
+    // 但是当用户不输入时，却不会自动折叠。我认为当用户上下滑动对话的时候应该要折叠输入框」）。
+    //
+    // 做法：`collapseSignal` 每变一次就把焦点清掉（`fieldInteraction` 释放焦点 →
+    // `collectIsFocusedAsState()` 变 false）。**不能直接把 `expanded` 设成 false**：
+    // `expanded` 是派生值，清不掉；真正让它为假的只有「没有焦点 + 没有内容」。
+    // 而「没有内容」不该由滑动决定——用户打了半句话去翻历史，回来草稿必须还在。
+    // 所以滑动只负责**收键盘、去焦点**，内容仍然决定展开态：有草稿时框仍然展开，
+    // 但键盘收了、视线让出来了。这是「不丢草稿」与「不挡屏幕」之间的正确取舍。
+    val focusManager = LocalFocusManager.current
+    LaunchedEffect(collapseSignal) {
+        if (collapseSignal > 0) focusManager.clearFocus()
+    }
+
     val expanded = focused || draft.isNotEmpty() || pending.isNotEmpty() || attachNotice != null
 
     // 选图：系统照片选择器返回的 Uri 只在这个回调里有效，读字节必须在这里做。
@@ -1659,7 +1713,16 @@ internal fun GroupRow(
                             )
                         },
                 ) {
+                    // 内层列表状态：展开后要能滚到最后一个操作，新操作进来时要跟随，
+                    // 用户上划后不抢滚动（用户 m45428 第 3 条）。逻辑在 [GroupAutoScroll]。
+                    val innerState = rememberLazyListState()
+                    GroupAutoScroll(
+                        listState = innerState,
+                        expanded = expanded,
+                        memberCount = members.size,
+                    )
                     LazyColumn(
+                        state = innerState,
                         modifier = Modifier
                             .padding(start = 10.dp, top = 10.dp)
                             .heightIn(max = 360.dp)
@@ -1768,7 +1831,53 @@ private fun GroupMemberRow(
             }
         }
 
-        // 其余成员（助手消息的思考/正文、改动卡、提示行……）保持原有形态，但**不画导轨**：
+        // 折叠进分组的思考成员用行式，与工具条目同一种形态（用户 m45428 第 2 条）。
+        //
+        // 判据是「这一条**只剩**思考、没有正文」：
+        //  - 只剩思考 → 行式。它只是这一组操作里的一步，再套一张卡会显得突兀，
+        //    用户原话就是「思考过程的样式还是和之前一样，显得有些突兀」。
+        //  - 思考 + 正文（模型先说再写，或边想边说）→ 保持 [ChatItemRow] 的卡片形态。
+        //    那种情况下思考是「这条回复的一部分」，拆成两行会把一条回复劈开。
+        //
+        // 🔴 判据必须建立在 `visibleAssistantBlocks` 的结果上，**不能拿 `item.blocks` 原样判**。
+        // 实测上个会话（f3c843ab）12221 条 `assistant/message` 的块形状分布：
+        //   `[reasoning, tool-call]` 5738 条（绝对主流）、`[tool-call]` 5130、
+        //   `[reasoning, text, tool-call]` 809。
+        // 也就是说「先想、再调工具」是模型的常态：这类消息的工具块会被 `visibleAssistantBlocks`
+        // 滤掉，于是它被折进分组（`hasReply()` 那边判得对），可整条消息的原始 `blocks` 里
+        // **带着**那个 tool-call，`all { it is Reasoning }` 因此为假 → 整条落到卡片形态、
+        // 思考被渲染成 [ReasoningBlock] 大卡。首版正是这么写的，设备验收一眼可见：
+        // 分组里其余成员都是行，唯独思考是一张卡。
+        is ChatItem.Assistant -> {
+            val visible = visibleAssistantBlocks(item.blocks, item.interrupted)
+            val reasoningOnly = visible.isNotEmpty() && visible.all { it is ContentBlock.Reasoning }
+            if (reasoningOnly) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    visible.forEachIndexed { index, block ->
+                        ReasoningRow(
+                            text = (block as ContentBlock.Reasoning).text,
+                            // 组内第一条不画上分隔线；同一成员里若有多个思考块，
+                            // 后面几条自己也要有分隔线，否则会和上一条粘成一段。
+                            showTopDivider = showTopDivider || index > 0,
+                        )
+                    }
+                }
+            } else {
+                ChatItemRow(
+                    item = item,
+                    now = now,
+                    changes = changes,
+                    changesLoading = changesLoading,
+                    onOpenFile = onOpenFile,
+                    onRetryChanges = onRetryChanges,
+                    attachments = attachments,
+                    sessionId = sessionId,
+                    railColor = null,
+                )
+            }
+        }
+
+        // 其余成员（改动卡、提示行……）保持原有形态，但**不画导轨**：
         // 分组展开区外面已经有一道 1dp 层级导轨（审查 P2-9）。
         else -> ChatItemRow(
             item = item,
@@ -1790,8 +1899,15 @@ private const val MAX_INLINE_ARGUMENTS_CHARS = 1_200
 /** 分组内展开的工具输出最多显示这么多字符。 */
 private const val MAX_INLINE_RESULT_CHARS = 4_000
 
+/**
+ * 一条消息的完整渲染（用户气泡 / 助手气泡 / 各类卡片）。
+ *
+ * `internal` 而不是 `private`：`UserCopyButtonTest` 要走「用户消息 → 复制按钮」这条
+ * 真实路径才能守住 R029 审查 P2-1（首版只在助手分支渲染按钮，用户在的那一支被静默丢弃）。
+ * 只测 `Bubble` 本体不行——它拿不到 `ChatItemRow` 传不传 `copyText` 这件事。
+ */
 @Composable
-private fun ChatItemRow(
+internal fun ChatItemRow(
     item: ChatItem,
     now: Long,
     changes: ChangesEntry?,
@@ -1818,6 +1934,8 @@ private fun ChatItemRow(
             time = item.time,
             now = now,
             modifier = modifier,
+            // 只发图不发字的消息没有可复制的文本（`text` 为空 → 不显示按钮）。
+            copyText = item.text.takeIf { it.isNotBlank() },
         ) {
             Column(
                 modifier = Modifier.fillMaxWidth(),
@@ -1854,6 +1972,13 @@ private fun ChatItemRow(
             // 实测 182:182 一一对应，不滤就渲染两遍。
             val visible = visibleAssistantBlocks(item.blocks, item.interrupted)
             if (visible.isEmpty()) return
+            // 复制的是**正文**（Text 块），不含思考与工具调用：用户复制一条回复是为了
+            // 拿去用，把几千字推理和工具参数一起塞进剪贴板反而要他自己删。
+            val copyText = remember(item.blocks) {
+                item.blocks.filterIsInstance<ContentBlock.Text>()
+                    .joinToString("\n\n") { it.text }
+                    .takeIf { it.isNotBlank() }
+            }
             // R016：助手正文不设背景。内容自带层次（Markdown 标题 / 代码块 / 分隔线），
             // 再套色块只会把层次糊掉。用户气泡仍然有底色，那才是「谁说的」的分界。
             Bubble(
@@ -1866,6 +1991,7 @@ private fun ChatItemRow(
                 wide = true,
                 modifier = modifier,
                 railColor = railColor,
+                copyText = copyText,
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     visible.forEach { block -> BlockView(block, onOpenFile, attachments, sessionId) }
@@ -2429,6 +2555,13 @@ internal fun Bubble(
      */
     railColor: Color? = MaterialTheme.colorScheme.outline,
     pulseKey: Any? = null,
+    /**
+     * 非 null 时在消息底部给一个复制按钮（用户 m45428 第 6 条：「对话界面应该要可以复制」）。
+     *
+     * 传**已经组装好的纯文本**而不是让 `Bubble` 自己去遍历 content：`content` 是任意
+     * Composable 树，从里面反抽文本是不可能的。调用方本来就知道这条消息的文本是什么。
+     */
+    copyText: String? = null,
     content: @Composable () -> Unit,
 ) {
     val caption = buildString {
@@ -2464,47 +2597,75 @@ internal fun Bubble(
             }
             // 导轨铺满整条消息（用户 m44550 第一张图：旧实现只画出短一截）。
             //
-            // 导轨铺满整条消息（用户 m44550 第一张图：旧实现只画出短一截）。
+            // 🔴 用 `drawBehind` 画，**不要**用「一个 Box + fillMaxHeight + IntrinsicSize」
+            // 那一套。两次翻车的记录都在这里，免得下一个人再走一遍：
             //
-            // 🔴 这里必须用 `IntrinsicSize.Min`，而且**不是**可选优化——真机上导轨完全
-            // 消失就是漏了它。原因：这一行住在 `LazyColumn` 的 item 里，高度约束是
-            // **无界**的（`Constraints.Infinity`），而 `fillMaxHeight()` 在无界高度下的
-            // 语义是「取 maxHeight，否则取 minHeight」= **0**。于是导轨被压成 0 高，
-            // 宽度 2dp 的框一个像素都画不出来。
+            // ① `Box(Modifier.width(2.dp).fillMaxHeight())` 单独用 → 导轨高度为 0。
+            //    这一行住在 `LazyColumn` 的 item 里，高度约束是 `Constraints.Infinity`，
+            //    而 `fillMaxHeight()` 的语义是「有上界取 maxHeight，否则取 minHeight」= 0。
             //
-            // `height(IntrinsicSize.Min)` 把这一行的高度约束改写成「子项固有高度」，
-            // 变成有界值，`fillMaxHeight()` 才有东西可填。这在真机（LazyColumn）与
-            // 渲染测试（有界根视图）里表现不同——**渲染测试当初是绿的，真机是空的**，
-            // 所以 `BubbleRailRenderTest` 必须自己用无界高度的 Column 复现这个场景，
-            // 否则它守护的是一个真机上不存在的布局。
+            // ② 再加 `height(IntrinsicSize.Min)` 把高度改成固有高度 → 导轨能显示了，
+            //    但**内容会被截断**（用户 m45428 第 7 条：「比较长的有导轨的文字输出，
+            //    有被截断的情况…后面的都看不到了」）。原因：`IntrinsicSize.Min` 把行高
+            //    固定成「子项固有高度」，而 Markdown 正文/代码块的固有高度只是**估算**，
+            //    实际排版更高时超出部分直接被裁掉——内容越长越明显。
+            //
+            // `drawBehind` 在**布局完成之后**才画，`size.height` 是实测高度：
+            // 导轨永远等于真实内容高度，且不参与测量、不影响内容排布。
+            //
+            // 代价：导轨不再是一个独立节点，所以 `BubbleRailRenderTest` 改用
+            // 「扫描像素」而不是「查 testTag 节点」来验证——见该测试的 KDoc。
+            //
+            // token 脉冲（`railPulse`）仍然有效：宽度在 `drawBehind` 里读 `railPulse.value`，
+            // 每帧重画，与「用一个 Box 的 width」等价。
             Row(
                 modifier = Modifier
                     .then(if (wide) Modifier.fillMaxWidth() else Modifier.widthIn(max = 340.dp))
-                    .height(IntrinsicSize.Min),
+                    .testTag(ChatRailTestTag)
+                    .drawBehind {
+                        if (railColor != null) {
+                            val inset = 3.dp.toPx()
+                            drawRoundRect(
+                                color = railColor,
+                                topLeft = Offset(0f, inset),
+                                size = Size(
+                                    width = railPulse.value.dp.toPx(),
+                                    height = (size.height - inset * 2).coerceAtLeast(0f),
+                                ),
+                                cornerRadius = CornerRadius(1.dp.toPx()),
+                            )
+                        }
+                    },
             ) {
-                if (railColor != null) {
-                    Box(
-                        Modifier
-                            .testTag(ChatRailTestTag)
-                            .padding(top = 3.dp, bottom = 3.dp)
-                            .width(railPulse.value.dp)
-                            .fillMaxHeight()
-                            .clip(RoundedCornerShape(1.dp))
-                            .background(railColor),
-                    )
-                }
                 Column(
                     modifier = Modifier
-                        .padding(start = 8.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+                        // start = 2dp（导轨宽）+ 8dp（间距）：导轨画在 Row 的 x=0 处，
+                        // 内容必须让开它。
+                        .padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     content()
-                    if (caption.isNotBlank()) {
-                        Text(
-                            text = caption,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                        )
+                    // 底部一行：左边时间戳，右边复制按钮。复制按钮**只在有文本时出现**
+                    // （纯图片消息没有可复制的内容，给一个按了没反应的按钮更糟）。
+                    //
+                    // 布局用 Row + weight 而不是把按钮绝对定位：时间戳长度会变
+                    // （「刚刚」/「12 分钟前」/「昨天 11:46」），绝对定位会撞上去。
+                    if (caption.isNotBlank() || copyText != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (caption.isNotBlank()) {
+                                Text(
+                                    text = caption,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                                    modifier = Modifier.weight(1f),
+                                )
+                            } else {
+                                Spacer(Modifier.weight(1f))
+                            }
+                            if (copyText != null) {
+                                CopyMessageButton(text = copyText)
+                            }
+                        }
                     }
                 }
             }
@@ -2523,12 +2684,28 @@ internal fun Bubble(
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     content()
-                    if (caption.isNotBlank()) {
-                        Text(
-                            text = caption,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                        )
+                    // 用户气泡同样要能复制（R029 审查 P2-1）。首版只在 `background == null`
+                    // 的助手分支渲染了 `copyText`，用户消息传进来的值被**静默丢弃**——
+                    // 而用户自己发的消息（路径、命令、贴进去的报错）正是最常被复制的一类。
+                    //
+                    // 布局与助手分支一致：时间戳 `weight(1f)` 占左、按钮贴右，不用绝对定位
+                    // （时间戳文案长度会变，绝对定位会撞上去）。
+                    if (caption.isNotBlank() || copyText != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (caption.isNotBlank()) {
+                                Text(
+                                    text = caption,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                                    modifier = Modifier.weight(1f),
+                                )
+                            } else {
+                                Spacer(Modifier.weight(1f))
+                            }
+                            if (copyText != null) {
+                                CopyMessageButton(text = copyText)
+                            }
+                        }
                     }
                 }
             }
@@ -2536,11 +2713,31 @@ internal fun Bubble(
     }
 }
 
+
 /**
- * 助手消息左侧导轨的语义标签（R028b，用户 m44550 第一张图）。
+ * 导轨容器（`Bubble` 里那个带 `drawBehind` 的 `Row`）的测试标签。
  *
- * 存在的唯一理由是让「导轨必须铺满整条消息」这条契约能被渲染测试钉住：
- * 导轨是个裸 `Box`、没有任何文本或 contentDescription，测试无从定位它。
- * 断言方式见 `BubbleRailRenderTest`。
+ * 导轨本身是 `drawBehind` 画的、不是语义节点，查不到；但**容器的高度**可以量——
+ * 「容器高度是否容得下最后一行内容」正是 `height(IntrinsicSize.Min)` 截断与否的判据。
  */
-internal const val ChatRailTestTag = "chat-assistant-rail"
+internal const val ChatRailTestTag = "chat-bubble-rail"
+
+/**
+ * 消息底部的复制按钮（用户 m45428 第 6 条：「对话界面应该要可以复制」）。
+ *
+ * 与代码块的复制按钮共用同一套图标与反馈（[com.revxzxcx.remotewebapp.ui.markdown.CopyIconButton]），
+ * 但尺寸更小：消息底部的时间戳是 `labelSmall`（11sp），按钮 32dp 已经比它高出一截，
+ * 再大就会把每条消息的底部撑出一片空白。
+ *
+ * 为什么不做成「长按消息气泡弹菜单」：长按会被 `LazyColumn` 的滚动与文本选择手势竞争，
+ * 而且用户已经习惯了「复制按钮就在内容旁边」。代价是每条助手消息多占 32dp 高度——
+ * 换来的是「想复制时立刻找得到」。
+ */
+@Composable
+private fun CopyMessageButton(text: String) {
+    CopyIconButton(
+        text = text,
+        contentDescription = "复制消息",
+        modifier = Modifier.size(32.dp),
+    )
+}

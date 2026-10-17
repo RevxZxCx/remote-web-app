@@ -571,7 +571,7 @@ internal enum class ToolTagStyle { EDIT, OK, BAD, NEUTRAL }
  *   行点击去猜——`clickable` 在子项上会先消费事件，不会冒泡到行。
  */
 @Composable
-private fun ToolRow(
+internal fun ToolRow(
     tool: String,
     argument: String,
     tag: String,
