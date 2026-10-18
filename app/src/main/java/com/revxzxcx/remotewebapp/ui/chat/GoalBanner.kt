@@ -228,7 +228,7 @@ internal fun GoalBanner(
             } else {
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        PhaseDot(accent)
+                        PhaseDot(accent, pulse = goal.phase == GoalPhase.ACTIVE)
                         Spacer(Modifier.width(5.dp))
                         Text(
                             text = goal.label,
@@ -255,13 +255,22 @@ internal fun GoalBanner(
 
                 // 右侧三个纯图标按钮，各 32dp 触控圆，合计 96dp。
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    // 轮次预算用尽时「开始」置灰（用户 m04197 第 4 条）：DSH 的
+                    // `goals/resume` 里 `roundsStarted >= maxGoalRounds` 直接抛
+                    // `GOAL_INVALID_TRANSITION`，点下去只会弹一条报错。
+                    // **不禁用点击**——用户明确要求「点击会有轮次已用完的反馈」。
+                    val resumeBlocked = !goal.canPause && goal.roundsExhausted
                     BannerIconButton(
                         icon = if (goal.canPause) PauseIcon else Icons.Default.PlayArrow,
-                        description = if (goal.canPause) "暂停目标" else "开始目标",
-                        tint = if (goal.canPause) {
-                            MaterialTheme.colorScheme.tertiary
-                        } else {
-                            MaterialTheme.colorScheme.primary
+                        description = when {
+                            goal.canPause -> "暂停目标"
+                            resumeBlocked -> "开始目标（轮次已用完）"
+                            else -> "开始目标"
+                        },
+                        tint = when {
+                            goal.canPause -> MaterialTheme.colorScheme.tertiary
+                            resumeBlocked -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                            else -> MaterialTheme.colorScheme.primary
                         },
                         onClick = onPauseResume,
                     )
@@ -285,13 +294,42 @@ internal fun GoalBanner(
 
 /** 阶段色圆点（5dp）。 */
 @Composable
-private fun PhaseDot(color: Color) {
-    Box(
-        Modifier
-            .size(5.dp)
-            .clip(CircleShape)
-            .background(color),
-    )
+private fun PhaseDot(color: Color, pulse: Boolean = false) {
+    // 用户 m04197 第 3 条：收起态（顶栏 [GoalChip]）的小圆圈有扩散动效，展开态这颗
+    // 却是静止的 5dp 圆点——同一件事的两种表达，用户一眼看出不对称：「目标收起后，
+    // 如果在运行，小圆圈应该有扩散动效，但是目标展开的时候小圆圈也应该对应运行方式
+    // 展示动效」。
+    //
+    // 这里给**运行中**的目标补上同一套语言：圆心不动，一圈与 accent 同色的细环从
+    // 1.0× 扩散到 1.9× 同时淡出，1.6s 一轮。非 ACTIVE 相位仍只画实心点。
+    //
+    // 用 `Canvas` 而不是两个叠起来的 `Box`：需要半径与 alpha 同步变化，而
+    // `graphicsLayer { scaleX }` 会把 1dp 描边一起放大成粗环。
+    // 外框固定 11dp，各相位布局宽度一致，避免相位变化时后面文字左右跳。
+    val progress = if (pulse) {
+        rememberInfiniteTransition(label = "goalDotPulse")
+            .animateFloat(
+                initialValue = 0f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(tween(1600, easing = LinearEasing)),
+                label = "goalDotProgress",
+            )
+            .value
+    } else {
+        0f
+    }
+    Canvas(modifier = Modifier.size(11.dp)) {
+        val maxRadius = size.minDimension / 2f
+        if (pulse) {
+            drawCircle(
+                color = color.copy(alpha = 0.45f * (1f - progress)),
+                radius = maxRadius * (0.45f + 0.5f * progress),
+                center = center,
+                style = Stroke(width = 1.dp.toPx()),
+            )
+        }
+        drawCircle(color = color, radius = maxRadius * 0.45f, center = center)
+    }
 }
 
 /**

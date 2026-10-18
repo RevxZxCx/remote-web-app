@@ -71,6 +71,13 @@ data class Goal(
     /** 认不出的 phase 原文；仅 [GoalPhase.UNKNOWN] 时非空。 */
     val rawPhase: String? = null,
     val maxGoalRounds: Int? = null,
+    /**
+     * 已经开跑的轮数。**不在 goal 本体里**，而在它外面那层记录上
+     * （`{goal:{…}, roundsStarted, createdAt, updatedAt}`），所以 [GoalTodoParser]
+     * 是从外层读的——这里跟着 goal 一起存，因为「轮次是否用完」是它和
+     * [maxGoalRounds] 共同决定的。
+     */
+    val roundsStarted: Int = 0,
     val blockedReason: String? = null,
 ) {
     /** 是否会渲染横幅。`complete` 不渲染（DSH 的行为）。 */
@@ -84,6 +91,25 @@ data class Goal(
      * 只经 `goals.get` 读取），所以按 active 处理——显示「暂停」。
      */
     val canPause: Boolean get() = phase == GoalPhase.ACTIVE
+
+    /**
+     * 轮次预算已用尽（用户 m04197 第 4 条）。
+     *
+     * DSH 的 `goals/resume` 有一道硬闸（`app.asar` 里
+     * `GoalsService.resume`）：
+     * ```
+     * if (currentState.roundsStarted >= current.maxGoalRounds)
+     *   throw new GoalError(`goal "…" exhausted ${maxGoalRounds} goal rounds;
+     *                        increase maxGoalRounds before resuming`, "GOAL_INVALID_TRANSITION")
+     * ```
+     * 轮次跑到上限时目标会被自动记为 `blocked`（code = `round-limit`），此时横幅显示
+     * 「目标受阻」，右侧给的是「开始目标」按钮——**点下去必然报错**。所以本地先判：
+     * 预算用尽就把开始按钮置灰，点击只给一句提示，不浪费一次必然失败的 RPC。
+     *
+     * 用 `>=` 而不是 `==`：服务端是 `>=`，且 `maxGoalRounds` 被调小时可能已经超了。
+     */
+    val roundsExhausted: Boolean
+        get() = maxGoalRounds != null && maxGoalRounds > 0 && roundsStarted >= maxGoalRounds
 
     /** 阶段文案。与 DSH 的 `phase.active` / `phase.paused` / `phase.blocked` 对齐。 */
     val label: String
@@ -186,6 +212,10 @@ object GoalTodoParser {
         val outer = values?.get("goal") as? JsonObject ?: return null
         val obj = (outer["goal"] as? JsonObject) ?: outer
         val id = obj.string("id")?.takeIf { it.isNotBlank() } ?: return null
+        // `roundsStarted` 属于**外层那条目标记录**，不在 goal 本体里：
+        // `{ goal:{id,…}, roundsStarted:12, createdAt, updatedAt }`。
+        // 扁平形态（单测里的旧样本）就退回到 obj 自己身上找。
+        val roundsStarted = (outer.long("roundsStarted") ?: obj.long("roundsStarted"))?.toInt() ?: 0
         val rawPhase = obj.string("phase")
         val phase = GoalPhase.of(rawPhase)
         return Goal(
@@ -195,6 +225,7 @@ object GoalTodoParser {
             phase = phase,
             rawPhase = rawPhase.takeIf { phase == GoalPhase.UNKNOWN },
             maxGoalRounds = obj.long("maxGoalRounds")?.toInt(),
+            roundsStarted = roundsStarted,
             blockedReason = (obj["blockedReason"] as? JsonObject)?.string("message"),
         )
     }
@@ -244,6 +275,8 @@ object GoalTodoParser {
                 phase = phase,
                 rawPhase = rawPhase.takeIf { phase == GoalPhase.UNKNOWN },
                 maxGoalRounds = goalObj.long("maxGoalRounds")?.toInt(),
+                roundsStarted = (obj.long("roundsStarted")
+                    ?: goalObj.long("roundsStarted"))?.toInt() ?: 0,
                 blockedReason = (goalObj["blockedReason"] as? JsonObject)?.string("message"),
             ),
         )

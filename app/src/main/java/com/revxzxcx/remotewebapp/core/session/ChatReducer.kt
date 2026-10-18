@@ -557,24 +557,43 @@ object ChatReducer {
         var seenInTarget = 0
         var inserted = false
         for (message in current) {
-            if (message.target == splice.target) {
-                val indexInTarget = seenInTarget
-                seenInTarget++
-                if (indexInTarget >= splice.start &&
-                    indexInTarget < splice.start + splice.removedCount
-                ) {
-                    if (!inserted && indexInTarget == splice.start) {
-                        out.addAll(splice.inserted)
-                        inserted = true
-                    }
-                    continue
-                }
+            if (message.target != splice.target) {
+                out.add(message)
+                continue
             }
-            out.add(message)
+            val indexInTarget = seenInTarget++
+            // 插入点就是区间起点：**先插再删**。`edit`（removedCount:1 + inserted:[m']）
+            // 因此变成就地替换；纯插入（removedCount:0）则落在原第 `start` 条之前。
+            if (!inserted && indexInTarget == splice.start) {
+                out.addAll(splice.inserted)
+                inserted = true
+            }
+            val removed = indexInTarget >= splice.start &&
+                indexInTarget < splice.start + splice.removedCount
+            if (!removed) out.add(message)
         }
-        // 删除区间在段尾之外（或该 target 段是空的）：追加到末尾。
-        // 用户主动发起的 prompt 就是这种形状（服务端 append 到队列尾）。
-        if (!inserted && seenInTarget <= splice.start) out.addAll(splice.inserted)
+        // `start` 越过了该 target 段的末尾（段为空，或服务端 append 到队尾）：插到**该段末尾**，
+        // 而不是整个列表末尾——否则 next-turn 的新条目会跑到 next-step 后面去。
+        //
+        // 段为空时也不能直接 `addAll` 到队尾：列表里可能已经有不属于本 target 的条目
+        // （例如 only next-step）。两个 target 的展示顺序固定为 next-turn → next-step
+        // （见 [parseInbox] 的拼接顺序），所以 next-turn 的新条目要落在第一条 next-step
+        // 之前，next-step 的新条目才落在队尾。
+        if (!inserted) {
+            val segmentEnd = out.indexOfLast { it.target == splice.target }
+            when {
+                segmentEnd >= 0 -> out.addAll(segmentEnd + 1, splice.inserted)
+                splice.target == INBOX_NEXT_TURN -> {
+                    val firstNextStep = out.indexOfFirst { it.target == INBOX_NEXT_STEP }
+                    if (firstNextStep >= 0) {
+                        out.addAll(firstNextStep, splice.inserted)
+                    } else {
+                        out.addAll(splice.inserted)
+                    }
+                }
+                else -> out.addAll(splice.inserted)
+            }
+        }
         // 服务端把我们发出的 requestId 原样带回 → 对应的本地回声让位。
         val confirmedRpcIds = splice.inserted
             .map { it.rpcId }

@@ -28,6 +28,59 @@ class GoalTodoParserTest {
     // ---------------------------------------------------------------- goal
 
     @Test
+    fun `轮次用尽时 roundsExhausted 为真`() {
+        // 用户 m04197 第 4 条：轮次到上限后 DSH 会把目标 block 成 `round-limit`，
+        // 此时 `goals/resume` 直接抛 `GOAL_INVALID_TRANSITION`
+        // （`goal "…" exhausted N goal rounds; increase maxGoalRounds before resuming`），
+        // 所以界面必须提前知道「已经跑满」并置灰。判据是两个数的比较。
+        val goal = GoalTodoParser.parseGoal(
+            values(
+                """
+                {"goal":{"goal":{"id":"goal-1","revision":9,"objective":"跑满的目标",
+                 "phase":"blocked","maxGoalRounds":50,"blockedReason":{"code":"round-limit"}},
+                 "roundsStarted":50,"createdAt":1,"updatedAt":2}}
+                """.trimIndent(),
+            ),
+        )
+        assertEquals(50, goal?.roundsStarted)
+        assertEquals(50, goal?.maxGoalRounds)
+        assertTrue("轮次跑满要判为已用尽", goal?.roundsExhausted == true)
+        // blocked 相位下 canPause 为假（按钮已经是「开始」），配合 roundsExhausted 置灰。
+        assertFalse(goal?.canPause == true)
+    }
+
+    @Test
+    fun `roundsStarted 在外层也要读到`() {
+        // 线上 `roundsStarted` 属于**外层那条目标记录**（`{goal:{…}, roundsStarted:12}`），
+        // 不在 goal 本体里。首版只读内层 → 恒为 0 → 永远判不出「已跑满」。
+        val goal = GoalTodoParser.parseGoal(
+            values(
+                """
+                {"goal":{"goal":{"id":"goal-1","revision":2,"objective":"x",
+                 "phase":"active","maxGoalRounds":8},"roundsStarted":3}}
+                """.trimIndent(),
+            ),
+        )
+        assertEquals(3, goal?.roundsStarted)
+        assertFalse("3 < 8 还没跑满", goal?.roundsExhausted == true)
+    }
+
+    @Test
+    fun `没有 maxGoalRounds 时不算跑满`() {
+        // 无上限的目标永远不该被判成用尽，否则「开始」会被误置灰。
+        val goal = GoalTodoParser.parseGoal(
+            values(
+                """
+                {"goal":{"goal":{"id":"goal-1","revision":1,"objective":"x",
+                 "phase":"blocked"},"roundsStarted":999}}
+                """.trimIndent(),
+            ),
+        )
+        assertNull(goal?.maxGoalRounds)
+        assertFalse(goal?.roundsExhausted == true)
+    }
+
+    @Test
     fun `解析进行中的目标`() {
         val goal = GoalTodoParser.parseGoal(
             values(

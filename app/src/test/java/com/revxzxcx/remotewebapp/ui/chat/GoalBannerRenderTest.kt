@@ -1,6 +1,8 @@
 package com.revxzxcx.remotewebapp.ui.chat
 
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -44,12 +46,14 @@ class GoalBannerRenderTest {
         objective: String = "完成 R031 三项需求",
         revision: Long = 3L,
         rounds: Int? = 12,
+        started: Int = 0,
     ) = Goal(
         id = "goal-1",
         revision = revision,
         objective = objective,
         phase = phase,
         maxGoalRounds = rounds,
+        roundsStarted = started,
     )
 
     private fun setBanner(
@@ -97,6 +101,48 @@ class GoalBannerRenderTest {
         compose.onNodeWithContentDescription("开始目标").assertExists()
         compose.onAllNodesWithContentDescription("暂停目标").assertCountEquals(0)
         compose.onNodeWithText("目标已暂停", substring = true).assertExists()
+    }
+
+    @Test
+    fun `轮次跑满时开始按钮置灰但仍可点`() {
+        // 用户 m04197 第 4 条：「如果目标的轮次到达了上限，但是还没有完成，此时目标会自动
+        // 暂停，而用户可以点击继续，此时就会报错，我的倾向此时让继续按钮置灰，用户点击
+        // 会有轮次已用完的反馈」。
+        //
+        // 两个要求必须同时满足：
+        //  · 视觉上置灰（这里用 contentDescription 的后缀把语义也标出来，色值无法断言）；
+        //  · **不把按钮 disable 掉**——禁用了就点不到，也就没有反馈了。
+        //
+        // ⚠️ 断言必须用 `assertIsEnabled()` + 真点一下（审查 P2-2）：`Modifier.clickable(
+        // enabled = false)` **同样**会挂上 `OnClick` 语义动作（只是多一个 `Disabled`），
+        // 所以早先那句 `assertHasClickAction()` 在按钮被真禁用时也是绿的——等于放行了
+        // 用户明确否掉的「点了没有任何反馈」。
+        val goal = goal(GoalPhase.PAUSED, rounds = 50, started = 50)
+        var taps = 0
+        setBanner(goal, onPauseResume = { taps++ })
+        compose.onNodeWithContentDescription("开始目标（轮次已用完）").assertExists()
+        compose.onNodeWithContentDescription("开始目标（轮次已用完）").assertIsEnabled()
+        compose.onNodeWithContentDescription("开始目标（轮次已用完）").performClick()
+        assertEquals("置灰但必须仍可点，否则用户拿不到「轮次已用完」的反馈", 1, taps)
+        // 旧的裸文案不该再出现，否则测试会同时匹配到两种状态、掩盖置灰失效。
+        compose.onAllNodesWithContentDescription("开始目标").assertCountEquals(0)
+    }
+
+    @Test
+    fun `没跑满时开始按钮是正常文案`() {
+        // 置灰判据不能过宽：49/50 还没跑满，按钮必须保持正常的「开始目标」。
+        setBanner(goal(GoalPhase.PAUSED, rounds = 50, started = 49))
+        compose.onNodeWithContentDescription("开始目标").assertExists()
+        compose.onAllNodesWithContentDescription("开始目标（轮次已用完）").assertCountEquals(0)
+    }
+
+    @Test
+    fun `进行中不受轮次耗尽影响仍是暂停按钮`() {
+        // 极端情况：目标还在跑（active）但计数已经追平上限（DSH 会在下一轮开始时 block）。
+        // 这时该给的仍然是「暂停」，不能因为 roundsExhausted 就把暂停按钮也换成置灰的开始。
+        setBanner(goal(GoalPhase.ACTIVE, rounds = 50, started = 50))
+        compose.onNodeWithContentDescription("暂停目标").assertExists()
+        compose.onAllNodesWithContentDescription("开始目标（轮次已用完）").assertCountEquals(0)
     }
 
     @Test

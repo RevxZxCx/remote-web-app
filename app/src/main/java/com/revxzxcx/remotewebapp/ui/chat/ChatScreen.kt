@@ -27,6 +27,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -113,7 +114,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -221,6 +225,11 @@ fun ChatScreen(
     // 重新打开对话依旧为展开状态」。用 saveable 会在进程重建后恢复，与要求相反。
     //
     // 目标横幅默认展开 → `goalCollapsed = false`。
+    // R032 第 1 条：dock 从 `bottomBar` 改成浮动 overlay 之后，消息列表要自己让出它的
+    // 高度，否则最后一条永远被压在输入框下面（「浮」变成「挡」）。这里存 dock 的实测
+    // 像素高：胶囊、排队条、任务面板的高低都不固定，写死任何一个数字都会在两个用例里
+    // 出错（没有胶囊时多出一块空白 / 展开任务面板时最后一条被盖住）。
+    var dockHeightPx by remember { mutableIntStateOf(0) }
     var goalCollapsed by remember { mutableStateOf(false) }
     var goalEditing by remember { mutableStateOf(false) }
     var showDeleteGoal by remember { mutableStateOf(false) }
@@ -391,359 +400,409 @@ fun ChatScreen(
                 },
             )
         },
-        bottomBar = {
-            Column {
-                // 排队队列（用户 m21177 第 4 条反馈）：位置在模型条与输入区之间，
-                // 即「发送框上方」。每条一个气泡，带 编辑 / 删除 / 插队 三个操作。
-                //
-                // 有提问/审批时整块让位（用户 m29539）：输入区都变成回答窗口了，再显示
-                // 「待发送」会让人以为还能继续塞消息。已有排队消息由服务端保管，回答完
-                // 请求后这里自然回来。
-                // ── R031 的底部堆叠顺序（自下而上）：
-                //    输入框 → 排队条 → 任务胶囊 → 消息区
-                // 排队条贴输入框（用户 m21177 定的「发送框上方」），任务胶囊描述的是
-                // 更外层的宏观进度，所以让位到排队条之上。
-                //
-                // 输入法可见时三者全部隐藏（用户 m45632）：键盘已经占掉 40% 高度，
-                // 再挂这两块会和顶部目标打架、也把消息区挤没。
-                // 排队区正在行内编辑时也不能隐藏（同上）：此时键盘必然升起，
-                // 把排队条移出组合树会让那个输入框连同焦点一起消失。
-                if (interactive == null && dockVisible(imeVisible, editing = queueEditing)) {
-                    // 任务胶囊 + 展开的任务列表（在排队条**之上**）
-                    if (state.todos.visible) {
-                        Column(modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 6.dp)) {
-                            TaskPill(
-                                todos = state.todos,
-                                expanded = expandedDock == DockTarget.Tasks,
-                                onToggle = {
-                                    expandedDock = if (expandedDock == DockTarget.Tasks) {
-                                        DockTarget.None
-                                    } else {
-                                        // 互斥：展开任务会收起排队列表（枚举只有一个值，
-                                        // 赋值即互斥，不需要显式去关另一个）。
-                                        DockTarget.Tasks
-                                    }
-                                },
-                            )
-                            AnimatedVisibility(
-                                visible = expandedDock == DockTarget.Tasks,
-                                enter = fadeIn(tween(Motion.MEDIUM)) +
-                                    expandVertically(tween(Motion.MEDIUM)),
-                                exit = fadeOut(tween(Motion.FAST)) +
-                                    shrinkVertically(tween(Motion.FAST)),
-                            ) {
-                                Box(Modifier.padding(top = 6.dp)) {
-                                    TaskPanel(todos = state.todos)
-                                }
-                            }
-                        }
-                    }
-                    QueuedStrip(
-                        messages = state.queued,
-                        generating = state.generating,
-                        now = now,
-                        expanded = expandedDock == DockTarget.Queue,
-                        onToggleExpanded = {
-                            expandedDock = if (expandedDock == DockTarget.Queue) {
-                                DockTarget.None
-                            } else {
-                                DockTarget.Queue
-                            }
-                        },
-                        onEdit = viewModel::editQueued,
-                        onRemove = viewModel::removeQueued,
-                        onSteer = viewModel::steerQueued,
-                        onEditingChanged = { queueEditing = it },
+    ) { padding ->
+
+        // ── R032 第 1 条（用户 m04197）：底部三块（任务胶囊 / 排队条 / 输入框）**浮**在
+        // 对话之上，不再是一块贴底面板。
+        //
+        // 早先它们是 `Scaffold` 的 `bottomBar`：bottomBar 参与测量，消息列表被整体顶上去、
+        // 永远滚不到输入框下方，整块 dock 因此看起来就是「一块有背景的面板盖在界面上」。
+        // 用户原话：「我想要的效果是浮界面上，而现在有背景的效果是有一个面板盖在界面上」。
+        //
+        // 现在 dock 是 content 区里的一个 overlay（`Alignment.BottomCenter`），自己不画任何
+        // 底色，消息从它下面滚过去；`LazyColumn` 的底部 `contentPadding` 补上它的实测高度
+        // （[dockHeightPx]），最后一条才不会永远被挡住——否则「浮」就变成了「挡」。
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                // 全局状态条（FR-4.4）。与工作区页读的是同一个载波状态，所以两处永远一致。
+                // 只在非健康时显示：正常聊天时它占的那一行高度没有价值，异常时才是关键信息。
+                if (!carrier.isHealthy) {
+                    ConnectionBanner(
+                        carrier = carrier,
+                        // 「重新配对」= 退出配对 + 重新配对，是破坏性操作（会擦凭证）。
+                        // 确认框由 AppRoot 统一渲染（R018 P1-1）。
+                        onRepairRequest = onUnpair,
+                        onRetry = viewModel::retry,
                     )
                 }
-                // 有待回答的请求时，**输入框本身变成审批/提问窗口**（用户 m29539，
-                // 与 DSH 桌面端一致：卡片暂时占用编辑器位置）。所以：
-                //   · 这里没有横幅，也没有「上面挂着卡片、下面还能打字」的状态——
-                //     那个状态下用户会把新消息发出去，而服务端还在等他回答；
-                //   · 排队条同样让位：有提问/审批时不能再往队列里塞消息。
-                // Composer 内部按 [interactive] 分派，三种形态共用同一个 Surface。
-                Composer(
-                    draft = draft,
-                    generating = state.generating,
-                    collapseSignal = scrollCollapseSignal,
-                    sending = state.sending,
-                    pending = pending,
-                    attachNotice = attachNotice,
-                    interactive = interactive,
-                    // 两条错误通道合并展示，但必须带来源前缀——否则同时失败时用户
-                    // 分不清是「提问没送出去」还是「审批没送出去」，重试的点也不同。
-                    interactiveError = when {
-                        questionError != null && approvalError != null ->
-                            "提问失败：$questionError；审批失败：$approvalError"
-                        questionError != null -> "提问失败：$questionError"
-                        approvalError != null -> "审批失败：$approvalError"
-                        else -> null
-                    },
-                    onAnswerApproval = { eventId, allow ->
-                        viewModel.answerApproval(eventId, allow)
-                    },
-                    onToggleQuestionOption = { callId, question, label ->
-                        viewModel.toggleQuestionOption(callId, question, label)
-                    },
-                    onQuestionCustom = { callId, question, value ->
-                        viewModel.setQuestionCustom(callId, question, value)
-                    },
-                    onSubmitQuestions = viewModel::submitQuestionGroup,
-                    onSkipQuestions = viewModel::skipQuestionGroup,
-                    permissionChip = {
-                        PermissionChip(
-                            permission = state.permission,
-                            pendingCount = approvals.size,
-                            onClick = { showApprovals = true },
-                        )
-                    },
-                    modelChip = {
-                        ModelBar(
-                            model = state.model,
-                            loading = state.catalogLoading,
-                            error = state.modelError,
-                            onOpen = {
-                                viewModel.openModelPicker()
-                                showModelPicker = true
-                            },
-                        )
-                    },
-                    onDraftChange = viewModel::onDraftChange,
-                    onSend = viewModel::send,
-                    onRemoveAttachment = viewModel::removeAttachment,
-                    onAttachImage = { bytes, mediaType, name, measure ->
-                        // 返回值仍保留给调用方判断「加没加上」，提示已由 ViewModel 落到
-                        // attachNotice 上（R007 P2-3）。
-                        viewModel.attachImage(bytes, mediaType, name, measure)?.message()
-                    },
-                    onAttachFile = { bytes, name ->
-                        // 上传在 viewModelScope 里跑（R007 P2-3）：旋转屏幕不取消。
-                        // 结果经 attachNotice 回来。
-                        viewModel.attachFileInBackground(bytes, name)
-                    },
-                    onAttachNotice = { viewModel.setAttachNotice(it) },
+
+                if (state.fromCache) {
+                    CacheNotice("正在同步：当前显示的是上次缓存的会话内容。")
+                }
+
+                // 三类错误各自带自己的重试动作（R006 P3-6）：共用一个字段时，「发送失败」的
+                // 错误条上那个「重试」也去重启整条 follow 流——比失败本身重得多，还不会重新
+                // 发送那条消息。用户点了按钮发现什么都没发生。
+                //
+                // 三条横幅同形（R016 抽成 [ChatErrorBanner]：早先是三段逐字复制的代码，
+                // 改一处漏两处只是时间问题），配色跟随主题的 errorContainer 角色，
+                // 进出带竖向展开动画——没有动画时横幅是硬切出来的，列表内容被猛地顶一下。
+                ChatErrorBanner(text = state.error, actionLabel = "重试", onAction = viewModel::retry)
+                ChatErrorBanner(
+                    text = state.sendError,
+                    actionLabel = "重试",
+                    onAction = viewModel::retrySend,
                 )
-            }
-        },
-    ) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            // 全局状态条（FR-4.4）。与工作区页读的是同一个载波状态，所以两处永远一致。
-            // 只在非健康时显示：正常聊天时它占的那一行高度没有价值，异常时才是关键信息。
-            if (!carrier.isHealthy) {
-                ConnectionBanner(
-                    carrier = carrier,
-                    // 「重新配对」= 退出配对 + 重新配对，是破坏性操作（会擦凭证）。
-                    // 确认框由 AppRoot 统一渲染（R018 P1-1）。
-                    onRepairRequest = onUnpair,
-                    onRetry = viewModel::retry,
+                // 目标操作的失败**不能**复用上面那条（R031 独立审查 P2）：那条的「重试」绑的是
+                // `retrySend()`，它只清错误再调 `send()`——草稿为空时点了什么都不会发生，
+                // 草稿非空时会把一条无关消息发出去。这里只提示，关掉就完事（重点按钮即重试）。
+                ChatErrorBanner(
+                    text = state.goalError,
+                    actionLabel = "知道了",
+                    onAction = viewModel::dismissGoalError,
                 )
-            }
+                ChatErrorBanner(
+                    text = state.pageError,
+                    actionLabel = "重试",
+                    onAction = viewModel::retryLoadMore,
+                )
 
-            if (state.fromCache) {
-                CacheNotice("正在同步：当前显示的是上次缓存的会话内容。")
-            }
-
-            // 三类错误各自带自己的重试动作（R006 P3-6）：共用一个字段时，「发送失败」的
-            // 错误条上那个「重试」也去重启整条 follow 流——比失败本身重得多，还不会重新
-            // 发送那条消息。用户点了按钮发现什么都没发生。
-            //
-            // 三条横幅同形（R016 抽成 [ChatErrorBanner]：早先是三段逐字复制的代码，
-            // 改一处漏两处只是时间问题），配色跟随主题的 errorContainer 角色，
-            // 进出带竖向展开动画——没有动画时横幅是硬切出来的，列表内容被猛地顶一下。
-            ChatErrorBanner(text = state.error, actionLabel = "重试", onAction = viewModel::retry)
-            ChatErrorBanner(
-                text = state.sendError,
-                actionLabel = "重试",
-                onAction = viewModel::retrySend,
-            )
-            // 目标操作的失败**不能**复用上面那条（R031 独立审查 P2）：那条的「重试」绑的是
-            // `retrySend()`，它只清错误再调 `send()`——草稿为空时点了什么都不会发生，
-            // 草稿非空时会把一条无关消息发出去。这里只提示，关掉就完事（重点按钮即重试）。
-            ChatErrorBanner(
-                text = state.goalError,
-                actionLabel = "知道了",
-                onAction = viewModel::dismissGoalError,
-            )
-            ChatErrorBanner(
-                text = state.pageError,
-                actionLabel = "重试",
-                onAction = viewModel::retryLoadMore,
-            )
-
-            // ── R031 目标横幅（用户 m45580 第 2 条）：会话级元信息，挂在消息区上方。
-            //
-            // 键盘可见时隐藏（用户 m45632）：与底部两块一起让位，否则顶部横幅 + 键盘
-            // 会把消息区压到只剩一两行。
-            // 行内编辑时**不能**隐藏（否则输入框随横幅一起销毁）：这是「输入法让位」的
-            // 唯一例外（用户 m45632 明确要求「正在行内编辑的那一行不隐藏」）。
-            if (dockVisible(imeVisible, editing = goalEditing)) {
-                state.goal?.let { goal ->
-                    Box(modifier = Modifier.padding(bottom = 8.dp)) {
-                        GoalBanner(
-                            goal = goal,
-                            collapsed = goalCollapsed,
-                            editing = goalEditing,
-                            onToggleCollapsed = { goalCollapsed = true },
-                            onPauseResume = {
-                                // 目标与任务独立（见 Goal 的 KDoc）：这里只发 pause/resume，
-                                // 不动 todos、也不中止当前轮。
-                                viewModel.setGoalPhase(
-                                    pause = goal.canPause,
-                                    goal = goal,
-                                )
-                            },
-                            onRequestEdit = { goalEditing = true },
-                            onEdit = { objective ->
-                                viewModel.editGoal(goal, objective)
-                                goalEditing = false
-                            },
-                            onCancelEdit = { goalEditing = false },
-                            onDelete = { showDeleteGoal = true },
-                        )
+                // ── R031 目标横幅（用户 m45580 第 2 条）：会话级元信息，挂在消息区上方。
+                //
+                // 键盘可见时隐藏（用户 m45632）：与底部两块一起让位，否则顶部横幅 + 键盘
+                // 会把消息区压到只剩一两行。
+                // 行内编辑时**不能**隐藏（否则输入框随横幅一起销毁）：这是「输入法让位」的
+                // 唯一例外（用户 m45632 明确要求「正在行内编辑的那一行不隐藏」）。
+                if (dockVisible(imeVisible, editing = goalEditing)) {
+                    state.goal?.let { goal ->
+                        Box(modifier = Modifier.padding(bottom = 8.dp)) {
+                            GoalBanner(
+                                goal = goal,
+                                collapsed = goalCollapsed,
+                                editing = goalEditing,
+                                onToggleCollapsed = { goalCollapsed = true },
+                                onPauseResume = {
+                                    // 目标与任务独立（见 Goal 的 KDoc）：这里只发 pause/resume，
+                                    // 不动 todos、也不中止当前轮。
+                                    viewModel.setGoalPhase(
+                                        pause = goal.canPause,
+                                        goal = goal,
+                                    )
+                                },
+                                onRequestEdit = { goalEditing = true },
+                                onEdit = { objective ->
+                                    viewModel.editGoal(goal, objective)
+                                    goalEditing = false
+                                },
+                                onCancelEdit = { goalEditing = false },
+                                onDelete = { showDeleteGoal = true },
+                            )
+                        }
                     }
                 }
-            }
 
-            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                when {
-                    state.loading && state.items.isEmpty() -> Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center,
-                    ) { CircularProgressIndicator() }
+                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    when {
+                        state.loading && state.items.isEmpty() -> Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center,
+                        ) { CircularProgressIndicator() }
 
-                    // `queued.isEmpty()` 必须一起判：全新会话里第一句话发出去时 items 还是空的、
-                    // live 也还没到（服务端要先出队才开轮），此刻若走进这个空态分支，
-                    // 刚发出去的那条回声就被「这个会话还没有消息」盖掉了——正是 m20380 的缺口。
-                    state.ready && state.items.isEmpty() && state.live == null &&
-                        state.queued.isEmpty() -> Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = "这个会话还没有消息。",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        // `queued.isEmpty()` 必须一起判：全新会话里第一句话发出去时 items 还是空的、
+                        // live 也还没到（服务端要先出队才开轮），此刻若走进这个空态分支，
+                        // 刚发出去的那条回声就被「这个会话还没有消息」盖掉了——正是 m20380 的缺口。
+                        state.ready && state.items.isEmpty() && state.live == null &&
+                            state.queued.isEmpty() -> Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "这个会话还没有消息。",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+
+                        else -> LazyColumn(
+                            state = listState,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(
+                                start = 12.dp,
+                                end = 12.dp,
+                                top = 12.dp,
+                                // dock 是浮层，不参与列表测量；把它的实测高度补到列表底部，
+                                // 最后一条才能滚到输入框上方而不是被盖住。
+                                bottom = with(LocalDensity.current) {
+                                    dockHeightPx.toDp() + 12.dp
+                                },
+                            ),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            if (state.loadingMore) {
+                                item(key = CHAT_LOADING_MORE_KEY) {
+                                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                        CircularProgressIndicator(modifier = Modifier.padding(8.dp))
+                                    }
+                                }
+                            }
+                            itemsIndexed(rows, key = { _, row -> row.key }) { index, row ->
+                                // 新消息淡入（R016）。用 LazyItemScope.animateItem 而不是自己套
+                                // AnimatedVisibility：后者是**每个 item 各自**的进出动画，会在
+                                // loadMore 往前插历史时让整页老消息一起重播一遍淡入——用户看到
+                                // 的是「整页闪一下」。animateItem 只对新出现的 key 播放一次，
+                                // 已存在的 key 换位置时走 placement 动画，两者分工正好是我们要的。
+                                val enter = Modifier.animateItem(
+                                    fadeInSpec = tween(Motion.MEDIUM, easing = Motion.Emphasized),
+                                    placementSpec = tween(Motion.MEDIUM, easing = Motion.Emphasized),
+                                    fadeOutSpec = tween(Motion.FAST, easing = Motion.Emphasized),
+                                )
+                                when (row) {
+                                    is ChatRow.Single -> ChatItemRow(
+                                        item = row.item,
+                                        now = now,
+                                        changes = state.changes[row.item.seq],
+                                        changesLoading = row.item.seq in state.changesLoading,
+                                        onOpenFile = onOpenFile,
+                                        onRetryChanges = viewModel::retryChanges,
+                                        attachments = viewModel.attachments,
+                                        sessionId = viewModel.sessionId,
+                                        modifier = enter,
+                                    )
+
+                                    is ChatRow.Group -> GroupRow(
+                                        members = row.members,
+                                        running = index == rows.lastIndex && state.generating,
+                                        now = now,
+                                        changes = state.changes,
+                                        changesLoading = state.changesLoading,
+                                        onOpenFile = onOpenFile,
+                                        onRetryChanges = viewModel::retryChanges,
+                                        attachments = viewModel.attachments,
+                                        sessionId = viewModel.sessionId,
+                                        modifier = enter,
+                                    )
+                                }
+                            }
+                            state.live?.let { live ->
+                                item(key = CHAT_LIVE_KEY) { LiveRow(live) }
+                            }
+                            // 排队气泡**不在这里**：用户 m21177 第 4 条反馈明确要求「发送框上方多一个
+                            // 气泡」，而消息列表会随内容增长把气泡推到看不见的地方（R010m 就是活例：
+                            // 列表停在半路时，排在列表尾的回声在视口外，看起来像「回声消失了」）。
+                            // 现在由 bottomBar 里的 [QueuedStrip] 渲染。
+                        }
                     }
 
-                    else -> LazyColumn(
-                        state = listState,
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        if (state.loadingMore) {
-                            item(key = CHAT_LOADING_MORE_KEY) {
-                                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                    CircularProgressIndicator(modifier = Modifier.padding(8.dp))
+                    // 位置滚动条（用户 m24150）。行 key 的顺序必须与上面 LazyColumn 逐行一致，
+                    // 否则标记会整体偏移几行——所以 loading-more / live 两个 key 也走这里的常量。
+                    ChatScrollbar(
+                        listState = listState,
+                        itemKeys = {
+                            buildList {
+                                if (state.loadingMore) add(CHAT_LOADING_MORE_KEY)
+                                rows.forEach { add(it.key) }
+                                if (state.live != null) add(CHAT_LIVE_KEY)
+                            }
+                        },
+                        userItemIndices = {
+                            val base = if (state.loadingMore) 1 else 0
+                            rows.mapIndexedNotNull { index, row ->
+                                if (row is ChatRow.Single && row.item is ChatItem.User) {
+                                    base + index
+                                } else {
+                                    null
+                                }
+                            }
+                        },
+                        // 会话长度系数。不乘它时每个会话刚打开都恰好量到 50 行
+                        // （DEFAULT_MAX_MESSAGES），滑块大小在所有会话里是同一个数。
+                        // cursor 是服务端权威的日志尾部 seq，已加载窗口覆盖
+                        // [items.first().seq, cursor]，两者之比就是已加载部分占整个会话的比例。
+                        sessionLengthScale = {
+                            val items = state.items
+                            val cursor = state.cursor
+                            if (items.isEmpty() || cursor < 0L || !state.hasMore) {
+                                1f
+                            } else {
+                                val oldest = items.first().seq
+                                val span = (cursor - oldest + 1L).coerceAtLeast(1L)
+                                ((cursor + 1L).toDouble() / span.toDouble()).toFloat()
+                            }
+                        },
+                        onScrollToItem = { index -> listState.scrollToItem(index) },
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .fillMaxHeight()
+                            .width(18.dp)
+                            // R032 第 1 条：dock 变成浮层后消息区一直铺到屏幕底部，
+                            // 滚动条若仍按 `fillMaxHeight` 画到底，那条 18dp 的虚线与
+                            // 滑块会从输入框右侧的留白里露出来（审查 P2-1）。
+                            // 与 [ScrollToBottomFab] 对称地让出 dock 高度。
+                            .padding(
+                                bottom = with(LocalDensity.current) {
+                                    dockHeightPx.toDp()
+                                },
+                            )
+                            .padding(vertical = 6.dp),
+                    )
+
+                    // 「滚到底部」浮动按钮：只在列表没贴在底部时出现，位置在滚动条下方
+                    // （用户 m24150 把两者作为一个需求一起提的）。
+                    ScrollToBottomFab(
+                        visible = showScrollToBottom,
+                        onClick = { scope.launch { listState.scrollToBottom(lastIndex()) } },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            // dock 改成浮层之后（R032 第 1 条），消息区一直铺到屏幕底部，
+                            // 这个按钮若还按 16dp 贴底就会藏在输入框下面点不到，所以要
+                            // 抬到 dock 之上。
+                            .padding(
+                                end = 16.dp,
+                                bottom = with(LocalDensity.current) {
+                                    dockHeightPx.toDp() + 16.dp
+                                },
+                            ),
+                    )
+                }
+            }
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    // 浮层必须自己消费指针事件（审查 P3-1）：Compose 的命中测试会跳过
+                    // 没有任何指针输入的节点，而这块 Column 内部只有胶囊/输入框各自的
+                    // 内边距，留白处的点击、长按会穿透到下面的消息行（触发长按选择、
+                    // 折叠块展开、文件跳转），右侧还会被 [ChatScrollbar] 的轨道接住。
+                    // 旧实现里这块区域属于 `bottomBar`，天然不会穿透。
+                    //
+                    // `detectTapGestures` 空实现 = 吃掉 tap/长按/双击，但**不**吞拖动
+                    // （拖动仍由 scrollable 祖先处理，滚动照常）。
+                    .pointerInput(Unit) { detectTapGestures { } }
+                    .onSizeChanged { dockHeightPx = it.height },
+            ) {
+                    // 排队队列（用户 m21177 第 4 条反馈）：位置在模型条与输入区之间，
+                    // 即「发送框上方」。每条一个气泡，带 编辑 / 删除 / 插队 三个操作。
+                    //
+                    // 有提问/审批时整块让位（用户 m29539）：输入区都变成回答窗口了，再显示
+                    // 「待发送」会让人以为还能继续塞消息。已有排队消息由服务端保管，回答完
+                    // 请求后这里自然回来。
+                    // ── R031 的底部堆叠顺序（自下而上）：
+                    //    输入框 → 排队条 → 任务胶囊 → 消息区
+                    // 排队条贴输入框（用户 m21177 定的「发送框上方」），任务胶囊描述的是
+                    // 更外层的宏观进度，所以让位到排队条之上。
+                    //
+                    // 输入法可见时三者全部隐藏（用户 m45632）：键盘已经占掉 40% 高度，
+                    // 再挂这两块会和顶部目标打架、也把消息区挤没。
+                    // 排队区正在行内编辑时也不能隐藏（同上）：此时键盘必然升起，
+                    // 把排队条移出组合树会让那个输入框连同焦点一起消失。
+                    if (interactive == null && dockVisible(imeVisible, editing = queueEditing)) {
+                        // 任务胶囊 + 展开的任务列表（在排队条**之上**）
+                        if (state.todos.visible) {
+                            Column(modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 6.dp)) {
+                                TaskPill(
+                                    todos = state.todos,
+                                    expanded = expandedDock == DockTarget.Tasks,
+                                    onToggle = {
+                                        expandedDock = if (expandedDock == DockTarget.Tasks) {
+                                            DockTarget.None
+                                        } else {
+                                            // 互斥：展开任务会收起排队列表（枚举只有一个值，
+                                            // 赋值即互斥，不需要显式去关另一个）。
+                                            DockTarget.Tasks
+                                        }
+                                    },
+                                )
+                                AnimatedVisibility(
+                                    visible = expandedDock == DockTarget.Tasks,
+                                    enter = fadeIn(tween(Motion.MEDIUM)) +
+                                        expandVertically(tween(Motion.MEDIUM)),
+                                    exit = fadeOut(tween(Motion.FAST)) +
+                                        shrinkVertically(tween(Motion.FAST)),
+                                ) {
+                                    Box(Modifier.padding(top = 6.dp)) {
+                                        TaskPanel(todos = state.todos)
+                                    }
                                 }
                             }
                         }
-                        itemsIndexed(rows, key = { _, row -> row.key }) { index, row ->
-                            // 新消息淡入（R016）。用 LazyItemScope.animateItem 而不是自己套
-                            // AnimatedVisibility：后者是**每个 item 各自**的进出动画，会在
-                            // loadMore 往前插历史时让整页老消息一起重播一遍淡入——用户看到
-                            // 的是「整页闪一下」。animateItem 只对新出现的 key 播放一次，
-                            // 已存在的 key 换位置时走 placement 动画，两者分工正好是我们要的。
-                            val enter = Modifier.animateItem(
-                                fadeInSpec = tween(Motion.MEDIUM, easing = Motion.Emphasized),
-                                placementSpec = tween(Motion.MEDIUM, easing = Motion.Emphasized),
-                                fadeOutSpec = tween(Motion.FAST, easing = Motion.Emphasized),
-                            )
-                            when (row) {
-                                is ChatRow.Single -> ChatItemRow(
-                                    item = row.item,
-                                    now = now,
-                                    changes = state.changes[row.item.seq],
-                                    changesLoading = row.item.seq in state.changesLoading,
-                                    onOpenFile = onOpenFile,
-                                    onRetryChanges = viewModel::retryChanges,
-                                    attachments = viewModel.attachments,
-                                    sessionId = viewModel.sessionId,
-                                    modifier = enter,
-                                )
-
-                                is ChatRow.Group -> GroupRow(
-                                    members = row.members,
-                                    running = index == rows.lastIndex && state.generating,
-                                    now = now,
-                                    changes = state.changes,
-                                    changesLoading = state.changesLoading,
-                                    onOpenFile = onOpenFile,
-                                    onRetryChanges = viewModel::retryChanges,
-                                    attachments = viewModel.attachments,
-                                    sessionId = viewModel.sessionId,
-                                    modifier = enter,
-                                )
-                            }
-                        }
-                        state.live?.let { live ->
-                            item(key = CHAT_LIVE_KEY) { LiveRow(live) }
-                        }
-                        // 排队气泡**不在这里**：用户 m21177 第 4 条反馈明确要求「发送框上方多一个
-                        // 气泡」，而消息列表会随内容增长把气泡推到看不见的地方（R010m 就是活例：
-                        // 列表停在半路时，排在列表尾的回声在视口外，看起来像「回声消失了」）。
-                        // 现在由 bottomBar 里的 [QueuedStrip] 渲染。
+                        QueuedStrip(
+                            messages = state.queued,
+                            generating = state.generating,
+                            now = now,
+                            expanded = expandedDock == DockTarget.Queue,
+                            onToggleExpanded = {
+                                expandedDock = if (expandedDock == DockTarget.Queue) {
+                                    DockTarget.None
+                                } else {
+                                    DockTarget.Queue
+                                }
+                            },
+                            onEdit = viewModel::editQueued,
+                            onRemove = viewModel::removeQueued,
+                            onSteer = viewModel::steerQueued,
+                            onEditingChanged = { queueEditing = it },
+                        )
                     }
-                }
-
-                // 位置滚动条（用户 m24150）。行 key 的顺序必须与上面 LazyColumn 逐行一致，
-                // 否则标记会整体偏移几行——所以 loading-more / live 两个 key 也走这里的常量。
-                ChatScrollbar(
-                    listState = listState,
-                    itemKeys = {
-                        buildList {
-                            if (state.loadingMore) add(CHAT_LOADING_MORE_KEY)
-                            rows.forEach { add(it.key) }
-                            if (state.live != null) add(CHAT_LIVE_KEY)
-                        }
-                    },
-                    userItemIndices = {
-                        val base = if (state.loadingMore) 1 else 0
-                        rows.mapIndexedNotNull { index, row ->
-                            if (row is ChatRow.Single && row.item is ChatItem.User) {
-                                base + index
-                            } else {
-                                null
-                            }
-                        }
-                    },
-                    // 会话长度系数。不乘它时每个会话刚打开都恰好量到 50 行
-                    // （DEFAULT_MAX_MESSAGES），滑块大小在所有会话里是同一个数。
-                    // cursor 是服务端权威的日志尾部 seq，已加载窗口覆盖
-                    // [items.first().seq, cursor]，两者之比就是已加载部分占整个会话的比例。
-                    sessionLengthScale = {
-                        val items = state.items
-                        val cursor = state.cursor
-                        if (items.isEmpty() || cursor < 0L || !state.hasMore) {
-                            1f
-                        } else {
-                            val oldest = items.first().seq
-                            val span = (cursor - oldest + 1L).coerceAtLeast(1L)
-                            ((cursor + 1L).toDouble() / span.toDouble()).toFloat()
-                        }
-                    },
-                    onScrollToItem = { index -> listState.scrollToItem(index) },
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .fillMaxHeight()
-                        .width(18.dp)
-                        .padding(vertical = 6.dp),
-                )
-
-                // 「滚到底部」浮动按钮：只在列表没贴在底部时出现，位置在滚动条下方
-                // （用户 m24150 把两者作为一个需求一起提的）。
-                ScrollToBottomFab(
-                    visible = showScrollToBottom,
-                    onClick = { scope.launch { listState.scrollToBottom(lastIndex()) } },
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(end = 16.dp, bottom = 16.dp),
-                )
+                    // 有待回答的请求时，**输入框本身变成审批/提问窗口**（用户 m29539，
+                    // 与 DSH 桌面端一致：卡片暂时占用编辑器位置）。所以：
+                    //   · 这里没有横幅，也没有「上面挂着卡片、下面还能打字」的状态——
+                    //     那个状态下用户会把新消息发出去，而服务端还在等他回答；
+                    //   · 排队条同样让位：有提问/审批时不能再往队列里塞消息。
+                    // Composer 内部按 [interactive] 分派，三种形态共用同一个 Surface。
+                    Composer(
+                        draft = draft,
+                        generating = state.generating,
+                        collapseSignal = scrollCollapseSignal,
+                        sending = state.sending,
+                        pending = pending,
+                        attachNotice = attachNotice,
+                        interactive = interactive,
+                        // 两条错误通道合并展示，但必须带来源前缀——否则同时失败时用户
+                        // 分不清是「提问没送出去」还是「审批没送出去」，重试的点也不同。
+                        interactiveError = when {
+                            questionError != null && approvalError != null ->
+                                "提问失败：$questionError；审批失败：$approvalError"
+                            questionError != null -> "提问失败：$questionError"
+                            approvalError != null -> "审批失败：$approvalError"
+                            else -> null
+                        },
+                        onAnswerApproval = { eventId, allow ->
+                            viewModel.answerApproval(eventId, allow)
+                        },
+                        onToggleQuestionOption = { callId, question, label ->
+                            viewModel.toggleQuestionOption(callId, question, label)
+                        },
+                        onQuestionCustom = { callId, question, value ->
+                            viewModel.setQuestionCustom(callId, question, value)
+                        },
+                        onSubmitQuestions = viewModel::submitQuestionGroup,
+                        onSkipQuestions = viewModel::skipQuestionGroup,
+                        permissionChip = {
+                            PermissionChip(
+                                permission = state.permission,
+                                pendingCount = approvals.size,
+                                onClick = { showApprovals = true },
+                            )
+                        },
+                        modelChip = {
+                            ModelBar(
+                                model = state.model,
+                                loading = state.catalogLoading,
+                                error = state.modelError,
+                                onOpen = {
+                                    viewModel.openModelPicker()
+                                    showModelPicker = true
+                                },
+                            )
+                        },
+                        onDraftChange = viewModel::onDraftChange,
+                        onSend = viewModel::send,
+                        onRemoveAttachment = viewModel::removeAttachment,
+                        onAttachImage = { bytes, mediaType, name, measure ->
+                            // 返回值仍保留给调用方判断「加没加上」，提示已由 ViewModel 落到
+                            // attachNotice 上（R007 P2-3）。
+                            viewModel.attachImage(bytes, mediaType, name, measure)?.message()
+                        },
+                        onAttachFile = { bytes, name ->
+                            // 上传在 viewModelScope 里跑（R007 P2-3）：旋转屏幕不取消。
+                            // 结果经 attachNotice 回来。
+                            viewModel.attachFileInBackground(bytes, name)
+                        },
+                        onAttachNotice = { viewModel.setAttachNotice(it) },
+                    )
             }
         }
     }
-
     // 模型选择器。放在 Scaffold 外面：AlertDialog 需要覆盖在整个页面之上，
     // 放 bottomBar/topBar 里会被裁掉（Compose 的对话框是独立窗口）。
     state.catalog?.let { catalog ->

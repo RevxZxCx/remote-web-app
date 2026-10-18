@@ -1365,6 +1365,180 @@ class ChatReducerTest {
         assertEquals(1, next.todos.total)
     }
 
+    // ------------------------------------------------ 排队 splice（用户 m04197 第 2 条）
+
+    /**
+     * 造一帧 `agent/inbox/spliced`。
+     *
+     * `inserted` 直接收 JSON 片段而不是 [QueuedMessage]：这些用例要守的正是
+     * 「wire 形状 → 列表落点」这一段，从对象反序列化会绕开 [QueueInboxParser]。
+     */
+    private fun splice(
+        seq: Long,
+        start: Int,
+        inserted: String = "",
+        removedCount: Int = 0,
+        target: String = INBOX_NEXT_TURN,
+        outcome: String? = null,
+    ): ChatFrame.Event {
+        val insertedJson = inserted.trim().let { if (it.isEmpty()) "[]" else "[$it]" }
+        val removedField = if (removedCount == 0) "" else ""","removedCount":$removedCount"""
+        val outcomeField = if (outcome == null) "" else ""","outcome":"$outcome""""
+        return parse(
+            """
+            {"type":"agent/inbox/spliced","seq":$seq,"time":${seq * 1000},
+             "data":{"target":"$target","start":$start$removedField,
+                "inserted":$insertedJson$outcomeField}}
+            """.trimIndent(),
+        )
+    }
+
+    /** 服务端条目：有 `id` 即 `confirmed = true`。 */
+    private fun wireItem(id: String, rpcId: String, text: String): String =
+        """{"id":"$id","role":"user","source":{"kind":"user","rpcId":"$rpcId"},
+            "content":[{"type":"text","text":"$text"}]}"""
+
+    @Test
+    fun `服务端插入首条排队消息时立刻出现在队列里`() {
+        // 用户 m04197 第 2 条：「当用户发送第一条排队消息时，排队消息不会出现」。
+        //
+        // 线上真实序列（`session-ad282b0d` 的 140 条 inbox 事件实证）：发送时服务端先回
+        //   agent/inbox/spliced {start:0, inserted:[A]}   ← 没有 removedCount 字段
+        // 而此刻我们的 `queued` 里只有一条**本地回声**（`confirmed = false`，同 rpcId）。
+        //
+        // 旧实现只在「落在删除区间内」时插入，纯插入走末尾兜底
+        // `seenInTarget <= start`，此时 `seenInTarget = 1`、`start = 0` → 不成立 →
+        // A 根本没进列表；紧接着回声又按 rpcId 让位 → 队列空 → 整条排队区消失。
+        val state = ChatUiState(generating = true, queued = listOf(echo(1L, "第一句")))
+        val next = ChatReducer.reduce(
+            state,
+            splice(seq = 20L, start = 0, inserted = wireItem("item-A", "rpc-1", "第一句")),
+        )
+
+        assertEquals(1, next.queued.size)
+        val item = next.queued.single()
+        assertEquals("item-A", item.id)
+        assertEquals("第一句", item.text)
+        assertTrue(item.confirmed)
+        // 回声已让位，不能出现「服务端条目 + 同一 rpcId 的本地回声」两条。
+        assertTrue(next.queued.none { !it.confirmed })
+    }
+
+    @Test
+    fun `第二条排队消息不会把第一条挤掉`() {
+        // 用户 m04197 第 2 条后半段：「再发了一条，排队消息就出现了，并且只显示发送的
+        // 第二条排队消息」。原因同上：A 在下标 0 漏插、B 在下标 1 才命中末尾兜底，
+        // 于是界面只剩 B。这里把「两条都在、顺序正确」钉住。
+        val state = ChatUiState(
+            generating = true,
+            queued = listOf(
+                QueuedMessage(
+                    id = "item-A",
+                    rpcId = "rpc-1",
+                    text = "第一句",
+                    target = INBOX_NEXT_TURN,
+                    confirmed = true,
+                ),
+                echo(2L, "第二句"),
+            ),
+        )
+        val next = ChatReducer.reduce(
+            state,
+            splice(seq = 21L, start = 1, inserted = wireItem("item-B", "rpc-2", "第二句")),
+        )
+
+        assertEquals(listOf("item-A", "item-B"), next.queued.map { it.id })
+        assertEquals(2, next.queued.size)
+    }
+
+    @Test
+    fun `编辑事件就地替换这一条而不是追加`() {
+        // removedCount:1 + inserted:[m']，id 不变（服务端是 inbox.replace）→ 必须替换，
+        // 数量保持 1。旧实现在纯插入上翻车，编辑是它唯一走通的路径，这里防止修
+        // 纯插入时把这条弄坏。
+        val state = ChatUiState(
+            generating = true,
+            queued = listOf(
+                QueuedMessage(
+                    id = "item-A",
+                    rpcId = "rpc-1",
+                    text = "原来的话",
+                    target = INBOX_NEXT_TURN,
+                    confirmed = true,
+                ),
+            ),
+        )
+        val next = ChatReducer.reduce(
+            state,
+            splice(
+                seq = 22L,
+                start = 0,
+                inserted = wireItem("item-A", "rpc-1", "改过的话"),
+                removedCount = 1,
+                outcome = "canceled",
+            ),
+        )
+
+        assertEquals(1, next.queued.size)
+        assertEquals("改过的话", next.queued.single().text)
+        assertEquals("item-A", next.queued.single().id)
+    }
+
+    @Test
+    fun `删除事件只删掉该 target 里的一条`() {
+        val state = ChatUiState(
+            generating = true,
+            queued = listOf(
+                QueuedMessage(
+                    id = "item-A",
+                    rpcId = "rpc-1",
+                    text = "删除我",
+                    target = INBOX_NEXT_TURN,
+                    confirmed = true,
+                ),
+                QueuedMessage(
+                    id = "item-B",
+                    rpcId = "rpc-2",
+                    text = "留着我",
+                    target = INBOX_NEXT_TURN,
+                    confirmed = true,
+                ),
+            ),
+        )
+        val next = ChatReducer.reduce(
+            state,
+            splice(seq = 23L, start = 0, removedCount = 1, outcome = "canceled"),
+        )
+
+        assertEquals(listOf("item-B"), next.queued.map { it.id })
+    }
+
+    @Test
+    fun `插入点越过段尾时插到该 target 段末尾而不是整队末尾`() {
+        // next-step 的条目排在 next-turn 之后。若把兜底写成「插到整个列表末尾」，
+        // next-turn 的新条目会跑到 next-step 后面去，界面上「等当前轮结束后发出」
+        // 会排在「下一步就执行」下面。
+        val state = ChatUiState(
+            generating = true,
+            queued = listOf(
+                QueuedMessage(
+                    id = "item-S",
+                    rpcId = "rpc-9",
+                    text = "下一步",
+                    target = INBOX_NEXT_STEP,
+                    confirmed = true,
+                ),
+            ),
+        )
+        val next = ChatReducer.reduce(
+            state,
+            splice(seq = 24L, start = 5, inserted = wireItem("item-N", "rpc-8", "排队的")),
+        )
+
+        assertEquals(listOf("item-N", "item-S"), next.queued.map { it.id })
+        assertEquals(INBOX_NEXT_TURN, next.queued.first().target)
+    }
+
     @Test
     fun `回声摘除后普通事件照旧推进游标`() {
         // 摘回声不能顺手把别的事件处理逻辑短路掉（R006 P3-15 的同族风险）。

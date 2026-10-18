@@ -536,6 +536,18 @@ class ChatViewModel(
      */
     fun setGoalPhase(pause: Boolean, goal: Goal) {
         if (goal.phase == GoalPhase.COMPLETE) return
+        // 轮次预算用尽时「开始」必然失败（用户 m04197 第 4 条）：DSH 的 `GoalsService.resume`
+        // 里 `roundsStarted >= maxGoalRounds` 直接抛 `GOAL_INVALID_TRANSITION`
+        // （`goal "…" exhausted N goal rounds; increase maxGoalRounds before resuming`）。
+        // 按钮已置灰，但**不禁用点击**——用户要的就是「点了有一句反馈」，所以这里本地
+        // 直接给提示，不发那条注定失败的 RPC（省一次往返，也避免错误条里出现英文原始报错）。
+        if (!pause && goal.roundsExhausted) {
+            _state.value = _state.value.copy(
+                goalError = "这个目标已经跑满 ${goal.maxGoalRounds} 轮，轮次已用完；" +
+                    "桌面端调大 maxGoalRounds 后才能继续。",
+            )
+            return
+        }
         runGoalAction("目标操作失败：") {
             if (pause) {
                 repository.pauseGoal(sessionId, goal.id, goal.revision)

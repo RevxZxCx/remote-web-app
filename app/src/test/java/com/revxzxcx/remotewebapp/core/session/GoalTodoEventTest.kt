@@ -90,4 +90,46 @@ class GoalTodoEventTest {
         GoalPhase.PAUSED -> "开始目标"
         else -> label
     }
+
+    @Test
+    fun `goal_change 事件里的 roundsStarted 从外层读`() {
+        // 审查 P3-2：实时路径每收到一条 `goal/change` 就把整个 Goal 覆盖一次，
+        // `roundsStarted` 只从快照（parseGoal）读的话，暂停/恢复之后又会退回 0，
+        // 「轮次已用完」的置灰与本地早退会静默失效，而快照用例仍然全绿。
+        //
+        // 线上形状：`roundsStarted` 在 goal 本体**外面**那一层。
+        val change = GoalTodoParser.parseGoalChange(
+            data(
+                """
+                {"kind":"goal","version":1,"operation":"pause",
+                 "goal":{"id":"goal-9","revision":7,"objective":"目标",
+                          "phase":"paused","maxGoalRounds":50},
+                 "roundsStarted":50}
+                """.trimIndent(),
+            ),
+        )
+
+        val goal = (change as GoalChange.Set).goal
+        assertEquals(50, goal.roundsStarted)
+        assertTrue("50/50 必须判定为轮次已用完", goal.roundsExhausted)
+        assertFalse(goal.canPause)
+    }
+
+    @Test
+    fun `goal_change 事件没带 roundsStarted 时退化为 0`() {
+        // 缺字段不能崩，也不能把上限判成已用完（否则「开始」按钮永远置灰）。
+        val change = GoalTodoParser.parseGoalChange(
+            data(
+                """
+                {"kind":"goal","version":1,"operation":"resume",
+                 "goal":{"id":"goal-10","revision":1,"objective":"目标",
+                          "phase":"active","maxGoalRounds":50}}
+                """.trimIndent(),
+            ),
+        )
+
+        val goal = (change as GoalChange.Set).goal
+        assertEquals(0, goal.roundsStarted)
+        assertFalse(goal.roundsExhausted)
+    }
 }
