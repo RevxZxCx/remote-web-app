@@ -7,10 +7,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasScrollToNodeAction
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
 import com.revxzxcx.remotewebapp.core.session.SessionListResult
@@ -89,7 +94,7 @@ class SessionDrawerRenderTest {
     private fun session(sessionId: String, title: String, updatedAt: Long): SessionSummary =
         SessionSummary(sessionId = sessionId, title = title, updatedAt = updatedAt, agentAvailable = true)
 
-    private fun setDrawer(state: HomeUiState) {
+    private fun setDrawer(state: HomeUiState, viewportHeight: Dp = 4000.dp) {
         compose.setContent {
             MaterialTheme {
                 // ⚠️ 这里**不能**套 `verticalScroll`：抽屉自身是
@@ -103,7 +108,7 @@ class SessionDrawerRenderTest {
                 // 被压回虚拟屏幕的那 ~470dp，`LazyColumn` 只组合视口内的项，
                 // 「只在乙工作区」这类靠下的行根本不在语义树上。`requiredHeight`
                 // 无视父约束，才等于「给一个超高的视口」。
-                Box(modifier = Modifier.requiredHeight(4000.dp)) {
+                Box(modifier = Modifier.requiredHeight(viewportHeight)) {
                     SessionDrawer(
                         state = state,
                         onOpenSession = { _, _ -> },
@@ -243,5 +248,59 @@ class SessionDrawerRenderTest {
         assertEquals(listOf("ws-a", "ws-b"), groups.map { it.workspace.workspaceId })
         // 两个工作区都解析出了 2 行（共享会话没被去重吃掉）。
         assertEquals(listOf(2, 2), groups.map { it.rows.size })
+    }
+
+    @Test
+    fun `归档入口在列表末尾滚到时点进去仍能看见返回入口`() {
+        // R034 P1-1 回归：同一个 `listState` 被「常规三段」与「归档聚合视图」复用，
+        // 而「已归档 N」入口固定在常规列表**末尾**——用户点它时 `firstVisibleItemIndex`
+        // 已经在几十条之后；切到归档视图后 item 数骤减到个位数，LazyColumn 只能把
+        // index 钳到末项，于是放在顶部的「返回会话列表」落在视口外。此时底部入口本身
+        // 也不再渲染，屏幕上没有任何回去的路。
+        //
+        // 这条用例用**矮视口**（400dp）逼出真实滚动路径：改造前用 4000dp 的超高视口，
+        // 入口一开始就在视口内，`firstVisibleItemIndex` 恒为 0，缺陷永远走不到。
+        val base = state()
+        val filler = (1..30).map { i ->
+            session("filler-$i", "填充会话 $i", updatedAt = 100L + i)
+        }
+        // 归档条目必须多到「聚合视图自身的总高度超过视口」，否则 LazyColumn 根本没得滚、
+        // 只能贴着顶部渲染，缺陷也就无从表现。真实环境里归档几十条是常态。
+        val archived = (1..30).map { i ->
+            session("archived-$i", "归档会话 $i", updatedAt = 9_000L + i)
+        }
+        val snapshot = base.snapshot.copy(
+            items = base.snapshot.items.map { ws ->
+                if (ws.workspaceId == "ws-a") {
+                    ws.copy(
+                        sessionIds = ws.sessionIds + filler.map { it.sessionId } +
+                            archived.map { it.sessionId },
+                    )
+                } else {
+                    ws
+                }
+            },
+            archivedSessionIds = archived.map { it.sessionId }.toSet(),
+        )
+        val sessions = SessionListResult(items = filler + archived + base.sessions.items)
+        val state = base.copy(
+            snapshot = snapshot,
+            sessions = sessions,
+            groups = SessionGrouping.group(snapshot, sessions),
+        ).withDerivedLists()
+        setDrawer(state, viewportHeight = 400.dp)
+
+        // 真的滚到底部去找入口（而不是假设它已经可见）。
+        compose.onNode(hasScrollToNodeAction())
+            .performScrollToNode(hasText("已归档 30"))
+        compose.onNodeWithText("已归档 30").performClick()
+
+        // 关键断言：返回入口必须**在视口内**，不能只是存在于语义树里。
+        compose.onNodeWithText("返回会话列表").assertIsDisplayed()
+        compose.onNodeWithText("归档会话 30").assertExists()
+
+        // 返回后同样回顶，用户不会停在一个他从没看过的位置。
+        compose.onNodeWithText("返回会话列表").performClick()
+        compose.onNodeWithText("置顶").assertExists()
     }
 }

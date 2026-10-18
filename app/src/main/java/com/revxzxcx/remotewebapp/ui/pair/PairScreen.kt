@@ -12,6 +12,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,12 +39,16 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +57,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -65,6 +71,7 @@ import com.revxzxcx.remotewebapp.core.pairing.PairLink
 import com.revxzxcx.remotewebapp.core.pairing.PairLinkParser
 import com.revxzxcx.remotewebapp.core.pairing.PairParse
 import com.revxzxcx.remotewebapp.ui.common.maskDeviceId
+import com.revxzxcx.remotewebapp.ui.theme.LocalStatusRunning
 import com.revxzxcx.remotewebapp.ui.theme.groupShape
 import com.revxzxcx.remotewebapp.ui.theme.pillShape
 
@@ -88,13 +95,27 @@ fun PairScreen(
     viewModel: PairViewModel,
 ) {
     val state by viewModel.state.collectAsState()
-    var entry by remember { mutableStateOf(PairEntry.Scan) }
+    // ⚠️ 这四个都必须是 rememberSaveable：`MainActivity` 没有 `configChanges`，转屏会重建
+    // Activity。用普通 `remember` 的话「填好地址 + 设备 id → 转屏 → 回到扫码入口、两个框
+    // 全空」；`LinkCard` 里那份链接文本更糟——它连转屏都不用，**切一次入口 tab** 就
+    // 被销毁重建（`when (entry)` 换了分支），刚粘贴的链接直接丢。
+    var entry by rememberSaveable { mutableStateOf(PairEntry.Scan) }
+    // 扫一次就消耗掉整个扫码通道（`decodeSingle` + `consumed` 闩）。配对失败后把这个
+    // 计数 +1，`ScanCard` 会 `key(scanEpoch)` 重建控件并复位闩。
+    var scanEpoch by rememberSaveable { mutableIntStateOf(0) }
+    var linkText by rememberSaveable { mutableStateOf("") }
     // 手工登记的两个字段必须同时可见（登记要 (地址, 设备 id) 一对），所以状态提到这里，
     // 两张卡只是它的两个视觉分组。
-    var manualBaseUrl by remember(state.lastBaseUrl) {
-        mutableStateOf(state.lastBaseUrl.orEmpty())
+    var manualBaseUrl by rememberSaveable { mutableStateOf("") }
+    var manualDeviceId by rememberSaveable { mutableStateOf("") }
+
+    // `lastBaseUrl` 是异步读出来的（`init` 里 `credentialStore.load()`），不能拿它当
+    // `remember` 的键：那样从 null 变成值时会把用户已经敲进去的地址**重置**掉。改成
+    // 「只在仍为空时回填一次」。
+    LaunchedEffect(state.lastBaseUrl) {
+        val remembered = state.lastBaseUrl
+        if (manualBaseUrl.isBlank() && !remembered.isNullOrBlank()) manualBaseUrl = remembered
     }
-    var manualDeviceId by remember { mutableStateOf("") }
 
     Scaffold { padding ->
         Column(
@@ -123,18 +144,27 @@ fun PairScreen(
             when (entry) {
                 PairEntry.Scan -> ScanCard(
                     enabled = !state.busy,
+                    scanEpoch = scanEpoch,
+                    onRescan = { scanEpoch++ },
                     onScanned = viewModel::pairWithText,
                 )
 
                 PairEntry.Link -> LinkCard(
                     busy = state.busy,
                     onPair = viewModel::pairWithText,
+                    fallbackBaseUrl = state.lastBaseUrl,
+                    text = linkText,
+                    onTextChange = { linkText = it },
                 )
 
                 PairEntry.Manual -> ManualEntryCards(
                     busy = state.busy,
                     baseUrl = manualBaseUrl,
-                    onBaseUrlChange = { manualBaseUrl = it },
+                    onBaseUrlChange = {
+                        manualBaseUrl = it
+                        // 地址一改，上一次的探测结论就作废（否则绿灯会贴着一个没探过的地址）。
+                        viewModel.clearProbe()
+                    },
                     deviceId = manualDeviceId,
                     onDeviceIdChange = { manualDeviceId = it },
                     probe = state.probe,
@@ -220,10 +250,20 @@ internal fun PairEntryPicker(
         PairEntry.entries.forEach { item ->
             val isSelected = item == selected
             Surface(
-                onClick = { onSelect(item) },
+                // ⚠️ 用 `Modifier.selectable` 而不是 `Surface(onClick)`：反编译 material3 的
+                // `SurfaceKt$Surface$2` 可以看到它内部的 `clickable` 把 `role` 传成了
+                // `aconst_null`，于是读屏只会读出三个孤立的可点文本，既不知道「这是一组
+                // 互斥选项」，也不知道当前停在哪一栏。`selectable(role = Role.Tab)` 会挂上
+                // `SemanticsProperties.Selected`，读屏念「已选中」，测试也能真的断言
+                // `assertIsSelected()` —— 在此之前「选中态」只有颜色，覆盖率为零。
                 modifier = Modifier
                     .weight(1f)
-                    .height(34.dp),
+                    .height(34.dp)
+                    .selectable(
+                        selected = isSelected,
+                        role = Role.Tab,
+                        onClick = { onSelect(item) },
+                    ),
                 shape = pillShape,
                 color = if (isSelected) MaterialTheme.colorScheme.surface else Color.Transparent,
                 contentColor = if (isSelected) {
@@ -251,17 +291,23 @@ internal fun PairEntryPicker(
  * **不用**它自带的 `CaptureActivity` —— 那个 Activity 强制 `sensorLandscape` 且主题不受控。
  *
  * 也**不用** [com.journeyapps.barcodescanner.DecoratedBarcodeView]：它在相机预览之上自带
- * 一层遮罩 + 中央方框 + 左下角状态字（「请将条码置于取景框内扫描。」）。我们的取景框
- * 是自己画的四角标（[ViewfinderBrackets]）与扫描线（[ScanLine]），两层叠在一起会在
- * 屏幕下方露出它那句状态字，看起来像渲染错位（R033 ③ 设备验收实录）。
+ * 一层遮罩 + 中央方框 + 左下角状态字（「请将条码置于取景框内扫描。」）。我们的取景框是
+ * 自己画的四角标（[ViewfinderBrackets]）与扫描线（[ScanLine]），两层叠在一起会在屏幕下方
+ * 露出它那句状态字，看起来像渲染错位（R033 ③ 设备验收实录）。
  *
  * 取景框是**正方形**（`aspectRatio(1f)`）。改造前是 `fillMaxWidth().height(220.dp)`，
- * 在 360dp 屏上得到 336×220 的横矩形：页面里唯一一个非正方形的大色块，四角还露着
- * 黑色的直角边，观感最脏的一处（R033 ③）。
+ * 在 360dp 屏上得到 336×220 的横矩形：页面里唯一一个非正方形的大色块（R033 ③）。
+ *
+ * ⚠️ 扫码是**一次性**的：`decodeSingle` 只回调一次，加上 `consumed` 闩之后，配对失败
+ * （token 过期 / 桌面端不可达）时继续扫不会有任何反应，而相机预览还在动——从界面
+ * 完全看不出已经失效。所以 `scanEpoch` 一变就 `key(scanEpoch)` 重建整个 `AndroidView`
+ * 并复位 `consumed`，并在失效后给一个显式的「重新扫描」入口。
  */
 @Composable
 private fun ScanCard(
     enabled: Boolean,
+    scanEpoch: Int,
+    onRescan: () -> Unit,
     onScanned: (String) -> Unit,
 ) {
     val context = LocalContext.current
@@ -271,9 +317,15 @@ private fun ScanCard(
                 PackageManager.PERMISSION_GRANTED,
         )
     }
+    // 用户点过「授予相机权限」而系统仍然没给：说明是「拒绝」或「不再询问」，此时继续
+    // 调 `launcher.launch()` 会立刻回调 false，界面毫无变化——一枚死按钮。
+    var deniedOnce by rememberSaveable { mutableStateOf(false) }
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { granted -> hasPermission = granted }
+    ) { granted ->
+        hasPermission = granted
+        if (!granted) deniedOnce = true
+    }
 
     // ⚠️ 回调必须是**稳定**的：`BarcodeView.decodeSingle(callback)` 只在 `AndroidView`
     // 的 `factory` 里调用一次，之后再换 callback 也不会重新注册。若这里写
@@ -283,8 +335,10 @@ private fun ScanCard(
     // callback 每次读最新值。
     val latestEnabled by rememberUpdatedState(enabled)
     val latestOnScanned by rememberUpdatedState(onScanned)
-    // 扫到一次就停：decodeSingle 保证底层只回调一次；这里再按「已配对过」自己兜一层。
+    // 扫到一次就停：decodeSingle 保证底层只回调一次；这里再按「已消费」自己兜一层。
     var consumed by remember { mutableStateOf(false) }
+    // 换一次 epoch 就允许再扫一次（配合下面 `key(scanEpoch)` 重建控件）。
+    LaunchedEffect(scanEpoch) { consumed = false }
     val callback = remember {
         object : BarcodeCallback {
             override fun barcodeResult(result: BarcodeResult?) {
@@ -315,12 +369,29 @@ private fun ScanCard(
 
             if (!hasPermission) {
                 Text(
-                    text = "需要相机权限才能扫码。也可以换用「链接」或「手工」入口。",
+                    text = if (deniedOnce) {
+                        "相机权限被拒绝了，扫码用不了。可以去系统设置里开启，或换用「链接」「手工」入口。"
+                    } else {
+                        "需要相机权限才能扫码。也可以换用「链接」或「手工」入口。"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) {
-                    Text("授予相机权限")
+                Button(
+                    onClick = {
+                        if (deniedOnce) {
+                            // 二次拒绝后系统不会再弹窗，只能把用户送到应用详情页自己开。
+                            val intent = android.content.Intent(
+                                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                android.net.Uri.fromParts("package", context.packageName, null),
+                            )
+                            context.startActivity(intent)
+                        } else {
+                            launcher.launch(Manifest.permission.CAMERA)
+                        }
+                    },
+                ) {
+                    Text(if (deniedOnce) "打开系统设置" else "授予相机权限")
                 }
             } else {
                 Box(
@@ -329,15 +400,21 @@ private fun ScanCard(
                         .aspectRatio(1f)
                         .background(Color.Black, RoundedCornerShape(14.dp)),
                 ) {
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { ctx ->
-                            BarcodeView(ctx).also { view ->
-                                view.decodeSingle(callback)
-                                scanner = view
-                            }
-                        },
-                    )
+                    key(scanEpoch) {
+                        AndroidView(
+                            modifier = Modifier.fillMaxSize(),
+                            factory = { ctx ->
+                                BarcodeView(ctx).also { view ->
+                                    view.decodeSingle(callback)
+                                    scanner = view
+                                }
+                            },
+                            onRelease = { view ->
+                                view.pauseAndWait()
+                                if (scanner === view) scanner = null
+                            },
+                        )
+                    }
                     ViewfinderBrackets()
                     ScanLine()
                 }
@@ -346,6 +423,12 @@ private fun ScanCard(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                 )
+                if (consumed && enabled) {
+                    // `consumed && enabled` 的唯一含义是「扫到过，且现在已经不在配对中」
+                    // ——即这次配对失败回来了（成功会直接导航离开）。此刻 `decodeSingle`
+                    // 已经用掉、再扫不会有任何反应，必须显式给一条回去的路。
+                    TextButton(onClick = onRescan) { Text("重新扫描") }
+                }
             }
         }
     }
@@ -446,8 +529,13 @@ internal data class ParsePreview(
  * 为什么需要它：真机验收时踩过「把 token 填进服务器地址」——原文案只写「配对链接或
  * token」，用户没法判断自己贴的东西会被理解成哪一种。这里在贴完立刻回显解析结论
  * （解析成 accept / device / 裸 token / 失败），贴错当场看得见。
+ *
+ * ⚠️ `fallbackBaseUrl` 决定裸 token 能不能用：`PairingCoordinator` 对
+ * `PairLink.BareToken` 的处理是 `fallbackBaseUrl?.let(::normalizeBaseUrl) ?: throw`，
+ * 而全新安装或刚 `unpair()` 之后根本没有「上一次用过的地址」。所以裸 token 的 `ok`
+ * 必须跟着 fallback 走——早先恒 `ok = true` 会让「开始配对」亮着，点下去必然失败。
  */
-internal fun previewOf(parse: PairParse): ParsePreview = when (parse) {
+internal fun previewOf(parse: PairParse, fallbackBaseUrl: String? = null): ParsePreview = when (parse) {
     is PairParse.Failed -> ParsePreview(
         ok = false,
         headline = "这段内容还不能用",
@@ -467,11 +555,19 @@ internal fun previewOf(parse: PairParse): ParsePreview = when (parse) {
             detail = "设备 id ${maskDeviceId(link.deviceId)}",
         )
 
-        is PairLink.BareToken -> ParsePreview(
-            ok = true,
-            headline = "这是一个裸 token",
-            detail = "需要配上一次用过的地址才能用",
-        )
+        is PairLink.BareToken -> if (fallbackBaseUrl.isNullOrBlank()) {
+            ParsePreview(
+                ok = false,
+                headline = "还缺服务器地址",
+                detail = "本机没有上次用过的地址，请粘贴完整配对链接，或改用「手工」入口",
+            )
+        } else {
+            ParsePreview(
+                ok = true,
+                headline = "这是一个裸 token",
+                detail = "将用上次的地址 ${hostOf(fallbackBaseUrl)} 去配对",
+            )
+        }
     }
 }
 
@@ -479,9 +575,14 @@ internal fun previewOf(parse: PairParse): ParsePreview = when (parse) {
 internal fun hostOf(baseUrl: String): String =
     baseUrl.substringAfter("://", baseUrl).trimEnd('/')
 
-/** token 只露首尾各 4 位；短到露首尾就全露时干脆整段打码。 */
+/**
+ * token 只露首尾各 4 位。
+ *
+ * 阈值取 16 而不是 8：真实 token 是 32 位（`PairLinkParserTest` 的注释与夹具一致），
+ * 但 9~16 位的短 token 若按「首尾各 4 位」只遮掉一两个字符，等于没遮。宁可整段打码。
+ */
 internal fun maskToken(token: String): String = when {
-    token.length <= 8 -> "…"
+    token.length <= 16 -> "…"
     else -> token.take(4) + "…" + token.takeLast(4)
 }
 
@@ -491,15 +592,21 @@ internal fun maskToken(token: String): String = when {
  * 可见性是 `internal`：`开始配对` 的禁用判据（`preview?.ok == true`）只能靠渲染层
  * 测试守住——解析失败时按钮必须点不动，否则用户点下去只会拿到一次注定失败的配对请求。
  * 把这张卡抽出来单独测，不必为了它构造整个 `PairViewModel`。
+ *
+ * `fallbackBaseUrl` 由 [PairScreen] 传进来（`state.lastBaseUrl`），决定裸 token 的
+ * `ok`。输入文本也由调用方持有（`text` / `onTextChange`）——卡片自持状态会在切入口
+ * tab 时被销毁重建，粘贴的链接当场丢失。
  */
 @Composable
 internal fun LinkCard(
     busy: Boolean,
     onPair: (String) -> Unit,
+    fallbackBaseUrl: String? = null,
+    text: String = "",
+    onTextChange: (String) -> Unit = {},
 ) {
-    var text by remember { mutableStateOf("") }
-    val preview = remember(text) {
-        if (text.isBlank()) null else previewOf(PairLinkParser.parse(text))
+    val preview = remember(text, fallbackBaseUrl) {
+        if (text.isBlank()) null else previewOf(PairLinkParser.parse(text), fallbackBaseUrl)
     }
 
     Surface(
@@ -511,7 +618,7 @@ internal fun LinkCard(
             Text("粘贴链接", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
             OutlinedTextField(
                 value = text,
-                onValueChange = { text = it },
+                onValueChange = onTextChange,
                 label = { Text("配对链接或 token") },
                 singleLine = false,
                 maxLines = 3,
@@ -670,7 +777,7 @@ private fun DeviceIdCard(
             )
             Text(
                 // 真机验收时这一格被留空过——给出真实长度区间比说「填 id」有用。
-                text = "64 位十六进制，桌面端「已配对设备」里能看到完整值。",
+                text = "32 位十六进制，桌面端「已配对设备」里能看到完整值。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
             )
@@ -717,7 +824,10 @@ internal fun ProbeResultCard(
     probe: PairProbe,
     modifier: Modifier = Modifier,
 ) {
-    val accent = if (probe.ok) Color(0xFF4ADE80) else MaterialTheme.colorScheme.error
+    // 必须走 `LocalStatusRunning` 而不是硬编码 `Color(0xFF4ADE80)`：R017 已经把这个绿
+    // 收成主题 token（深色 #4ADE80 / 浅色 #15803D），正因为原绿压在 #FFFFFF 上会发灰。
+    // 这里硬编码等于把 R017 收掉的洞重新打开。
+    val accent = if (probe.ok) LocalStatusRunning.current else MaterialTheme.colorScheme.error
     Surface(
         color = accent.copy(alpha = 0.1f),
         shape = RoundedCornerShape(9.dp),

@@ -879,7 +879,11 @@ internal fun SessionDrawer(
             workspaceCount = groups.size,
             sessionCount = state.sessions.items.size,
             pinnedCount = pinnedIds.size,
-            archivedCount = archivedIds.size,
+            // ⚠️ 必须用 `archivedSessions.size` 而不是 `archivedIds.size`：胶囊与底部入口
+            // 是同一个「已归档」概念的两个出口，若一个读快照 id 集合、一个读会话列表过滤结果，
+            // 在 `session/list` 与 `workspace/follow` 两条通道先后到达的窗口里会互相矛盾
+            // （头部「归档 2」而底部根本没有入口，聚合视图也不可达）。
+            archivedCount = archivedSessions.size,
             onRefreshSessions = onRefreshSessions,
         )
         HorizontalDivider(color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.08f))
@@ -913,6 +917,18 @@ internal fun SessionDrawer(
                 listState.requestScrollToItem(0)
             }
         }
+
+        // 切换「常规三段 ↔ 归档聚合视图」时必须回到顶部（R034 P1-1）。
+        //
+        // 同一个 `listState` 在两个分支间复用，而「已归档 N」入口**固定在常规列表末尾**
+        // ——用户点它时 `firstVisibleItemIndex` 已经在几十条之后；切到归档视图后 item
+        // 总数骤减到个位数，LazyColumn 只能把 index 钳到末项，于是放在顶部的
+        // 「返回会话列表」落在视口之外。而 `archivedOpen = true` 时底部的「已归档 N」
+        // 入口又不再渲染，屏幕上没有任何回去的提示 —— 这正是上面注释承诺要避免的死胡同。
+        //
+        // 两个方向都回顶：返回时同样会经历「item 数量骤增 + index 钳位」，把用户丢在
+        // 一个他上次没看过的位置比回顶更难解释。
+        LaunchedEffect(archivedOpen) { listState.requestScrollToItem(0) }
 
         LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
             if (archivedOpen) {
@@ -1093,7 +1109,9 @@ internal fun SessionDrawer(
  * 每一条渲染层测试都会炸——`SessionDrawerRenderTest` 与 `SessionActionsMenuRenderTest`
  * 一共 6 条用例当场全红。用渐变方块 + 图标自绘，既保住视觉，也不给测试埋雷。
  *
- * 渐变取 R031 应用图标的四角（#8DDCFD → #C4B9FB → #D3AEFE）。
+ * 渐变的三个 stop 取自 R031 应用图标背景层的四角渐变色域
+ * （左上 #8DDCFD → 右上/左下 #C4B9FB → 右下 #D3AEFE，这里取三点近似，
+ * 因为 `Brush.linearGradient` 只画一条轴线，四角渐变的两个同色角本来就落在同一侧）。
  */
 @Composable
 private fun DrawerAppMark() {
@@ -1263,8 +1281,8 @@ private fun DrawerStatPill(value: Int, unit: String, accent: Color? = null) {
  * 抽屉分组标题（R033 ①）。
  *
  * 改造前只有一行 11sp 灰字（"置顶" / "最近" / "按工作区"），三段的视觉权重完全一样，
- * 而且没有条数——用户看不出「最近」里到底有 3 条还是 30 条。现在：全大写字距拉开的
- * 小标题 + 计数 + 右侧一条渐隐的细线；细线用 `Box` 的横向渐变画，把标题和内容分开，
+ * 而且没有条数——用户看不出「最近」里到底有 3 条还是 30 条。现在：字距拉开的小标题
+ * + 计数 + 右侧一条渐隐的细线；细线用 `Box` 的横向渐变画，把标题和内容分开，
  * 但不引入第二条实线（实线会和上下的 `HorizontalDivider` 打架）。
  */
 @Composable
@@ -1342,7 +1360,8 @@ private fun DrawerWorkspaceHeader(name: String, activeCount: Int) {
  * 现在：
  *  - 10dp 圆角行 + 左右 8dp 外边距，行与行之间有呼吸缝，扫视时每行是独立目标；
  *  - 左侧 3dp 状态条：置顶蓝 / 归档黄 / 普通灰（原来只有置顶有 2dp 条，且在主区）；
- *  - 右侧常驻 `⋮` 按钮（26dp 触达 + 12dp 视觉），长按仍然保留——两条路径都能出菜单；
+ *  - 右侧常驻 `⋮` 按钮（`Icon` 16dp 字形，触达沿用 `IconButton` 默认 48dp），长按仍然保留
+ *    ——两条路径都能出菜单；
  *  - 归档行标题降到 45% 不透明度，从视觉上「退到后面去」。
  *
  * ⚠️ `rememberPressScale` / `rememberPressTint` 必须和 `clickable` 共用同一个
@@ -1430,9 +1449,13 @@ private fun DrawerSessionRow(
             }
         }
         // 常驻的 ⋮：抽屉里此前只能长按唤出菜单，用户根本发现不了。
+        //
+        // contentDescription 必须带上会话名：这枚按钮逐行重复，写成常量会让读屏用户听到
+        // 一串无法区分的「会话操作」，也会让后续 `onNodeWithContentDescription("会话操作")`
+        // 直接 `Expected exactly '1' node but found 'N'`。
         AppIconButton(
             onClick = { menuOpen = true },
-            contentDescription = "会话操作",
+            contentDescription = "会话操作：${summary.displayName}",
             enabled = true,
         ) {
             Icon(

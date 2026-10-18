@@ -183,6 +183,18 @@ class PairViewModel(
         _state.value = _state.value.copy(error = null)
     }
 
+    /**
+     * 地址被改动时清掉上一次探测结论（R034 P2）。
+     *
+     * 不清的话会出现「绿灯贴着一个没探过的地址」：地址 A 探测成功 → 用户把输入框改成 B
+     * → 绿描边「地址可达」还紧贴在 B 下面，同时 `登记` 对 B 可点。这张卡的唯一职责就是
+     * 「告诉你这个地址通不通」，结论一旦与地址错配就从证据变成了误导。
+     */
+    fun clearProbe() {
+        if (_state.value.probe == null) return
+        _state.value = _state.value.copy(probe = null)
+    }
+
     private suspend fun onSuccess(credential: DeviceCredential) {
         _state.value = _state.value.copy(busy = false, error = null, probe = null)
         container.onPaired(credential)

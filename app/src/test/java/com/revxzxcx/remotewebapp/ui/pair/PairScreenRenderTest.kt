@@ -5,11 +5,16 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.onAllNodesWithText
@@ -49,13 +54,15 @@ class PairScreenRenderTest {
     @Test
     fun `接受链接解析出主机与打码后的 token`() {
         val preview = previewOf(
-            PairLinkParser.parse("https://192.168.1.5:19387/pair-accept?pair=abcdefghijkl"),
+            PairLinkParser.parse(
+                "https://192.168.1.5:19387/pair-accept?pair=abcdefghijklmnopqrstuvwxyz012345",
+            ),
         )
 
         assertTrue(preview.ok)
         assertEquals("将配对到 192.168.1.5:19387", preview.headline)
         // token 只露首尾 4 位：整段显示等于把凭证摊在屏幕上。
-        assertEquals("token abcd…ijkl", preview.detail)
+        assertEquals("token abcd…2345", preview.detail)
     }
 
     @Test
@@ -70,12 +77,26 @@ class PairScreenRenderTest {
     }
 
     @Test
-    fun `裸 token 会被认出来但不能直接配对`() {
-        val preview = previewOf(PairLinkParser.parse("abcdefghijkl"))
+    fun `裸 token 没有上次地址时不可配对`() {
+        // `PairingCoordinator` 对裸 token 的处理是「拿 fallback 补全地址，没有就抛」。
+        // 所以全新安装 / 刚 unpair 之后，裸 token 的 ok 必须是 false——恒 true 会让
+        // 「开始配对」亮着，点下去必然失败。
+        val preview = previewOf(PairLinkParser.parse("abcdefghijklmnopqrstuvwxyz012345"))
+
+        assertFalse(preview.ok)
+        assertEquals("还缺服务器地址", preview.headline)
+    }
+
+    @Test
+    fun `裸 token 有上次地址时可配对并说明用哪个地址`() {
+        val preview = previewOf(
+            PairLinkParser.parse("abcdefghijklmnopqrstuvwxyz012345"),
+            fallbackBaseUrl = "http://192.168.1.5:19387",
+        )
 
         assertTrue(preview.ok)
         assertEquals("这是一个裸 token", preview.headline)
-        assertEquals("需要配上一次用过的地址才能用", preview.detail)
+        assertEquals("将用上次的地址 192.168.1.5:19387 去配对", preview.detail)
     }
 
     @Test
@@ -97,16 +118,22 @@ class PairScreenRenderTest {
 
     @Test
     fun `过短的 token 整段打码`() {
-        // 短到「首 4 + 尾 4」就等于原值，那样打码毫无意义。
+        // 短到「首 4 + 尾 4」只剩一两个字符被遮，那样打码毫无意义。阈值取 16：
+        // 真实 token 是 32 位，9~16 位的短 token 一律整段打码。
         assertEquals("…", maskToken("12345678"))
-        assertEquals("1234…6789", maskToken("123456789"))
+        assertEquals("…", maskToken("1234567890123456"))
+        assertEquals("1234…4567", maskToken("12345678901234567"))
     }
 
     // ---------------------------------------------------------------- 分段互斥
 
     @Test
-    fun `分段控件显示三个入口且只高亮选中的那个`() {
-        var selected = PairEntry.Scan
+    fun `分段控件显示三个入口且只选中一个`() {
+        // `assertIsSelected` 能成立是因为 `PairEntryPicker` 用的是
+        // `Modifier.selectable(role = Role.Tab)` 而不是 `Surface(onClick)`——后者连
+        // `Role.Button` 都不带，更不会有 `Selected` 语义（反编译 `SurfaceKt$Surface$2`
+        // 确认 role 实参是 null）。改动前这条用例只断言「三个文本可见」，选中态零覆盖。
+        var selected by mutableStateOf(PairEntry.Scan)
         var clicks = mutableListOf<PairEntry>()
         compose.setContent {
             MaterialTheme {
@@ -124,14 +151,19 @@ class PairScreenRenderTest {
         compose.onNodeWithText("链接").assertIsDisplayed()
         compose.onNodeWithText("手工").assertIsDisplayed()
 
+        compose.onNodeWithText("扫码").assertIsSelected()
+        compose.onNodeWithText("链接").assertIsNotSelected()
+
         compose.onNodeWithText("链接").performClick()
         assertEquals(listOf(PairEntry.Link), clicks)
+        compose.onNodeWithText("链接").assertIsSelected()
+        compose.onNodeWithText("扫码").assertIsNotSelected()
     }
 
     @Test
     fun `三条入口一次只能选中一条`() {
         // 互斥是分段控件的全部意义：连点三个入口，最终只应停在最后一个上。
-        var selected = PairEntry.Scan
+        var selected by mutableStateOf(PairEntry.Scan)
         val compose2 = compose
         compose2.setContent {
             MaterialTheme {
@@ -154,8 +186,16 @@ class PairScreenRenderTest {
         // 文本不许被提交**。否则用户点下去只会拿到一次注定失败的请求，还得自己
         // 从错误里反推是哪个字段写错了（改造前就是这样）。
         val clicks = mutableListOf<String>()
+        var text by mutableStateOf("")
         compose.setContent {
-            MaterialTheme { LinkCard(busy = false, onPair = { clicks += it }) }
+            MaterialTheme {
+                LinkCard(
+                    busy = false,
+                    onPair = { clicks += it },
+                    text = text,
+                    onTextChange = { text = it },
+                )
+            }
         }
 
         // 空输入：按钮禁用。
@@ -171,8 +211,16 @@ class PairScreenRenderTest {
     @Test
     fun `解析成功时开始配对按钮可以点且只回调一次`() {
         val clicks = mutableListOf<String>()
+        var text by mutableStateOf("")
         compose.setContent {
-            MaterialTheme { LinkCard(busy = false, onPair = { clicks += it }) }
+            MaterialTheme {
+                LinkCard(
+                    busy = false,
+                    onPair = { clicks += it },
+                    text = text,
+                    onTextChange = { text = it },
+                )
+            }
         }
 
         val link = "https://192.168.1.5:19387/pair-accept?pair=abcdefghijkl"
@@ -188,10 +236,33 @@ class PairScreenRenderTest {
         // busy 期间重复点击会并发两个 accept 请求，其中一个必然拿着已消费的 token 失败。
         val clicks = mutableListOf<String>()
         compose.setContent {
-            MaterialTheme { LinkCard(busy = true, onPair = { clicks += it }) }
+            MaterialTheme {
+                LinkCard(
+                    busy = true,
+                    onPair = { clicks += it },
+                    text = "https://192.168.1.5:19387/pair-accept?pair=abcdefghijkl",
+                )
+            }
         }
-        compose.onAllNodes(hasSetTextAction())[0]
-            .performTextInput("https://192.168.1.5:19387/pair-accept?pair=abcdefghijkl")
+        compose.onNodeWithText("开始配对").assertIsNotEnabled()
+        assertEquals(emptyList<String>(), clicks)
+    }
+
+    @Test
+    fun `裸 token 没有上次地址时入口里按钮也点不动`() {
+        // 与上面的纯函数用例呼应：这是用户真正会看到的后果——按钮必须是灰的。
+        val clicks = mutableListOf<String>()
+        compose.setContent {
+            MaterialTheme {
+                LinkCard(
+                    busy = false,
+                    onPair = { clicks += it },
+                    fallbackBaseUrl = null,
+                    text = "abcdefghijklmnopqrstuvwxyz012345",
+                )
+            }
+        }
+        compose.onNodeWithText("还缺服务器地址").assertExists()
         compose.onNodeWithText("开始配对").assertIsNotEnabled()
         assertEquals(emptyList<String>(), clicks)
     }
@@ -236,8 +307,10 @@ class PairScreenRenderTest {
     }
 
     @Test
-    fun `解析成功与失败是两张不同形态的卡`() {
-        // 形态差异必须真的存在：改造前成功与失败都是同一张无边框 Surface。
+    fun `解析结论卡的文案不会串`() {
+        // 本用例守的是「文案不串」。此前它叫「两张不同形态的卡」，却只断言文本存在，
+        // 而 Robolectric 里拿不到 Surface 的实际颜色——颜色差异只能靠设备验收，
+        // 于是这条用例名给自己记了一个假覆盖。
         compose.setContent {
             MaterialTheme {
                 Column(Modifier.requiredHeight(400.dp)) {
@@ -252,6 +325,7 @@ class PairScreenRenderTest {
         }
 
         compose.onNodeWithText("将配对到 甲").assertIsDisplayed()
+        compose.onNodeWithText("token 1234…5678").assertIsDisplayed()
         compose.onNodeWithText("这段内容还不能用").assertIsDisplayed()
         compose.onNodeWithText("不是合法的链接").assertIsDisplayed()
     }
@@ -296,7 +370,7 @@ class PairScreenRenderTest {
     }
 
     @Test
-    fun `手工登记的两张卡显示在同一个纵向序列里`() {
+    fun `服务器卡排在设备 id 卡上方`() {
         compose.setContent {
             MaterialTheme {
                 Box(Modifier.requiredHeight(1200.dp)) {
@@ -313,8 +387,12 @@ class PairScreenRenderTest {
                 }
             }
         }
-        // 探测结果卡还没出现（没探测过）。
+        // 原来是「探测结果卡没出现」的两条 assertCountEquals(0)：在 probe = null 时
+        // 恒真，与用例名声称的「纵向序列」毫无关系。改成几何断言，顺序反了会红。
+        val serverTop = compose.onNodeWithText("填 1/2").fetchSemanticsNode().boundsInRoot.top
+        val deviceTop = compose.onNodeWithText("填 2/2").fetchSemanticsNode().boundsInRoot.top
+        assertTrue("服务器卡（$serverTop）应在设备 id 卡（$deviceTop）上方", serverTop < deviceTop)
+        // 没探测过就没有探测结果卡。
         compose.onAllNodesWithText("地址可达").assertCountEquals(0)
-        compose.onAllNodesWithText("连不上这个地址").assertCountEquals(0)
     }
 }
