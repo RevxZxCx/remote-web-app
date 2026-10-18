@@ -35,6 +35,25 @@ object DshEndpoints {
     const val SESSION_UPDATE_QUEUE = "session/updateQueue"
     const val SESSION_ATTACHMENT = "session/attachment"
     const val SESSION_PROJECTIONS = "session/projections"
+
+    /**
+     * 目标的四个变更方法（R031）。
+     *
+     * 方法名与参数**逐字**来自 DSH 客户端 bundle 的调用点：
+     * ```
+     * ctx.remote.goals.edit(sessionId, ref, { objective })
+     * ctx.remote.goals.pause(sessionId, ref)
+     * ctx.remote.goals.resume(sessionId, ref)
+     * ctx.remote.goals.clear(sessionId, ref)
+     * ```
+     * 其中 `ref` 是 CAS 版本引用 `{ id, revision }`——服务端用它做乐观并发控制，
+     * 陈旧 revision 会被拒绝（这正是双端同步的护栏：桌面端先改了，手机端再拿旧版本
+     * 提交会失败而不是覆盖）。
+     */
+    const val GOALS_EDIT = "goals/edit"
+    const val GOALS_PAUSE = "goals/pause"
+    const val GOALS_RESUME = "goals/resume"
+    const val GOALS_CLEAR = "goals/clear"
     const val USER_QUESTIONS_ANSWER = "userQuestions/answer"
     const val SESSION_OPEN_WORKSPACE_PATH = "session/openWorkspacePath"
     const val SESSION_WORKSPACE_PATH_APPLICATIONS = "session/workspacePathApplications"

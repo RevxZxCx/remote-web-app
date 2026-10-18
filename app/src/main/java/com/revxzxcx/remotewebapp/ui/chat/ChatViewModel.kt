@@ -57,8 +57,12 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
+import com.revxzxcx.remotewebapp.core.session.Goal
+import com.revxzxcx.remotewebapp.core.session.GoalPhase
 
 /**
  * 聊天页的 ViewModel。
@@ -231,6 +235,7 @@ class ChatViewModel(
 
     /** 「编辑/删除/插队」排队消息的协程（`session/updateQueue`）。 */
     private var queueJob: Job? = null
+
     private var changesJob: Job? = null
     private var cacheJob: Job? = null
 
@@ -487,6 +492,81 @@ class ChatViewModel(
      * （`index.js:966`）。UI 因此只在 `generating` 时才显示这个按钮。
      */
     fun steerQueued(message: QueuedMessage) = queueAction(message, ChatArgs.QueueAction.Steer, null)
+
+    // ---------------------------------------------------- 目标（R031）
+
+    /**
+     * 目标动词的**串行闸**。
+     *
+     * 不能用「`job?.cancel()` 再赋新值」那种单飞写法（R031 独立审查 P3）：goal 的
+     * pause / resume / edit / clear 之间有**顺序语义**，且都带 `ref.revision` 做 CAS。
+     * 取消在飞的那个请求会同时毁掉两件事——它已经发出的 RPC 可能已经到达服务端（目标
+     * 状态实际变了），而协程被取消后又不会上报失败，于是界面停在旧状态且没有任何提示。
+     * 用 Mutex 排队：后一个动作等前一个返回，读到的 revision 也就跟着 `goal/change`
+     * 事件一起更新了。
+     */
+    private val goalMutex = Mutex()
+
+    /** 目标动作的统一执行体：串行、失败落到 [goalError]、成功清掉它。 */
+    private fun runGoalAction(failurePrefix: String, action: suspend () -> Unit) {
+        viewModelScope.launch {
+            goalMutex.withLock {
+                try {
+                    action()
+                    _state.value = _state.value.copy(goalError = null)
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (cause: Exception) {
+                    _state.value = _state.value.copy(
+                        goalError = "$failurePrefix${describe(cause)}",
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * 暂停 / 继续目标。
+     *
+     * ⚠️ **不中止当前轮、不碰任务列表**：已查证 DSH 源码，`goals/pause` 只让 Host
+     * GoalService 排一条「模型可见的 goal 上下文消息」，当前这一轮的对话继续输出完
+     * （见 [Goal] 的 KDoc）。所以这里除了发 RPC 之外什么都不做。
+     *
+     * @param pause true = 暂停，false = 继续。由 [Goal.canPause] 决定。
+     */
+    fun setGoalPhase(pause: Boolean, goal: Goal) {
+        if (goal.phase == GoalPhase.COMPLETE) return
+        runGoalAction("目标操作失败：") {
+            if (pause) {
+                repository.pauseGoal(sessionId, goal.id, goal.revision)
+            } else {
+                repository.resumeGoal(sessionId, goal.id, goal.revision)
+            }
+            // 本地不乐观更新：权威结果由 `goal/change` 事件回灌（revision 也会跟着变，
+            // 下一次操作的 CAS 才不会用陈旧值）。
+        }
+    }
+
+    /** 编辑目标正文。`maxGoalRounds` 不可改（创建时参数）。 */
+    fun editGoal(goal: Goal, objective: String) {
+        val trimmed = objective.trim()
+        if (trimmed.isEmpty()) return
+        runGoalAction("编辑目标失败：") {
+            repository.editGoal(sessionId, goal.id, goal.revision, trimmed)
+        }
+    }
+
+    /** 删除（清除）目标。调用方必须先弹二次确认。 */
+    fun clearGoal(goal: Goal) {
+        runGoalAction("删除目标失败：") {
+            repository.clearGoal(sessionId, goal.id, goal.revision)
+        }
+    }
+
+    /** 关掉目标操作的错误提示。目标失败不提供「重试」——重新点按钮就是重试。 */
+    fun dismissGoalError() {
+        _state.value = _state.value.copy(goalError = null)
+    }
 
     // ---------------------------------------------------- 审批（用户 m28009）
 

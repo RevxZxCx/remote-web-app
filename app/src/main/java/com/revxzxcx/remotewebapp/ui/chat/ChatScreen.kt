@@ -83,6 +83,7 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -147,6 +148,7 @@ import com.revxzxcx.remotewebapp.ui.common.CacheNotice
 import com.revxzxcx.remotewebapp.ui.common.AppIconButton
 import com.revxzxcx.remotewebapp.ui.common.ConnectionBanner
 import com.revxzxcx.remotewebapp.ui.common.GeneratingGlyph
+import com.revxzxcx.remotewebapp.ImeInsets
 import com.revxzxcx.remotewebapp.ui.common.GlyphSize
 import com.revxzxcx.remotewebapp.ui.common.IconSizes
 import com.revxzxcx.remotewebapp.ui.common.decodeScaled
@@ -155,6 +157,16 @@ import com.revxzxcx.remotewebapp.ui.home.TimeText
 import com.revxzxcx.remotewebapp.ui.home.rememberNow
 import com.revxzxcx.remotewebapp.ui.markdown.MdBlocks
 import com.revxzxcx.remotewebapp.ui.markdown.MdStream
+import androidx.compose.foundation.border
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.ui.text.TextStyle
+import com.revxzxcx.remotewebapp.ui.theme.LocalStatusRunning
 
 /**
  * 聊天页。
@@ -201,6 +213,50 @@ fun ChatScreen(
         listState.interactionSource.interactions
             .filterIsInstance<DragInteraction.Start>()
             .collect { scrollCollapseSignal++ }
+    }
+
+    // ── R031：目标 / 任务 / 排队 三块的界面状态 ──────────────────────────────
+    //
+    // 全部是 `remember`（**不是** saveable）：用户 m45632 明确要求「状态不做记忆，
+    // 重新打开对话依旧为展开状态」。用 saveable 会在进程重建后恢复，与要求相反。
+    //
+    // 目标横幅默认展开 → `goalCollapsed = false`。
+    var goalCollapsed by remember { mutableStateOf(false) }
+    var goalEditing by remember { mutableStateOf(false) }
+    var showDeleteGoal by remember { mutableStateOf(false) }
+
+    // 任务胶囊与排队列表**互斥展开**（用户 m45632）：同一时刻最多一个展开，
+    // 另一个自动收起。理由是两个都展开时总高可达 548dp，必然把消息区压没。
+    // 用一个枚举而不是两个布尔，从类型上就不可能同时为真。
+    var expandedDock by remember { mutableStateOf(DockTarget.None) }
+
+    // 输入法是否可见（用户 m45632）：键盘占掉约 40% 高度，此时目标横幅、任务胶囊、
+    // 排队条**全部让位**，输入框直接贴键盘；键盘收起后原样恢复。
+    //
+    // 🔴 判据必须用 [ImeInsets]（框架层桥进来的原生 ime 高度），**不能用
+    // `WindowInsets.ime.getBottom()`**：`enableEdgeToEdge()` 之后那个值在本工程的
+    // 真机上恒为 0（见 [ImeInsets] 的 KDoc，AppRoot 早就为同一件事改过一次），于是
+    // 「键盘弹出时让位」整条契约会静默失效。R031 设备验收在 MuMu 上就是这样抓到的：
+    // `dumpsys input_method` 报 `mInputShown=true`，横幅与胶囊却照旧显示。
+    //
+    // 判据仍然不是焦点：焦点在但键盘没弹（外接键盘）时不该隐藏。
+    val imeBottomPx by ImeInsets.bottomPx.collectAsState()
+    val imeVisible = imeBottomPx > 0
+
+    // 排队区是否正在行内编辑。由 [QueuedStrip] 上报（编辑态在它内部，那里才知道点的是哪条）。
+    //
+    // 它是「输入法让位」的**唯一例外**（用户 m45632）：用户点开排队消息的行内输入框，
+    // 键盘必然升起；此时把排队条整块移出组合树，输入框连同焦点一起消失、键盘立刻收回，
+    // 编辑根本进行不下去（R031 独立审查 P1）。目标横幅的行内编辑同理，见下面 `goalEditing`。
+    var queueEditing by remember { mutableStateOf(false) }
+
+    // 键盘升起时任务面板 / 排队列表一律**回到收起态**（用户 m45632；R031 独立审查 P3）。
+    //
+    // 不重置的话，键盘只是把它们移出组合树，收起键盘后 `expandedDock` 还是原来的值，
+    // 面板会「记得」自己展开着又弹回来——用户看到的是「我没点它却展开了」。
+    // 目标横幅不在此列：它保留用户自己的收起/展开选择（设计稿第 1326 行）。
+    LaunchedEffect(imeVisible) {
+        if (imeVisible) expandedDock = DockTarget.None
     }
 
     // 模型选择器的显示开关。目录本身由 ViewModel 拉（[ChatUiState.catalog]），
@@ -280,6 +336,17 @@ fun ChatScreen(
         onLoadMore = { viewModel.loadMore() },
     )
 
+    // 删除目标的二次确认（用户 m45632 第 1 条明确要求）。只在用户点了删除按钮后出现。
+    if (showDeleteGoal) {
+        DeleteGoalDialog(
+            onConfirm = {
+                showDeleteGoal = false
+                state.goal?.let { viewModel.clearGoal(it) }
+            },
+            onDismiss = { showDeleteGoal = false },
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -307,6 +374,12 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    // ── R031：目标横幅收起后，顶栏出现一枚状态色圆点作为回展开入口
+                    // （用户 m45632）。键盘可见时不显示，避免与顶部冲突。
+                    val goal = state.goal
+                    if (goal != null && goalCollapsed && dockVisible(imeVisible, editing = goalEditing)) {
+                        GoalChip(goal = goal, onClick = { goalCollapsed = false })
+                    }
                     if (state.generating) {
                         AppIconButton(
                             onClick = viewModel::cancel,
@@ -326,14 +399,61 @@ fun ChatScreen(
                 // 有提问/审批时整块让位（用户 m29539）：输入区都变成回答窗口了，再显示
                 // 「待发送」会让人以为还能继续塞消息。已有排队消息由服务端保管，回答完
                 // 请求后这里自然回来。
-                if (interactive == null) {
+                // ── R031 的底部堆叠顺序（自下而上）：
+                //    输入框 → 排队条 → 任务胶囊 → 消息区
+                // 排队条贴输入框（用户 m21177 定的「发送框上方」），任务胶囊描述的是
+                // 更外层的宏观进度，所以让位到排队条之上。
+                //
+                // 输入法可见时三者全部隐藏（用户 m45632）：键盘已经占掉 40% 高度，
+                // 再挂这两块会和顶部目标打架、也把消息区挤没。
+                // 排队区正在行内编辑时也不能隐藏（同上）：此时键盘必然升起，
+                // 把排队条移出组合树会让那个输入框连同焦点一起消失。
+                if (interactive == null && dockVisible(imeVisible, editing = queueEditing)) {
+                    // 任务胶囊 + 展开的任务列表（在排队条**之上**）
+                    if (state.todos.visible) {
+                        Column(modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 6.dp)) {
+                            TaskPill(
+                                todos = state.todos,
+                                expanded = expandedDock == DockTarget.Tasks,
+                                onToggle = {
+                                    expandedDock = if (expandedDock == DockTarget.Tasks) {
+                                        DockTarget.None
+                                    } else {
+                                        // 互斥：展开任务会收起排队列表（枚举只有一个值，
+                                        // 赋值即互斥，不需要显式去关另一个）。
+                                        DockTarget.Tasks
+                                    }
+                                },
+                            )
+                            AnimatedVisibility(
+                                visible = expandedDock == DockTarget.Tasks,
+                                enter = fadeIn(tween(Motion.MEDIUM)) +
+                                    expandVertically(tween(Motion.MEDIUM)),
+                                exit = fadeOut(tween(Motion.FAST)) +
+                                    shrinkVertically(tween(Motion.FAST)),
+                            ) {
+                                Box(Modifier.padding(top = 6.dp)) {
+                                    TaskPanel(todos = state.todos)
+                                }
+                            }
+                        }
+                    }
                     QueuedStrip(
                         messages = state.queued,
                         generating = state.generating,
                         now = now,
+                        expanded = expandedDock == DockTarget.Queue,
+                        onToggleExpanded = {
+                            expandedDock = if (expandedDock == DockTarget.Queue) {
+                                DockTarget.None
+                            } else {
+                                DockTarget.Queue
+                            }
+                        },
                         onEdit = viewModel::editQueued,
                         onRemove = viewModel::removeQueued,
                         onSteer = viewModel::steerQueued,
+                        onEditingChanged = { queueEditing = it },
                     )
                 }
                 // 有待回答的请求时，**输入框本身变成审批/提问窗口**（用户 m29539，
@@ -436,11 +556,53 @@ fun ChatScreen(
                 actionLabel = "重试",
                 onAction = viewModel::retrySend,
             )
+            // 目标操作的失败**不能**复用上面那条（R031 独立审查 P2）：那条的「重试」绑的是
+            // `retrySend()`，它只清错误再调 `send()`——草稿为空时点了什么都不会发生，
+            // 草稿非空时会把一条无关消息发出去。这里只提示，关掉就完事（重点按钮即重试）。
+            ChatErrorBanner(
+                text = state.goalError,
+                actionLabel = "知道了",
+                onAction = viewModel::dismissGoalError,
+            )
             ChatErrorBanner(
                 text = state.pageError,
                 actionLabel = "重试",
                 onAction = viewModel::retryLoadMore,
             )
+
+            // ── R031 目标横幅（用户 m45580 第 2 条）：会话级元信息，挂在消息区上方。
+            //
+            // 键盘可见时隐藏（用户 m45632）：与底部两块一起让位，否则顶部横幅 + 键盘
+            // 会把消息区压到只剩一两行。
+            // 行内编辑时**不能**隐藏（否则输入框随横幅一起销毁）：这是「输入法让位」的
+            // 唯一例外（用户 m45632 明确要求「正在行内编辑的那一行不隐藏」）。
+            if (dockVisible(imeVisible, editing = goalEditing)) {
+                state.goal?.let { goal ->
+                    Box(modifier = Modifier.padding(bottom = 8.dp)) {
+                        GoalBanner(
+                            goal = goal,
+                            collapsed = goalCollapsed,
+                            editing = goalEditing,
+                            onToggleCollapsed = { goalCollapsed = true },
+                            onPauseResume = {
+                                // 目标与任务独立（见 Goal 的 KDoc）：这里只发 pause/resume，
+                                // 不动 todos、也不中止当前轮。
+                                viewModel.setGoalPhase(
+                                    pause = goal.canPause,
+                                    goal = goal,
+                                )
+                            },
+                            onRequestEdit = { goalEditing = true },
+                            onEdit = { objective ->
+                                viewModel.editGoal(goal, objective)
+                                goalEditing = false
+                            },
+                            onCancelEdit = { goalEditing = false },
+                            onDelete = { showDeleteGoal = true },
+                        )
+                    }
+                }
+            }
 
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when {
@@ -2340,167 +2502,360 @@ private fun LiveRow(live: LiveAttempt) {
 }
 
 /**
- * 排队队列整条（用户 m21177 第 4 条反馈的本体）。
+ * 排队区（R031 重构，用户 m45580 第 3 条）。
  *
- * 位置在**输入区上方**而不是消息列表里：反馈原话「如果在对话中输入发送，发送框上方会
- * 多一个气泡…显示实际的输入，表示排队中」。除了位置，还把 R009「刻意不做撤回按钮」
- * 的决定推翻——那时以为远程客户端拿不到 itemId，实际它在 `inbox` 投影与
- * `agent/inbox/spliced` 事件里（见 [QueuedMessage] 的 KDoc），所以编辑/删除/插队
- * 三个操作都能真的打到服务端。
+ * ## 三种形态
+ *  - **0 条** → 整块不出现。
+ *  - **1 条** → 显示这一条的内容（最多 2 行）+ 右侧三个**图标**按钮（插队 / 编辑 / 删除）。
+ *  - **≥2 条** → 收起成**固定 44dp 一行**，只显示「排队中 · N 条」与展开箭头，
+ *    **不显示任何消息内容**（用户原话：「超过一条信息则不展示实际信息内容」）。
+ *    点开后才逐条展开，每条同样带三个图标按钮，列表限高滚动。
  *
- * 多条时用 `LazyColumn` 限高（最多约三条高）：三条以上仍然要能看见最后一条，
- * 否则用户不知道刚发出去的那条在哪。
+ * ## 为什么不再用原来的气泡形态
+ * 旧实现每条都是一整个 `Bubble`（带时间、footer 文案、三个文字按钮）。三条就把
+ * composer 上方吃掉 200dp 以上，而且文字按钮每个 48dp 触控区、三个并排 144dp，
+ * 比正文还宽。改成「单条 68dp / 多条 44dp」后，底部堆叠给消息区留出了空间。
  *
- * `internal` 同 `Composer`/`SessionDrawer`：这是用户反馈的修复本体，必须有渲染测试
- * 驱动它，确认三个按钮真的存在且绑对了回调。
+ * ## 与任务胶囊互斥展开
+ * [expanded] 由调用方用一个枚举控制，展开排队时会自动收起任务列表——两个都展开
+ * 总高可达 548dp，必然把消息区压没（见 `DockTarget` 的 KDoc）。
+ *
+ * @param expanded 排队列表是否展开。**仅多条时有效**（单条不需要展开）。
+ * @param onToggleExpanded 点那一行的展开/收起。
  */
 @Composable
 internal fun QueuedStrip(
     messages: List<QueuedMessage>,
     generating: Boolean,
     now: Long,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
     onEdit: (QueuedMessage, String) -> Unit,
     onRemove: (QueuedMessage) -> Unit,
     onSteer: (QueuedMessage) -> Unit,
+    onEditingChanged: (Boolean) -> Unit = {},
 ) {
-    // 整条带竖向展开动画：排队条在 composer **上方**，`if (messages.isEmpty()) return`
-    // 的硬切会让输入区被猛地顶上去/放下来一截。用户点「发送」后期望看到队列长出来，
-    // 不是看到界面跳一下。
-    //
-    // `surfaceVariant` 底色保留（与助手气泡「无底色」不冲突）：这一块不是对话内容，
-    // 是「待发送区」，需要和消息列表有明确分界。
+    // 整条带竖向展开动画：排队条在 composer **上方**，硬切会让输入区被猛地顶上去一截。
     AnimatedVisibility(
         visible = messages.isNotEmpty(),
         enter = fadeIn(tween(Motion.MEDIUM)) + expandVertically(tween(Motion.MEDIUM)),
         exit = fadeOut(tween(Motion.FAST)) + shrinkVertically(tween(Motion.FAST)),
     ) {
-        Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
-            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
-                Text(
-                    text = if (messages.size == 1) "排队中 1 条" else "排队中 ${messages.size} 条",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 0.dp)) {
+            if (messages.size == 1) {
+                // 单条：直接显示内容，不需要展开。
+                QueuedRow(
+                    echo = messages.first(),
+                    generating = generating,
+                    onEdit = { text -> onEdit(messages.first(), text) },
+                    onRemove = { onRemove(messages.first()) },
+                    onSteer = { onSteer(messages.first()) },
+                    onEditingChanged = onEditingChanged,
                 )
-                LazyColumn(modifier = Modifier.heightIn(max = 168.dp)) {
-                    items(messages, key = { "queued-${it.id}" }) { message ->
-                        QueuedRow(
-                            echo = message,
-                            now = now,
-                        generating = generating,
-                        onEdit = { text -> onEdit(message, text) },
-                        onRemove = { onRemove(message) },
-                        onSteer = { onSteer(message) },
-                    )
+            } else {
+                QueuedHeaderRow(
+                    count = messages.size,
+                    expanded = expanded,
+                    onToggle = onToggleExpanded,
+                )
+                AnimatedVisibility(
+                    visible = expanded,
+                    enter = fadeIn(tween(Motion.MEDIUM)) + expandVertically(tween(Motion.MEDIUM)),
+                    exit = fadeOut(tween(Motion.FAST)) + shrinkVertically(tween(Motion.FAST)),
+                ) {
+                    LazyColumn(
+                        modifier = Modifier
+                            .padding(top = 6.dp)
+                            .heightIn(max = QUEUE_LIST_MAX_HEIGHT),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        items(messages, key = { "queued-${it.id}" }) { message ->
+                            QueuedRow(
+                                echo = message,
+                                generating = generating,
+                                onEdit = { text -> onEdit(message, text) },
+                                onRemove = { onRemove(message) },
+                                onSteer = { onSteer(message) },
+                                onEditingChanged = onEditingChanged,
+                            )
+                        }
+                    }
                 }
             }
         }
     }
 }
-}
+
+/** 排队列表展开后的限高（约 3.5 条）。 */
+internal val QUEUE_LIST_MAX_HEIGHT = 210.dp
 
 /**
- * 一条排队中的消息。
+ * 多条排队的收起行（固定 44dp，**不显示任何内容**）。
  *
- * 三个操作按钮的可见性规则（不是洁癖，是契约）：
- *  - `confirmed == false`：本地回声还没被 `agent/inbox/spliced` 确认，拿不到 itemId，
- *    此时三个操作都发不出去（服务端只认 `itemId`），所以只显示、不给按钮。
- *  - `插队`：只在 `generating` 时给。不生成时这条本来就排在空队列头部，下一个轮次
- *    就是它，插队没有意义；服务端此时也会回 `session/steer-unavailable`。
+ * 左侧三张层叠小片是「有多条」的视觉隐喻，中间是「排队中 · N 条」，右侧展开箭头。
+ * 整行可点。这是用户 m45580 明确要求的形态。
+ */
+@Composable
+private fun QueuedHeaderRow(
+    count: Int,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(QueueHeaderTestTag)
+            .height(44.dp)
+            .clip(groupShape)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, groupShape)
+            .clickable(onClick = onToggle)
+            .padding(start = 12.dp, end = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        // 层叠小片（三个偏移的圆角方块）。
+        Box(Modifier.size(16.dp)) {
+            for (i in 0..2) {
+                Box(
+                    modifier = Modifier
+                        .padding(start = (i * 2).dp, top = (i * 2).dp)
+                        .size(12.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.30f + i * 0.28f)),
+                )
+            }
+        }
+        Text(
+            text = "排队中",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            text = "$count 条",
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Spacer(Modifier.weight(1f))
+        Icon(
+            imageVector = if (expanded) ChevronUpIcon else ChevronDownIcon,
+            contentDescription = if (expanded) "收起排队列表" else "展开排队列表",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(12.dp),
+        )
+    }
+}
+
+/** 排队收起行的测试标签。 */
+internal const val QueueHeaderTestTag = "chat-queue-header"
+
+/**
+ * 一条排队中的消息（R031 形态：紧凑卡片 + 右侧三图标）。
  *
- * 编辑走对话框而不是行内输入框：气泡只有一行高，行内输入会把它撑成三行，
- * 三条以上时把整条队列挤出屏幕（用户 m21177 的原话是「多一个气泡」，不是多一个表单）。
+ * ## 三个操作按钮的可见性规则（沿用既有契约）
+ *  - `confirmed == false`：本地回声还没被 `agent/inbox/spliced` 确认，拿不到 `itemId`，
+ *    三个操作发不出去（服务端只认 `itemId`），所以**只显示、不给按钮**。
+ *  - `插队`：只在 `generating` 时给。不生成时这条本来就排在队头，插队没有意义。
+ *
+ * ## 行内编辑（用户 m45632 第 5 条）
+ * 编辑时把内容行换成一个**单行**输入框（可左右滑动），右侧三个按钮换成 `✓` / `×`。
+ * 不再用对话框——用户明确要求「排队信息的编辑在行内，把内容限制在一行里面，
+ * 用户可以左右滑动，在编辑情况下三个按钮不会显示，而是显示两个按钮」。
+ *
+ * ## 附件不参与编辑
+ * `attachmentCount > 0` 时只显示「含 N 个附件」一小行提示（用户 m45632 第 2 条：
+ * 附件数不显示 → 这里按「不显示具体数量，只在有附件时说明一句」处理；实际按用户
+ * 最终决定「附件数不显示」执行，见下）。
  */
 @Composable
 internal fun QueuedRow(
     echo: QueuedMessage,
-    now: Long,
     generating: Boolean,
     onEdit: (String) -> Unit,
     onRemove: () -> Unit,
     onSteer: () -> Unit,
+    onEditingChanged: (Boolean) -> Unit = {},
 ) {
     var editing by rememberSaveable { mutableStateOf(false) }
     val actionable = echo.confirmed
-    Bubble(
-        alignEnd = true,
-        background = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
-        time = echo.enqueuedAt,
-        now = now,
-        footer = buildString {
-            append(if (echo.isAwaitingTurn) "排队中 · 等当前轮结束后发出" else "已插队 · 在当前轮执行")
-            if (echo.attachmentCount > 0) append(" · 含 ${echo.attachmentCount} 个附件")
-        },
-    ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
-            when {
-                echo.text.isNotBlank() -> MdBlocks(
-                    blocks = rememberMarkdown(echo.text),
-                    onLinkClick = {},
-                    onFilePathClick = {},
-                    modifier = Modifier.fillMaxWidth(),
-                )
 
-                echo.attachmentCount > 0 -> Text(
-                    text = "（${echo.attachmentCount} 个附件）",
-                    style = MaterialTheme.typography.bodyMedium,
+    // 把「本行是否在编辑」上报给调用方：键盘升起时排队条是否可以让位就靠它
+    // （R031 独立审查 P1）。用 `DisposableEffect` 而不是 `LaunchedEffect(editing)`：
+    // 本行被移出组合树（例如删掉这条排队消息）时要顺手复位，否则会永久卡在
+    // `queueEditing = true`，之后键盘弹出再也不隐藏排队条。
+    DisposableEffect(editing) {
+        onEditingChanged(editing)
+        onDispose { if (editing) onEditingChanged(false) }
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(groupShape)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, groupShape)
+            .padding(start = 12.dp, end = 10.dp, top = 8.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Box(
+                Modifier
+                    .size(5.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.secondary),
+            )
+            Text(
+                text = if (echo.isAwaitingTurn) "等当前轮结束后发出" else "已插队 · 在当前轮执行",
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+            Spacer(Modifier.weight(1f))
+            if (actionable && !editing) {
+                // 三个图标按钮，每个 28dp 触控圆（比文字按钮的三个 48dp 省 96dp 宽）。
+                QueueIconAction(
+                    icon = SteerIcon,
+                    description = "插队",
+                    tint = MaterialTheme.colorScheme.primary,
+                    enabled = generating,
+                    onClick = onSteer,
+                )
+                QueueIconAction(
+                    icon = Icons.Default.Edit,
+                    description = "编辑排队消息",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    onClick = { editing = true },
+                )
+                QueueIconAction(
+                    icon = Icons.Default.Delete,
+                    description = "删除排队消息",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    onClick = onRemove,
                 )
             }
-            if (actionable) {
-                // R017：三个 TextButton 收紧成 labelSmall + 小 contentPadding。
-                // TextButton 默认 48dp 触控高度，三个并排要吃掉 144dp 宽——排队气泡
-                // 的正文通常也只有一两行，操作行比内容行还高。收紧后行高回到 28dp，
-                // 三条排队消息也能塞进 composer 上方的 168dp 上限里。
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val actionStyle = MaterialTheme.typography.labelSmall
-                    val actionPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                    TextButton(
-                        onClick = { editing = true },
-                        contentPadding = actionPadding,
-                    ) { Text("编辑", style = actionStyle) }
-                    // `steer` 只在生成中给（见 KDoc）。
-                    if (generating) {
-                        TextButton(onClick = onSteer, contentPadding = actionPadding) {
-                            Text("插队", style = actionStyle)
-                        }
-                    }
-                    TextButton(onClick = onRemove, contentPadding = actionPadding) {
-                        Text("删除", style = actionStyle)
-                    }
-                }
+        }
+
+        if (editing) {
+            QueueInlineEditor(
+                initial = echo.text,
+                onSave = { text ->
+                    editing = false
+                    onEdit(text)
+                },
+                onCancel = { editing = false },
+            )
+        } else {
+            if (echo.text.isNotBlank()) {
+                // 最多 2 行，超出省略：排队条不能因为一条长消息就撑满半屏。
+                Text(
+                    text = echo.text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
             } else {
+                // 用户 m45632 第 2 条：附件数不显示。只说明「有附件，不可编辑」。
+                Text(
+                    text = "（含附件，不支持编辑）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (!actionable) {
                 // 还没拿到服务端 id：告诉用户为什么没有按钮，而不是让人以为坏了。
                 Text(
                     text = "等待桌面端确认…",
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
     }
-    if (editing) {
-        var draft by rememberSaveable { mutableStateOf(echo.text) }
-        AlertDialog(
-            onDismissRequest = { editing = false },
-            title = { Text("编辑排队消息") },
-            text = {
-                OutlinedTextField(
-                    value = draft,
-                    onValueChange = { draft = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("消息内容") },
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        editing = false
-                        onEdit(draft)
-                    },
-                ) { Text("保存") }
-            },
-            dismissButton = {
-                TextButton(onClick = { editing = false }) { Text("取消") }
-            },
+}
+
+/**
+ * 排队消息的行内编辑器：**单行**输入（可左右滑动）+ `✓` / `×`。
+ *
+ * 单行是用户 m45632 的明确要求（「把内容限制在一行里面，用户可以左右滑动」）。
+ * 换行会把排队条从 68dp 撑成三行，多条时把整条队列挤出屏幕。
+ */
+@Composable
+private fun QueueInlineEditor(
+    initial: String,
+    onSave: (String) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var text by rememberSaveable(initial) { mutableStateOf(initial) }
+    val scroll = rememberScrollState()
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        BasicTextField(
+            value = text,
+            onValueChange = { text = it },
+            singleLine = true,
+            textStyle = TextStyle(
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+            ),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            modifier = Modifier
+                .weight(1f)
+                .height(28.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(MaterialTheme.colorScheme.background)
+                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(6.dp))
+                .padding(horizontal = 8.dp)
+                .horizontalScroll(scroll)
+                .testTag(QueueEditFieldTestTag),
+            decorationBox = { inner -> Box(contentAlignment = Alignment.CenterStart) { inner() } },
+        )
+        QueueIconAction(
+            icon = Icons.Default.Check,
+            description = "保存排队消息",
+            tint = LocalStatusRunning.current,
+            onClick = { if (text.isNotBlank()) onSave(text.trim()) },
+        )
+        QueueIconAction(
+            icon = Icons.Default.Clear,
+            description = "取消编辑",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            onClick = onCancel,
+        )
+    }
+}
+
+/** 排队行内编辑输入框的测试标签。 */
+internal const val QueueEditFieldTestTag = "chat-queue-edit-field"
+
+/** 排队区一个 28dp 的图标动作按钮。 */
+@Composable
+private fun QueueIconAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    description: String,
+    tint: Color,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(28.dp)
+            .clip(CircleShape)
+            .semantics { contentDescription = description }
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = if (enabled) tint else tint.copy(alpha = 0.35f),
+            modifier = Modifier.size(15.dp),
         )
     }
 }
@@ -2700,6 +3055,31 @@ internal fun Bubble(
  * 导轨本身是 `drawBehind` 画的、不是语义节点，查不到；但**容器的高度**可以量——
  * 「容器高度是否容得下最后一行内容」正是 `height(IntrinsicSize.Min)` 截断与否的判据。
  */
+/**
+ * 底部「可展开区」的目标（R031）。
+ *
+ * 为什么用一个枚举而不是两个布尔：任务列表与排队列表**互斥展开**（用户 m45632）。
+ * 两个布尔能表示 (true, true) 这种非法状态，而枚举只有一个值——从类型上就不可能
+ * 同时展开两个。
+ *
+ * 互斥的原因不是洁癖：两者都展开时总高 = 任务面板 196 + 排队列表 210 + 胶囊 34 +
+ * 排队行 44 + 输入框 ≈ 548dp，而 800dp 机型扣掉顶栏与目标横幅后只剩约 480dp，
+ * **必然把消息区压没甚至把输入框顶出屏幕**。
+ */
+internal enum class DockTarget { None, Tasks, Queue }
+
+/**
+ * 「输入法让位」的判定：键盘升起时目标横幅 / 任务胶囊 / 排队条一律隐藏，
+ * **唯一例外**是正在行内编辑的那一块（把它的输入框移出组合树会连焦点一起没掉）。
+ *
+ * 抽成独立函数是为了让 [ImeDockVisibilityTest] 能守住这条契约。R031 设备验收时
+ * 在 MuMu 上验不动这一点：模拟器挂着硬件键盘（`dumpsys input` 里有 `Xiaomi Keyboard`），
+ * 输入法窗口被摆到 `mSurfacePosition=Point(0,2400)` 即屏幕外，`mInputShown` 为真
+ * 但 ime inset 恒为 0——「键盘占掉高度」这个前提在模拟器上根本不成立。
+ */
+internal fun dockVisible(imeVisible: Boolean, editing: Boolean): Boolean = !imeVisible || editing
+
+
 internal const val ChatRailTestTag = "chat-bubble-rail"
 
 /**

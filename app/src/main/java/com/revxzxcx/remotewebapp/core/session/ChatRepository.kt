@@ -149,6 +149,42 @@ class ChatRepository(
         Unit
     }
 
+    /**
+     * 目标变更（R031）：编辑 objective / 暂停 / 继续 / 清除。
+     *
+     * 四个方法都走 unary RPC，返回后**不做本地状态更新**——权威结果经 `goal/change`
+     * 事件回灌（`ChatReducer.onEvent`），这样桌面端与手机端看到的永远是同一条事件。
+     * 本地不乐观更新是刻意的：目标带 CAS revision，本地先改会让「服务端拒绝」变成
+     * 一个静默的显示错误。
+     */
+    suspend fun pauseGoal(sessionId: String, goalId: String, revision: Long) = withContext(Dispatchers.IO) {
+        connection.typert.callRaw(DshEndpoints.GOALS_PAUSE, ChatArgs.goalVerb(sessionId, goalId, revision))
+        Unit
+    }
+
+    suspend fun resumeGoal(sessionId: String, goalId: String, revision: Long) = withContext(Dispatchers.IO) {
+        connection.typert.callRaw(DshEndpoints.GOALS_RESUME, ChatArgs.goalVerb(sessionId, goalId, revision))
+        Unit
+    }
+
+    suspend fun clearGoal(sessionId: String, goalId: String, revision: Long) = withContext(Dispatchers.IO) {
+        connection.typert.callRaw(DshEndpoints.GOALS_CLEAR, ChatArgs.goalVerb(sessionId, goalId, revision))
+        Unit
+    }
+
+    suspend fun editGoal(
+        sessionId: String,
+        goalId: String,
+        revision: Long,
+        objective: String,
+    ) = withContext(Dispatchers.IO) {
+        connection.typert.callRaw(
+            DshEndpoints.GOALS_EDIT,
+            ChatArgs.editGoal(sessionId, goalId, revision, objective),
+        )
+        Unit
+    }
+
     /** 一次翻页的结果。 */
     data class PageResult(
         val items: List<ChatItem>,

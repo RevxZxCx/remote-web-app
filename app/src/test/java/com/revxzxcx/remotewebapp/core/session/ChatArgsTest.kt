@@ -343,6 +343,37 @@ class ChatArgsTest {
         assertEquals(emptySet<String>(), ChatArgs.emptyArgs.keys)
     }
 
+    /**
+     * 目标族（`goals` 下的三个动词）的参数形状与 chat 族**不同**（R031 设备验收抓到的缺陷）。
+     *
+     * 首版照 chat 惯例套了 `{request:{sessionId, ref}}`，服务端原文回：
+     * `goals/pause: args fields do not match the descriptor: missing "agentId", "ref";
+     * unexpected "request"`。即：会话 id 叫 `agentId`、ref 在顶层、没有 `request` 外层。
+     * 名字写错在这里就红，不必等真机。
+     */
+    @Test
+    fun `目标动词用顶层 agentId 与 ref 而不是 request`() {
+        val args = ChatArgs.goalVerb("session-1", "goal-9", 3L)
+        assertEquals(setOf("agentId", "ref"), args.keys)
+        assertEquals("session-1", args.str("agentId"))
+        assertFalse("不能有 request 外层", args.containsKey("request"))
+        assertFalse("不能有 sessionId", args.containsKey("sessionId"))
+        assertEquals(setOf("id", "revision"), args.obj("ref").keys)
+        assertEquals("goal-9", args.obj("ref").str("id"))
+        assertEquals(3L, args.obj("ref").long("revision"))
+    }
+
+    @Test
+    fun `编辑目标多一层 request 只装 objective`() {
+        val args = ChatArgs.editGoal("session-1", "goal-9", 4L, "新目标")
+        assertEquals(setOf("agentId", "ref", "request"), args.keys)
+        assertEquals("session-1", args.str("agentId"))
+        assertEquals("goal-9", args.obj("ref").str("id"))
+        // 只有 objective 可改：maxGoalRounds 是创建时参数，DSH 编辑接口不收。
+        assertEquals(setOf("objective"), args.obj("request").keys)
+        assertEquals("新目标", args.obj("request").str("objective"))
+    }
+
     @Test
     fun `chat 方法都用 request 包裹`() {
         listOf(

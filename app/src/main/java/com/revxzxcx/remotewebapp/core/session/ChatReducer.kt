@@ -66,8 +66,17 @@ data class ChatUiState(
      * 消息、也不会重新翻那一页，用户点了按钮发现什么都没发生。三处各自带自己的重试动作。
      */
     val error: String? = null,
-    /** 发送 / 中止失败。重试动作是重新发送，不是重启流。 */
+    /** 发送 / 中止 / 排队失败。重试动作是重新发送，不是重启流。 */
     val sendError: String? = null,
+    /**
+     * 目标操作的失败文案（暂停 / 开始 / 编辑 / 删除）。
+     *
+     * **为什么不能复用 [sendError]**（R031 独立审查 P2）：错误横幅上的「重试」绑的是
+     * `retrySend()`，它只清错误再调 `send()`——草稿为空时点了等于什么都没发生（错误条
+     * 直接消失），草稿非空时会把一条无关消息发出去。目标操作失败时应当只提示、不给
+     * 「重试」这个误导动作（用户重新点一次目标按钮就是重试）。
+     */
+    val goalError: String? = null,
     /**
      * 正在发送（`session/prompt` 在途）。
      *
@@ -149,6 +158,21 @@ data class ChatUiState(
      * 不能做成开关。
      */
     val permission: SessionPermission = SessionPermission(),
+    /**
+     * 会话目标（`projections.values.goal`，实时变更走 `goal/change` 事件）。
+     *
+     * ⚠️ **目标与任务没有联动**（已查证 DSH 源码，见 [Goal] 的 KDoc）：目标暂停
+     * 不中止当前轮、不冻结任务；任务全完成也不代表目标完成。所以这里与
+     * [todos] 是两个**互不影响**的字段，任何一方变化都不要去「顺手」改另一方。
+     */
+    val goal: Goal? = null,
+    /**
+     * 任务列表（`projections.values.todos`）。
+     *
+     * 手机端**只读**：DSH 的 todos 由 `todo_write` 工具写入，远程客户端没有对应的
+     * 写入口，两端同时写必然互相覆盖。所以 UI 只展示，不提供编辑。
+     */
+    val todos: TodoList = TodoList(),
 )
 
 /**
@@ -266,6 +290,10 @@ object ChatReducer {
             permission = permission,
             // 快照带权威队列；本地回声里已被服务端确认（同 rpcId）的让位给它。
             queued = mergeQueued(frame.inbox, state.queued),
+            // 目标与任务都取快照的权威值。`complete` 的目标照样存下来（横幅不渲染而已），
+            // 这样「目标已完成」这个事实仍然在状态里，不会因为不显示就被当成不存在。
+            goal = frame.goal,
+            todos = frame.todos,
         )
         if (frame.baseline.isNotEmpty()) {
             // 重连基线：把断开期间已生成但未落盘的增量回放成一个预览气泡。
@@ -359,6 +387,45 @@ object ChatReducer {
             else -> state.queued
         }
 
+        // 3b) 目标。`goal/change` 不产生卡片，是目标的**唯一实时来源**（快照给首帧）。
+        //
+        //     四种 operation（create / resume / pause / edit / complete）都带完整的
+        //     `goal` 快照 → 直接覆盖；`clear` 没有 goal → 置 null。
+        //
+        //     ⚠️ 这里**不要**顺带改 [ChatUiState.todos]：目标与任务独立（见 [Goal] 的 KDoc）。
+        //     顺带改就会造成「手机端目标暂停了，任务也跟着停」这种与桌面端不一致的表现。
+        // 3c) 任务。`todo/write` 不产生卡片，是任务的**唯一实时来源**。
+        //
+        //     线上形状（`session.v4.jsonl` 实测）：
+        //     ```
+        //     {type:"todo/write", seq, time, data:{todos:[{content, status}, …]}}
+        //     ```
+        //     与 `projections.values` 里那份是同一形状，所以直接复用 [GoalTodoParser.parseTodos]。
+        //
+        //     🔴 这条分支必须存在，否则任务胶囊只有进入会话那一刻是准的：`session/follow`
+        //     的快照只在订阅/重连时下发一次，之后 `todo_write` 的进度全靠事件推送。
+        //     缺这条时「n/m 实时变化」是假的——必须退出重进才更新（R031 独立审查 P1）。
+        //
+        //     同样**不要**顺带改 [ChatUiState.goal]：目标与任务独立。
+        val todos = if (type == "todo/write") {
+            val parsed = GoalTodoParser.parseTodos(frame.envelope?.get("data") as? JsonObject)
+            // 空数组是合法值（模型清空任务列表），照收；只有 data 解析不出对象时才保留原值。
+            if (frame.envelope?.get("data") is JsonObject) parsed else state.todos
+        } else {
+            state.todos
+        }
+
+        val goal = if (type == "goal/change") {
+            when (val change = GoalTodoParser.parseGoalChange(frame.envelope?.get("data"))) {
+                is GoalChange.Set -> change.goal
+                GoalChange.Clear -> null
+                // 解析不出来时保留原值：丢一条畸形事件好过让横幅凭空消失。
+                null -> state.goal
+            }
+        } else {
+            state.goal
+        }
+
         // 4) 权限状态。三个事件都不产生卡片（`item == null`），但必须更新——否则从历史
         //    进入一个「只用过工具」的会话时，权限徽标会显示「未知」，而其实日志里写着呢。
         val permission = SessionPermission.reduce(
@@ -388,6 +455,8 @@ object ChatReducer {
                 model = model,
                 queued = queued,
                 permission = permission,
+                goal = goal,
+                todos = todos,
             )
         }
 
@@ -407,6 +476,8 @@ object ChatReducer {
             model = model,
             queued = queued,
             permission = permission,
+            goal = goal,
+            todos = todos,
             // 真的渲染出内容了才清错误条；否则会把重连提示一并抹掉。
             error = null,
         )

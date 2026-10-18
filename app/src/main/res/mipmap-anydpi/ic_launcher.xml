@@ -1,6 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  R031：应用图标换成用户提供的角色图（原图 1024×1024，存于 docs/R031-app-icon.png）。
+
+  三层结构（Android 8+ 自适应图标）：
+   - background：原图四角的蓝→紫渐变（#8DDCFD / #C4B9FB / #B7B9F6 / #D3AEFE）。
+                必须是**不透明**的：透明背景在部分启动器上会变黑。
+   - foreground：角色本体，已按 66.7%（72/108dp）缩进安全区——否则圆形/方形裁切会切到头发。
+   - monochrome：Android 13 主题图标用，只保留剪影。
+
+  旧版 fallback（API<26）走 `mipmap-*/ic_launcher.png`，是带圆角的完整图。
+-->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/ic_launcher_background" />
-    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <background android:drawable="@mipmap/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
     <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
 </adaptive-icon>

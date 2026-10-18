@@ -1,0 +1,1684 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>R031 效果图 · 任务/目标/排队重构</title>
+<style>
+/* ============================================================
+   设计令牌 —— 与 app 的 Theme.kt / Type.kt / Shape.kt / Motion.kt 逐字对应
+   （直接沿用 R028-效果图.html 的令牌表，保证观感同源）
+   ============================================================ */
+:root{
+  --primary:#5AA2FF; --onPrimary:#08131F; --primaryContainer:#1B3E63; --onPrimaryContainer:#D3E5FF;
+  --secondary:#7FA8D4; --secondaryContainer:#1D3348; --onSecondaryContainer:#C9DDF2;
+  --background:#0B1420; --onBackground:#E4ECF6;
+  --surface:#111C2B; --onSurface:#E4ECF6;
+  --surfaceVariant:#1A2942; --onSurfaceVariant:#A6BDD8;
+  --outline:#31485F; --outlineVariant:#22334A;
+  --error:#FF8A80; --errorContainer:#48211F; --onErrorContainer:#FFDAD6;
+  --tertiary:#F2C14E; --tertiaryContainer:#4A3A12; --onTertiaryContainer:#FFE7B0;
+  --running:#4ADE80;
+  --r-xs:6px; --r-sm:10px; --r-md:14px; --r-lg:20px; --r-xl:28px; --r-bubble:18px; --r-pill:999px;
+  --t-fast:140ms; --t-med:240ms; --t-slow:360ms;
+  --ease:cubic-bezier(.2,0,0,1);
+  --mono:"Cascadia Mono",Consolas,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:#05080d; color:#8ea3bd;
+  font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+  padding:40px 32px 80px;
+}
+h1{font-size:26px;color:#e4ecf6;font-weight:600;margin-bottom:6px}
+h2{font-size:17px;color:#e4ecf6;font-weight:600;margin:52px 0 4px;padding-top:20px;border-top:1px solid #17212e}
+h2:first-of-type{border-top:none;margin-top:32px}
+h3{font-size:13.5px;color:#b9cbe0;font-weight:600;margin:18px 0 6px}
+.lede{font-size:13px;line-height:1.75;color:#7d90a8;max-width:1180px;margin-bottom:8px}
+.lede b{color:#c3d3e6;font-weight:600}
+.lede .k{color:#8fb8e8;font-family:var(--mono);font-size:11.5px}
+code{font-family:var(--mono);font-size:12px;background:#121b27;border:1px solid #1e2a3a;border-radius:4px;padding:1px 5px;color:#9fc0e0}
+.row{display:flex;flex-wrap:wrap;gap:34px;align-items:flex-start;margin-top:22px}
+.col{display:flex;flex-direction:column;gap:10px;align-items:center}
+.caption{font-size:12px;color:#6f8299;letter-spacing:.3px;text-align:center;max-width:380px;line-height:1.6}
+.caption b{color:#a8bdd6;font-weight:600}
+.notes{font-size:12px;line-height:1.85;color:#7d90a8;max-width:400px}
+.notes li{margin-left:16px;margin-top:3px}
+.notes b{color:#b9cbe0;font-weight:600}
+.notes .k{color:#8fb8e8;font-family:var(--mono);font-size:11px}
+
+/* ---------- 手机外框 ---------- */
+.phone{
+  width:360px;height:800px;background:var(--background);position:relative;overflow:hidden;
+  border-radius:26px;box-shadow:0 0 0 1px #1b2836, 0 24px 60px rgba(0,0,0,.6);
+  display:flex;flex-direction:column;color:var(--onBackground);
+}
+.phone.tall{height:853px}
+.sbar{height:28px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;flex:0 0 auto;font-size:11px;color:#c8d6e6;font-weight:500}
+.sbar .icons{display:flex;gap:5px;align-items:center;opacity:.9}
+
+/* ---------- 顶栏 ---------- */
+.topbar{height:56px;flex:0 0 auto;display:flex;align-items:center;padding:0 4px;gap:4px;position:relative}
+.iconbtn{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--onSurface);flex:0 0 auto}
+.iconbtn svg{display:block}
+.title{flex:1 1 auto;min-width:0;padding-left:4px}
+.title .l1{font-size:16px;font-weight:600;line-height:22px;letter-spacing:.1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.title .l2{font-size:11px;line-height:15px;letter-spacing:.3px;color:var(--onSurfaceVariant);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ---------- 消息区 ---------- */
+.chatlist{flex:1 1 auto;overflow:hidden;padding:10px 12px 0;display:flex;flex-direction:column;gap:9px}
+.assist{display:flex;gap:9px}
+.assist .rail{width:2px;border-radius:1px;background:rgba(90,162,255,.34);flex:0 0 auto;margin:3px 0}
+.assist .body{flex:1 1 auto;min-width:0;font-size:13px;line-height:19px;color:var(--onSurface)}
+.assist .body .meta{font-size:10.5px;color:var(--onSurfaceVariant);margin-top:5px}
+.ubub{display:flex;justify-content:flex-end}
+.ubub .b{background:var(--primaryContainer);border-radius:18px 18px 4px 18px;padding:8px 13px;font-size:13px;line-height:19px;color:var(--onPrimaryContainer);max-width:280px}
+.divider{display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--onSurfaceVariant);padding:2px 0}
+.divider::before,.divider::after{content:'';flex:1 1 auto;height:1px;background:var(--outlineVariant)}
+
+/* ---------- 目标横幅 ---------- */
+.goalbanner{
+  flex:0 0 auto;margin:0 12px 8px;border-radius:var(--r-md);
+  background:var(--surface);border:1px solid var(--outline);
+  padding:9px 10px 9px 12px;display:flex;align-items:center;gap:9px;
+  box-shadow:0 2px 12px rgba(0,0,0,.35);position:relative;overflow:hidden;
+}
+/* 进行中：淡闪烁（左侧一条呼吸光带，不闪整块，避免干扰阅读） */
+.goalbanner.active{animation:goalPulse 2600ms var(--ease) infinite}
+@keyframes goalPulse{
+  0%,100%{box-shadow:0 2px 12px rgba(0,0,0,.35), 0 0 0 0 rgba(90,162,255,.0)}
+  50%{box-shadow:0 2px 12px rgba(0,0,0,.35), 0 0 0 2px rgba(90,162,255,.16)}
+}
+.goalbanner .gtarget{
+  position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--primary);opacity:.55;
+}
+.goalbanner.active .gtarget{animation:goalBar 2600ms var(--ease) infinite}
+@keyframes goalBar{0%,100%{opacity:.35}50%{opacity:.95}}
+.goalbanner.paused .gtarget{background:var(--tertiary);opacity:.5;animation:none}
+.goalbanner.done .gtarget{background:var(--running);opacity:.5}
+
+.gicon{
+  width:26px;height:26px;border-radius:50%;flex:0 0 auto;
+  display:flex;align-items:center;justify-content:center;
+  background:rgba(90,162,255,.14);color:var(--primary);
+}
+.goalbanner.paused .gicon{background:rgba(242,193,78,.14);color:var(--tertiary)}
+.goalbanner.done .gicon{background:rgba(74,222,128,.14);color:var(--running)}
+.gtext{flex:1 1 auto;min-width:0}
+.gtext .glabel{
+  font-size:10px;letter-spacing:.4px;text-transform:uppercase;
+  color:var(--onSurfaceVariant);line-height:13px;display:flex;align-items:center;gap:5px;
+}
+.gtext .glabel .dot{width:5px;height:5px;border-radius:50%;background:var(--primary);flex:0 0 auto}
+.goalbanner.paused .gtext .glabel .dot{background:var(--tertiary)}
+.goalbanner.done .gtext .glabel .dot{background:var(--running)}
+.gtext .gobj{
+  font-size:12.5px;line-height:17px;color:var(--onSurface);margin-top:1px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+/* 目标右侧三个纯图标按钮 */
+.gacts{display:flex;align-items:center;gap:0;flex:0 0 auto}
+.gact{
+  width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  color:var(--onSurfaceVariant);flex:0 0 auto;
+}
+.gact.play{color:var(--running)}
+.gact.pause{color:var(--tertiary)}
+.gact.del{color:var(--onSurfaceVariant)}
+
+/* ---------- 任务胶囊 ---------- */
+.taskpillwrapper{flex:0 0 auto;padding:0 12px 6px}
+.taskpill{
+  height:34px;border-radius:var(--r-pill);display:inline-flex;align-items:center;gap:8px;
+  padding:0 13px 0 11px;background:var(--surface);border:1px solid var(--outline);
+  font-size:12px;color:var(--onSurface);box-shadow:0 2px 10px rgba(0,0,0,.35);
+  max-width:100%;
+}
+.taskpill .spin{
+  width:13px;height:13px;border-radius:50%;flex:0 0 auto;
+  border:1.8px solid rgba(90,162,255,.25);border-top-color:var(--primary);
+  animation:spin 820ms linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+.taskpill .spin.done{
+  border:none;background:var(--running);animation:none;
+  display:flex;align-items:center;justify-content:center;color:#062b14;font-size:9px;font-weight:800;
+}
+.taskpill .lbl{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.taskpill .cnt{font-family:var(--mono);font-size:11.5px;font-weight:600;color:var(--primary);flex:0 0 auto}
+.taskpill .cnt b{color:var(--running)}
+.taskpill .chev{color:var(--onSurfaceVariant);display:flex;flex:0 0 auto;transition:transform var(--t-fast) var(--ease)}
+.taskpill.open .chev{transform:rotate(180deg)}
+
+/* ---------- 任务列表（胶囊展开） ---------- */
+.taskpanel{
+  margin:0 0 6px;border-radius:var(--r-md);background:var(--surface);
+  border:1px solid var(--outline);box-shadow:0 10px 30px rgba(0,0,0,.5);overflow:hidden;
+}
+.taskpanel .tph{
+  display:flex;align-items:center;gap:7px;padding:10px 12px 8px;
+  border-bottom:1px solid var(--outlineVariant);
+}
+.taskpanel .tph .t{font-size:11.5px;font-weight:600;color:var(--onSurface);letter-spacing:.2px}
+.taskpanel .tph .n{font-family:var(--mono);font-size:10.5px;color:var(--onSurfaceVariant);margin-left:auto}
+.tasklist{max-height:196px;overflow-y:auto;padding:5px 0}
+.tasklist::-webkit-scrollbar{width:3px}
+.tasklist::-webkit-scrollbar-thumb{background:var(--outline);border-radius:2px}
+.taskrow{display:flex;align-items:flex-start;gap:9px;padding:7px 12px}
+.taskrow .marker{
+  width:15px;height:15px;border-radius:50%;flex:0 0 auto;margin-top:1.5px;
+  display:flex;align-items:center;justify-content:center;
+}
+/* 完成：实心绿 + 勾 */
+.taskrow.done .marker{background:var(--running);color:#062b14;font-size:9px;font-weight:800}
+/* 进行中：旋转圈 */
+.taskrow.doing .marker{
+  border:1.6px solid rgba(90,162,255,.25);border-top-color:var(--primary);
+  animation:spin 820ms linear infinite;
+}
+/* 待办：空心点 */
+.taskrow.todo .marker{border:1.6px solid var(--outline);background:transparent}
+.taskrow .tx{flex:1 1 auto;min-width:0;font-size:12px;line-height:17px;color:var(--onSurface)}
+.taskrow.done .tx{color:var(--onSurfaceVariant);text-decoration:line-through;text-decoration-color:rgba(166,189,216,.45)}
+.taskrow.doing .tx{color:var(--onSurface);font-weight:500}
+.taskrow .st{font-size:10px;font-family:var(--mono);color:var(--onSurfaceVariant);flex:0 0 auto;margin-top:2px}
+.taskrow.doing .st{color:var(--primary)}
+.taskrow.done .st{color:var(--running)}
+
+/* ---------- 排队条（单条） ---------- */
+.queuestrip{flex:0 0 auto;padding:0 12px 6px}
+.qsingle{
+  border-radius:var(--r-md);background:var(--surfaceVariant);
+  border:1px solid var(--outlineVariant);padding:8px 10px 8px 12px;
+  display:flex;flex-direction:column;gap:6px;
+}
+.qsingle .qtop{display:flex;align-items:center;gap:7px}
+.qsingle .qdot{width:5px;height:5px;border-radius:50%;background:var(--secondary);flex:0 0 auto}
+.qsingle .qlbl{font-size:10.5px;color:var(--onSurfaceVariant);letter-spacing:.2px}
+.qsingle .qacts{margin-left:auto;display:flex;align-items:center;gap:0}
+.qact{
+  width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  color:var(--onSurfaceVariant);flex:0 0 auto;
+}
+.qact.steer{color:var(--primary)}
+.qsingle .qtxt{
+  font-size:12px;line-height:17px;color:var(--onSurface);
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+/* 多条：折叠成一行，不显示内容 */
+.qmulti{
+  border-radius:var(--r-md);background:var(--surfaceVariant);
+  border:1px solid var(--outlineVariant);padding:0 10px 0 12px;height:44px;
+  display:flex;align-items:center;gap:8px;
+}
+.qmulti .qstack{position:relative;width:16px;height:16px;flex:0 0 auto}
+.qmulti .qstack i{
+  position:absolute;border-radius:2px;background:var(--secondary);opacity:.55;
+}
+.qmulti .qstack i:nth-child(1){left:0;top:0;width:12px;height:12px;opacity:.3}
+.qmulti .qstack i:nth-child(2){left:2px;top:2px;width:12px;height:12px;opacity:.5}
+.qmulti .qstack i:nth-child(3){left:4px;top:4px;width:12px;height:12px;opacity:.85}
+.qmulti .qlbl{font-size:12px;color:var(--onSurface)}
+.qmulti .qn{font-family:var(--mono);font-size:11.5px;font-weight:600;color:var(--primary)}
+.qmulti .qchev{margin-left:auto;color:var(--onSurfaceVariant);display:flex;transition:transform var(--t-fast) var(--ease)}
+.qmulti.open .qchev{transform:rotate(180deg)}
+/* 多条展开后的列表 */
+.qlist{
+  max-height:210px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;
+}
+.qlist::-webkit-scrollbar{width:3px}
+.qlist::-webkit-scrollbar-thumb{background:var(--outline);border-radius:2px}
+.qlist .qsingle{margin-bottom:0}
+
+/* ---------- 输入框 ---------- */
+.composerwrap{flex:0 0 auto;padding:0 12px 12px;position:relative}
+.composer{
+  background:var(--surface);border:1px solid var(--outlineVariant);border-radius:26px;
+  box-shadow:0 8px 26px rgba(0,0,0,.5);
+  display:flex;flex-direction:column;
+}
+.composer .r1{display:flex;align-items:center;gap:2px;padding:6px;min-height:52px}
+.plus{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--onSurfaceVariant);flex:0 0 auto}
+.ph{flex:1 1 auto;font-size:14px;color:var(--onSurfaceVariant);padding:0 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sendbtn{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:0 0 auto;background:var(--surfaceVariant);color:var(--onSurfaceVariant)}
+.composer.exp{border-radius:var(--r-lg)}
+.composer.exp .r1{display:block;padding:10px 14px 0}
+.composer.exp .inputtext{font-size:14px;line-height:21px;color:var(--onSurface);min-height:42px}
+.composer.exp .inputtext .caret{display:inline-block;width:1.5px;height:16px;background:var(--primary);vertical-align:-2px;margin-left:1px}
+.composer .r2{display:flex;align-items:center;gap:6px;padding:6px 8px 8px 10px}
+.chip{height:30px;border-radius:var(--r-pill);background:var(--surfaceVariant);border:1px solid var(--outlineVariant);display:inline-flex;align-items:center;gap:6px;padding:0 11px;font-size:11.5px;color:var(--onSurface);white-space:nowrap;flex:0 1 auto;min-width:0;overflow:hidden}
+.chip .dt{width:6px;height:6px;border-radius:50%;background:var(--primary);flex:0 0 auto}
+.chip .mono{font-family:var(--mono);font-size:11px;color:var(--onSurfaceVariant);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.chip.ic{width:32px;height:32px;padding:0;justify-content:center;gap:0;flex:0 0 auto;background:transparent}
+.spacer{flex:1 1 auto}
+
+/* ---------- 图标通用 ---------- */
+svg{display:block}
+.ico{width:18px;height:18px;stroke:currentColor;stroke-width:1.9;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.ico.sm{width:15px;height:15px;stroke-width:2}
+.ico.xs{width:12px;height:12px;stroke-width:2.2}
+
+/* 应用图标展示 */
+.iconrow{display:flex;gap:26px;align-items:flex-end;flex-wrap:wrap;margin-top:18px}
+.iconcase{display:flex;flex-direction:column;align-items:center;gap:8px}
+.appicon{
+  width:96px;height:96px;border-radius:22px;overflow:hidden;flex:0 0 auto;
+  box-shadow:0 8px 26px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.06);
+}
+.appicon img{width:100%;height:100%;object-fit:cover;display:block}
+.appicon.round{border-radius:50%}
+.appicon.sm{width:56px;height:56px;border-radius:14px}
+.appicon.xs{width:40px;height:40px;border-radius:11px}
+/* 启动器模拟 */
+.launcher{
+  width:360px;background:linear-gradient(160deg,#16233a,#0a1220 60%);border-radius:22px;
+  padding:18px 16px 22px;box-shadow:0 0 0 1px #1b2836;
+}
+.launcher .lgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px 10px;margin-top:14px}
+.launcher .app{display:flex;flex-direction:column;align-items:center;gap:6px}
+.launcher .app span{font-size:10px;color:#c3d3e6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:70px;text-align:center}
+.launcher .ph{font-size:11px;color:#8ea3bd;background:rgba(255,255,255,.08);border-radius:var(--r-pill);padding:5px 12px}
+.mockicon{width:56px;height:56px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:18px;color:#fff;opacity:.55}
+
+/* 尺寸标注 */
+.spec{font-family:var(--mono);font-size:10px;color:#587089}
+.tag{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:4px;font-size:10px;font-family:var(--mono)}
+.tag.new{background:rgba(74,222,128,.13);color:var(--running)}
+.tag.mod{background:rgba(242,193,78,.13);color:var(--tertiary)}
+.tag.keep{background:rgba(90,162,255,.13);color:var(--primary)}
+
+/* 亮色对照 */
+.light{
+  --background:#F4F7FB;--onBackground:#182430;--surface:#FFFFFF;--onSurface:#182430;
+  --surfaceVariant:#E9EFF7;--onSurfaceVariant:#45586D;--outline:#B9C8D9;--outlineVariant:#DCE5EF;
+  --primary:#1F6FEB;--onPrimary:#FFFFFF;--primaryContainer:#D8E6FF;--onPrimaryContainer:#10305C;
+  --secondaryContainer:#DCE8F6;--onSecondaryContainer:#1B3247;--error:#B3261E;--tertiary:#C08A12;
+  --running:#15803D;
+}
+.light .assist .rail{background:rgba(31,111,235,.3)}
+.light .goalbanner{box-shadow:0 2px 12px rgba(15,35,60,.10)}
+.light .taskrow.done .marker{color:#fff}
+.light .taskpill .spin{border-color:rgba(31,111,235,.22);border-top-color:var(--primary)}
+
+
+/* ---------- 交互版：可点击展开/收起 ---------- */
+.interactive .taskpanel,
+.interactive .qlist{display:none}
+.interactive .taskpill.open + .taskpanel{display:block}
+.interactive .qmulti.open + .qlist{display:flex}
+.taskpill,.qmulti{cursor:pointer;user-select:none;transition:border-color var(--t-fast) var(--ease),background var(--t-fast) var(--ease)}
+.taskpill:hover,.qmulti:hover{background:var(--surfaceVariant)}
+.goalbanner{transition:box-shadow var(--t-med) var(--ease),border-color var(--t-med) var(--ease)}
+.gact,.qact{cursor:pointer;transition:background var(--t-fast) var(--ease),color var(--t-fast) var(--ease)}
+.gact:hover,.qact:hover{background:rgba(255,255,255,.07)}
+.light .gact:hover,.light .qact:hover{background:rgba(0,0,0,.06)}
+/* 目标横幅三种状态联动 */
+.goalbanner[data-phase="paused"]{animation:none}
+.goalbanner[data-phase="paused"] .gtarget{background:var(--tertiary);opacity:.5;animation:none}
+.goalbanner[data-phase="paused"] .gicon{background:rgba(242,193,78,.14);color:var(--tertiary)}
+.goalbanner[data-phase="paused"] .glabel .dot{background:var(--tertiary)}
+/* 提示条 */
+.hint{
+  position:fixed;left:50%;bottom:18px;transform:translateX(-50%);
+  background:#111c2b;border:1px solid #31485f;color:#c3d3e6;
+  font-size:12.5px;padding:9px 16px;border-radius:999px;
+  box-shadow:0 10px 30px rgba(0,0,0,.6);z-index:999;opacity:0;pointer-events:none;
+  transition:opacity 200ms ease;
+}
+.hint.show{opacity:1}
+
+
+/* ---------- 目标横幅：收起态（收进顶栏） ---------- */
+.goalbanner.collapsed{display:none}
+/* 收起后顶栏出现一枚小圆点指示器，点击再展开 */
+.goalchip{
+  width:28px;height:28px;border-radius:50%;display:none;align-items:center;justify-content:center;
+  flex:0 0 auto;position:relative;color:var(--primary);
+}
+.topbar.has-goal-collapsed .goalchip{display:flex}
+.goalchip .halo{
+  position:absolute;inset:-3px;border-radius:50%;
+  background:radial-gradient(circle,rgba(90,162,255,.30) 0%,rgba(90,162,255,.10) 55%,rgba(90,162,255,0) 75%);
+  animation:haloPulse 2600ms var(--ease) infinite;
+}
+@keyframes haloPulse{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1.08)}}
+.topbar.has-goal-collapsed .goalchip.paused{color:var(--tertiary)}
+.topbar.has-goal-collapsed .goalchip.paused .halo{
+  background:radial-gradient(circle,rgba(242,193,78,.30) 0%,rgba(242,193,78,.10) 55%,rgba(242,193,78,0) 75%);
+  animation:none;opacity:.7;
+}
+
+/* ---------- 目标横幅：行内编辑态 ---------- */
+.goalbanner.editing{gap:7px}
+.goalbanner .ginput{
+  flex:1 1 auto;min-width:0;height:26px;border-radius:var(--r-xs);
+  background:var(--surfaceVariant);border:1px solid var(--outline);
+  color:var(--onSurface);font-size:12.5px;padding:0 8px;outline:none;
+  font-family:inherit;
+}
+.goalbanner .ginput:focus{border-color:var(--primary)}
+
+/* ---------- 排队行内编辑态 ---------- */
+.qsingle.editing .qinput{
+  width:100%;height:28px;border-radius:var(--r-xs);
+  background:var(--background);border:1px solid var(--outline);
+  color:var(--onSurface);font-size:12px;padding:0 8px;outline:none;
+  font-family:inherit;white-space:nowrap;overflow-x:auto;overflow-y:hidden;
+}
+.qsingle.editing .qinput:focus{border-color:var(--primary)}
+.qact.save{color:var(--running)}
+.qact.cancel{color:var(--onSurfaceVariant)}
+
+/* ---------- 输入法弹出时：任务胶囊与排队条让位 ---------- */
+.phone.ime-open .taskpillwrapper,
+.phone.ime-open .queuestrip{display:none}
+.phone.ime-open .goalbanner{display:none}
+.imebadge{
+  position:absolute;left:0;right:0;bottom:0;height:210px;
+  background:linear-gradient(to bottom,rgba(20,30,46,.0),rgba(20,30,46,.96) 28%);
+  display:none;align-items:flex-end;justify-content:center;padding-bottom:26px;
+  font-size:11px;color:#8ea3bd;letter-spacing:.4px;pointer-events:none;
+}
+.phone.ime-open .imebadge{display:flex}
+
+/* 滚动条模拟 */
+.phone ::-webkit-scrollbar{width:3px}
+.phone ::-webkit-scrollbar-thumb{background:var(--outline);border-radius:2px}
+</style>
+</head>
+<body>
+
+<h1>R031 效果图 · 应用图标 / 任务与目标 / 排队重构</h1>
+<p class="lede top">
+  三块改动：<b>①</b> 换应用图标 + 应用名改 <code>DSHRM</code>；<b>②</b> 会话页新增<b>目标横幅</b>（可收起到顶栏）与<b>任务胶囊</b>；<b>③</b> 排队区重构（单条显示内容 + 三图标、多条折叠）。<br>
+  <b style="color:#8fd3f4">v2 按你的 7 条反馈改过</b>：目标删除二次确认 · 胶囊全完成保留绿勾 · 展开状态不记忆 · <b>目标与任务解耦</b>（已查 DSH 源码，见下方证据）· 排队与目标都改<b>行内编辑</b>（单行 + 左右滑动，编辑时只显示 ✓/×）· 胶囊与排队<b>互斥展开</b>防挤压 · <b>输入法弹出时三者全部让位</b> · 目标横幅可收起。
+  <b>可直接点击交互</b>：点目标收起/展开、点暂停/开始、点编辑进内联表单、点胶囊与排队条展开、点输入框模拟键盘弹出。
+</p>
+
+<!-- ============================================================ -->
+<section id="s0">
+<h2>✱ 应用图标与应用名</h2>
+<p class="lede">
+  应用名 <code>DSH 助手</code> → <b><code>DSHRM</code></b>（<span class="k">strings.xml</span> 的 <code>app_name</code>）。<br>
+  图标用你给的这张图，按 Android 自适应图标的三层结构落地：<b>前景</b>是角色本体，<b>背景</b>取图左上角那抹天蓝 → 淡紫的渐变（这样在圆形 / 方形 / squircle 等各种启动器裁切下都不会露出黑边），<b>单色层</b>（Android 13 主题图标）用角色轮廓剪影。下面是三种实际裁切效果。
+</p>
+<div class="iconrow">
+  <div class="iconcase">
+    <div class="appicon"><img src="R031-app-icon.png" alt="DSHRM 图标"></div>
+    <div class="spec">96dp · squircle 22dp</div>
+  </div>
+  <div class="iconcase">
+    <div class="appicon round"><img src="R031-app-icon.png" alt="圆形裁切"></div>
+    <div class="spec">圆形裁切</div>
+  </div>
+  <div class="iconcase">
+    <div class="appicon sm"><img src="R031-app-icon.png" alt="小尺寸"></div>
+    <div class="spec">56dp · 通知栏/设置页</div>
+  </div>
+  <div class="iconcase">
+    <div class="appicon xs"><img src="R031-app-icon.png" alt="极小"></div>
+    <div class="spec">40dp · 任务切换器</div>
+  </div>
+  <div class="col" style="gap:10px">
+    <div class="launcher">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div class="ph">搜索应用</div>
+        <div style="font-size:10px;color:#8ea3bd">01:20</div>
+      </div>
+      <div class="lgrid">
+        <div class="app"><div class="appicon sm"><img src="R031-app-icon.png" alt=""></div><span>DSHRM</span></div>
+        <div class="app"><div class="mockicon" style="background:#3d5a80">✉</div><span>信息</span></div>
+        <div class="app"><div class="mockicon" style="background:#2e6b4f">✆</div><span>电话</span></div>
+        <div class="app"><div class="mockicon" style="background:#6b3d5a">◐</div><span>相机</span></div>
+      </div>
+    </div>
+    <div class="spec">启动器里的实际显示（名称 DSHRM）</div>
+  </div>
+</div>
+<div class="notes" style="margin-top:16px;max-width:1180px">
+  <b>落地细节（开发时执行）</b>
+  <ul>
+    <li>把 1024×1024 原图按 <b>66% 安全区</b>缩进前景层：`ic_launcher_foreground.xml` 或用 PNG 前景（108dp 画布，内容控制在中间 72dp 内），否则圆角裁切会切到头发。</li>
+    <li>背景层 `ic_launcher_background` 取图上角渐变（约 <span class="k">#8FD3F4 → #C9B6F0</span>），不要留透明——透明在部分启动器上会变黑。</li>
+    <li>单色层 `ic_launcher_monochrome`：只保留角色头部与盘子的剪影，Android 13+ 主题图标才好看。</li>
+    <li>同时更新 <code>mipmap-anydpi/ic_launcher.xml</code> 三层引用；<code>roundIcon</code> 也要指过去。</li>
+  </ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s1">
+<h2>✱ 先回答你的第 4 点：目标暂停 ≠ 对话停止</h2>
+<p class="lede">
+  你让我去查 DSH 源码确认「目标暂停后任务还跑不跑」。结论：<b>两者独立，你的直觉是对的</b>。证据（<span class="k">F:\DSH\resources\app.asar</span> 里的客户端 bundle）：
+</p>
+<div style="background:#0d1621;border:1px solid #1e2a3a;border-radius:12px;padding:16px 20px;margin:14px 0 6px;max-width:1180px">
+  <div style="font-size:12.5px;line-height:1.95;color:#9db2ca">
+    <b style="color:#c3d3e6">① goal 有两个互相独立的维度</b><br>
+    <code>phase</code>（durable，持久层）∈ <code>active / paused / blocked / complete</code>；
+    <code>activation</code>（<b>进程本地</b>，不是会话状态）∈ <code>armed / disarmed</code>。源码里判断「该显示暂停还是继续」用的是两者的组合：<br>
+    <span style="color:#8fb8e8;font-family:var(--mono);font-size:11.5px">const showResume = goal.phase === "paused" || goal.phase === "active" &amp;&amp; activation === "disarmed";</span><br><br>
+    <b style="color:#c3d3e6">② <code>goals/pause</code> 只改持久状态，不取消任何正在跑的轮次</b><br>
+    文档原文：四个变更（<code>edit / pause / resume / clear</code>）都是路由到 Host GoalService，<b>由它排队一条「模型可见的 goal 上下文消息」</b>。整个 bundle 里 goal 与 <code>cancel</code> / <code>interrupt</code> / <code>abort</code> <b>零关联</b>——没有「暂停即中止」这回事。<br><br>
+    <b style="color:#c3d3e6">③ 目标只影响「下一轮要不要自动继续」</b><br>
+    <code>runMode</code> 的取值 <code>plan.active ? "plan" : goal.phase === "active" ? "goal" : "default"</code> 只决定这一轮以什么身份跑，且它只被用作埋点字段（<code>send_button_click</code> 的 <code>run_mode</code>）。它不是运行开关。<br><br>
+    <b style="color:#c3d3e6">结论（落到 UI）</b><br>
+    · 目标暂停 → <b>不再自动注入「继续目标」的触发</b>；当前这一轮对话<b>继续输出完</b>，任务列表<b>照常推进</b>。<br>
+    · 所以<b>任务胶囊不跟随目标变色</b>——它只看 <code>todos[].status</code>。目标暂停时胶囊仍是旋转圈（如果确实还有 in_progress 的任务）。<br>
+    · 反过来也一样：任务全部完成不代表目标完成；目标 complete 时横幅<b>直接不渲染</b>（DSH 的行为：<code>goal.phase === "complete"</code> → return null）。
+  </div>
+</div>
+<p class="lede" style="margin-top:10px">
+  <b style="color:#f2c14e">注意：这里只借用了「语义关系」，布局一律按你的提示词来</b>——目标是顶部横幅、任务胶囊在排队条上方、排队条贴输入框。DSH 桌面端其实把三者都排在输入框上方（dock 顺序 todo:0 / goal:10 / queue:20），但那是桌面端的布局，不搬到手机上。
+</p>
+
+<h2>① 目标横幅（会话页顶部）</h2>
+<p class="lede">
+  目标存在时，在<b>消息列表上方</b>挂一条圆角横幅。左侧一条 2dp 竖线用颜色表达状态（<b>蓝＝进行中</b>、<b>琥珀＝已暂停</b>、<b>绿＝已完成</b>），右侧三个<b>纯图标</b>按钮共占 96dp，不抢正文宽度。<br>
+  <b>进行中时整条淡闪烁</b>（呼吸阴影 + 竖线明暗，2600ms 一轮），提示「这个会话正在为一个目标跑」。暂停 / 完成后停止动画——只有真的在跑才该动。<br>
+  中间的播放 / 暂停按钮<b>随状态互换</b>：进行中显示「暂停」，暂停中显示「开始」（这是同一个按钮的两种形态，不是两个按钮）。
+</p>
+
+<div class="row">
+  <!-- 进行中 -->
+  <div class="col">
+    <div class="phone">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></div>
+        <div class="title"><div class="l1">app开发 main</div><div class="l2">F:\bot</div></div>
+        <div class="goalchip" title="展开目标">
+          <div class="halo"></div>
+          <svg class="ico sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg>
+        </div>
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg></div>
+      </div>
+
+      <!-- 目标横幅：进行中 -->
+      <div class="goalbanner active" title="点击收起目标">
+        <div class="gtarget"></div>
+        <div class="gicon">
+          <svg class="ico sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg>
+        </div>
+        <div class="gtext">
+          <div class="glabel"><span class="dot"></span>目标进行中 · 第 3 轮 / 12</div>
+          <div class="gobj">完成 R031 三项需求并按既有流程交付</div>
+        </div>
+        <div class="gacts">
+          <div class="gact pause" title="暂停">
+            <svg class="ico" viewBox="0 0 24 24"><rect x="7" y="5" width="3.5" height="14" rx="1.2" fill="currentColor" stroke="none"/><rect x="13.5" y="5" width="3.5" height="14" rx="1.2" fill="currentColor" stroke="none"/></svg>
+          </div>
+          <div class="gact" title="编辑">
+            <svg class="ico" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          </div>
+          <div class="gact del" title="删除">
+            <svg class="ico" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="chatlist">
+        <div class="assist">
+          <div class="rail"></div>
+          <div class="body">
+            目标已建立：<b>完成 R031 三项需求并按既有流程交付</b>。我先摸清现有的排队与目标投影结构。
+            <div class="meta">01:12</div>
+          </div>
+        </div>
+        <div class="ubub"><div class="b">先画原型，我看到效果再决定开发</div></div>
+        <div class="assist">
+          <div class="rail"></div>
+          <div class="body">
+            收到。原型会覆盖目标横幅、任务胶囊、排队区三块，数据形状按真实日志来。
+            <div class="meta">01:13</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 任务胶囊 -->
+      <div class="taskpillwrapper">
+        <div class="taskpill open">
+          <div class="spin"></div>
+          <div class="lbl">任务进行中</div>
+          <div class="cnt"><b>3</b>/7</div>
+          <div class="chev">
+            <svg class="ico xs" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg>
+          </div>
+        </div>
+        <!-- 展开的任务列表 -->
+        <div class="taskpanel" style="margin-top:6px">
+          <div class="tph">
+            <svg class="ico xs" viewBox="0 0 24 24" style="color:var(--onSurfaceVariant)"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+            <div class="t">任务列表</div>
+            <div class="n">3 / 7 已完成</div>
+          </div>
+          <div class="tasklist">
+            <div class="taskrow done">
+              <div class="marker">✓</div>
+              <div class="tx">摸清 goal / todos 投影与排队数据结构</div>
+              <div class="st">完成</div>
+            </div>
+            <div class="taskrow done">
+              <div class="marker">✓</div>
+              <div class="tx">画目标横幅与任务胶囊原型</div>
+              <div class="st">完成</div>
+            </div>
+            <div class="taskrow done">
+              <div class="marker">✓</div>
+              <div class="tx">重构排队区（单条 / 多条折叠）</div>
+              <div class="st">完成</div>
+            </div>
+            <div class="taskrow doing">
+              <div class="marker"></div>
+              <div class="tx">确认双端同步方案（goal / inbox 事件源）</div>
+              <div class="st">进行中</div>
+            </div>
+            <div class="taskrow todo">
+              <div class="marker"></div>
+              <div class="tx">实现并补渲染测试</div>
+              <div class="st">待办</div>
+            </div>
+            <div class="taskrow todo">
+              <div class="marker"></div>
+              <div class="tx">全量构建 + 单测 + lint</div>
+              <div class="st">待办</div>
+            </div>
+            <div class="taskrow todo">
+              <div class="marker"></div>
+              <div class="tx">真机验收 + 记录文档 + 提交推送</div>
+              <div class="st">待办</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="composerwrap">
+        <div class="composer">
+          <div class="r1">
+            <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+            <div class="ph">描述你的任务，或先聊几句…</div>
+            <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>目标进行中 + 任务胶囊展开</b><br>横幅整条淡呼吸；胶囊里有旋转圈与 3/7</div>
+  </div>
+
+  <!-- 暂停态 -->
+  <div class="col">
+    <div class="phone">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></div>
+        <div class="title"><div class="l1">app开发 main</div><div class="l2">F:\bot</div></div>
+        <div class="goalchip" title="展开目标">
+          <div class="halo"></div>
+          <svg class="ico sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg>
+        </div>
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg></div>
+      </div>
+
+      <!-- 目标横幅：已暂停（无动画，中间按钮变「开始」） -->
+      <div class="goalbanner paused" title="点击收起目标">
+        <div class="gtarget"></div>
+        <div class="gicon">
+          <svg class="ico sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 9v6M14 9v6"/></svg>
+        </div>
+        <div class="gtext">
+          <div class="glabel"><span class="dot"></span>目标已暂停 · 第 3 轮 / 12</div>
+          <div class="gobj">完成 R031 三项需求并按既有流程交付</div>
+        </div>
+        <div class="gacts">
+          <div class="gact play" title="开始">
+            <svg class="ico" viewBox="0 0 24 24"><path d="M7 4.5l12 7.5-12 7.5z" fill="currentColor" stroke="none"/></svg>
+          </div>
+          <div class="gact" title="编辑">
+            <svg class="ico" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          </div>
+          <div class="gact del" title="删除">
+            <svg class="ico" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="chatlist">
+        <div class="assist">
+          <div class="rail"></div>
+          <div class="body">
+            已暂停。进度停在「确认双端同步方案」，随时可以继续。
+            <div class="meta">01:18</div>
+          </div>
+        </div>
+        <div class="ubub"><div class="b">先暂停，我看看别的</div></div>
+      </div>
+
+      <!-- 任务胶囊：暂停时不再转圈，改成静态琥珀点 -->
+      <div class="taskpillwrapper">
+        <div class="taskpill" style="border-color:rgba(242,193,78,.35)">
+          <div class="spin" style="animation:none;border:1.8px solid rgba(242,193,78,.28);border-top-color:var(--tertiary)"></div>
+          <div class="lbl" style="color:var(--tertiary)">任务已暂停</div>
+          <div class="cnt" style="color:var(--tertiary)"><b style="color:var(--tertiary)">3</b>/7</div>
+          <div class="chev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></div>
+        </div>
+      </div>
+
+      <!-- 单条排队：直接显示内容 + 三个图标按钮 -->
+      <div class="queuestrip">
+        <div class="qsingle">
+          <div class="qtop">
+            <div class="qdot"></div>
+            <div class="qlbl">排队中 · 1 条</div>
+            <div class="qacts">
+              <div class="qact steer" title="插队">
+                <svg class="ico sm" viewBox="0 0 24 24"><path d="M13 3l-2 7h4l-2 8"/><path d="M6 21V9a3 3 0 013-3h1"/></svg>
+              </div>
+              <div class="qact" title="编辑">
+                <svg class="ico sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+              </div>
+              <div class="qact" title="删除">
+                <svg class="ico sm" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
+              </div>
+            </div>
+          </div>
+          <div class="qtxt">再把排队区的三个按钮也换成图标，注意别挤</div>
+        </div>
+      </div>
+
+      <div class="composerwrap">
+        <div class="composer">
+          <div class="r1">
+            <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+            <div class="ph">描述你的任务，或先聊几句…</div>
+            <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>目标已暂停 + 单条排队</b><br>中间按钮变「开始」；排队条显示内容 + 插队/编辑/删除三个图标</div>
+  </div>
+
+  <div class="notes">
+    <b>关键取值</b>
+    <ul>
+      <li><b>目标横幅</b>：左右外边距 12dp、圆角 14dp、内边距 <span class="k">9/10/9/12</span>；左侧 2dp 状态竖线；右侧三个按钮各 <b>32dp 触控圆</b>，合计 96dp。</li>
+      <li><b>状态色</b>：进行中 <span class="k">primary #5AA2FF</span>、暂停 <span class="k">tertiary #F2C14E</span>、完成 <span class="k">running #4ADE80</span>。与现有「运行中绿、重连琥珀」语义一致。</li>
+      <li><b>淡闪烁</b>：只动<b>阴影外扩 0→2dp</b> 与竖线透明度 <span class="k">.35↔.95</span>，周期 2600ms。不动背景色——整块闪会干扰读正文。</li>
+      <li><b>目标文案</b>：最多 2 行，超出省略；`objective` 常是一长句。</li>
+      <li><b>轮次</b>：<code>roundsStarted / maxGoalRounds</code>（真实日志里是 <span class="k">3 / 12</span> 这种形态）。</li>
+      <li><b>删除</b>要二次确认（危险操作），原型未展开该弹窗。</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s2">
+<h2>② 任务胶囊的四种状态</h2>
+<p class="lede">
+  胶囊只在<b>有任务时</b>出现（无任务就完全不占位置）。它挂在<b>输入框上方、排队条之上</b>——因为排队条是贴着输入框的，任务胶囊要让位到更外层。<br>
+  计数 <b>n/m</b>：<code>n</code> = <code>status == completed</code> 的条数，<code>m</code> = 全部条数。进行中时左侧是旋转圈，全部完成时换成绿色对勾并停止动画。
+</p>
+<div class="row">
+  <div class="col">
+    <div class="phone" style="height:300px">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div style="flex:1 1 auto"></div>
+      <div class="taskpillwrapper">
+        <div class="taskpill"><div class="spin"></div><div class="lbl">任务进行中</div><div class="cnt"><b>3</b>/7</div>
+          <div class="chev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></div></div>
+      </div>
+      <div class="composerwrap"><div class="composer"><div class="r1">
+        <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+        <div class="ph">描述你的任务…</div>
+        <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+      </div></div></div>
+    </div>
+    <div class="caption"><b>A · 进行中</b><br>旋转圈 + 3/7（蓝色数字）</div>
+  </div>
+
+  <div class="col">
+    <div class="phone" style="height:300px">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div style="flex:1 1 auto"></div>
+      <div class="taskpillwrapper">
+        <div class="taskpill"><div class="spin done">✓</div><div class="lbl">任务全部完成</div><div class="cnt"><b>7</b>/7</div>
+          <div class="chev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></div></div>
+      </div>
+      <div class="composerwrap"><div class="composer"><div class="r1">
+        <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+        <div class="ph">描述你的任务…</div>
+        <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+      </div></div></div>
+    </div>
+    <div class="caption"><b>B · 全部完成</b><br>绿勾 + 7/7（绿色数字），停止动画</div>
+  </div>
+
+  <div class="col">
+    <div class="phone" style="height:300px">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div style="flex:1 1 auto"></div>
+      <div class="taskpillwrapper">
+        <div class="taskpill" style="border-color:rgba(242,193,78,.35)">
+          <div class="spin" style="animation:none;border:1.8px solid rgba(242,193,78,.28);border-top-color:var(--tertiary)"></div>
+          <div class="lbl" style="color:var(--tertiary)">任务已暂停</div>
+          <div class="cnt" style="color:var(--tertiary)"><b style="color:var(--tertiary)">3</b>/7</div>
+          <div class="chev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></div></div>
+      </div>
+      <div class="composerwrap"><div class="composer"><div class="r1">
+        <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+        <div class="ph">描述你的任务…</div>
+        <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+      </div></div></div>
+    </div>
+    <div class="caption"><b>C · 已暂停</b><br>琥珀圈（不转）+ 琥珀数字</div>
+  </div>
+
+  <div class="col">
+    <div class="phone" style="height:300px">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div style="flex:1 1 auto"></div>
+      <div class="composerwrap"><div class="composer"><div class="r1">
+        <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+        <div class="ph">描述你的任务…</div>
+        <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+      </div></div></div>
+    </div>
+    <div class="caption"><b>D · 无任务</b><br>胶囊完全不出现，不占任何高度</div>
+  </div>
+</div>
+
+<div class="row">
+  <div class="col">
+    <div class="phone" style="height:520px">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div style="flex:1 1 auto"></div>
+      <div class="taskpillwrapper">
+        <div class="taskpill open"><div class="spin"></div><div class="lbl">任务进行中</div><div class="cnt"><b>1</b>/3</div>
+          <div class="chev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></div></div>
+        <div class="taskpanel" style="margin-top:6px">
+          <div class="tph">
+            <svg class="ico xs" viewBox="0 0 24 24" style="color:var(--onSurfaceVariant)"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+            <div class="t">任务列表</div><div class="n">1 / 3 已完成</div>
+          </div>
+          <div class="tasklist">
+            <div class="taskrow done"><div class="marker">✓</div><div class="tx">画原型</div><div class="st">完成</div></div>
+            <div class="taskrow doing"><div class="marker"></div><div class="tx">等你确认效果</div><div class="st">进行中</div></div>
+            <div class="taskrow todo"><div class="marker"></div><div class="tx">开始开发</div><div class="st">待办</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="composerwrap"><div class="composer"><div class="r1">
+        <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+        <div class="ph">描述你的任务…</div>
+        <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+      </div></div></div>
+    </div>
+    <div class="caption"><b>少量任务（3 条）</b><br>面板按内容自然高度，不出现滚动条</div>
+  </div>
+
+  <div class="col">
+    <div class="phone" style="height:520px">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div style="flex:1 1 auto"></div>
+      <div class="taskpillwrapper">
+        <div class="taskpill open"><div class="spin"></div><div class="lbl">任务进行中</div><div class="cnt"><b>2</b>/14</div>
+          <div class="chev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></div></div>
+        <div class="taskpanel" style="margin-top:6px">
+          <div class="tph">
+            <svg class="ico xs" viewBox="0 0 24 24" style="color:var(--onSurfaceVariant)"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+            <div class="t">任务列表</div><div class="n">2 / 14 已完成</div>
+          </div>
+          <div class="tasklist">
+            <div class="taskrow done"><div class="marker">✓</div><div class="tx">摸清数据结构</div><div class="st">完成</div></div>
+            <div class="taskrow done"><div class="marker">✓</div><div class="tx">画原型</div><div class="st">完成</div></div>
+            <div class="taskrow doing"><div class="marker"></div><div class="tx">等你确认效果后再开发</div><div class="st">进行中</div></div>
+            <div class="taskrow todo"><div class="marker"></div><div class="tx">图标资源落地</div><div class="st">待办</div></div>
+            <div class="taskrow todo"><div class="marker"></div><div class="tx">目标横幅与胶囊</div><div class="st">待办</div></div>
+            <div class="taskrow todo"><div class="marker"></div><div class="tx">排队区重构</div><div class="st">待办</div></div>
+            <div class="taskrow todo"><div class="marker"></div><div class="tx">双端同步校验</div><div class="st">待办</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="composerwrap"><div class="composer"><div class="r1">
+        <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+        <div class="ph">描述你的任务…</div>
+        <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+      </div></div></div>
+    </div>
+    <div class="caption"><b>大量任务（14 条）</b><br>面板限高 <span class="k">196dp</span> 后内部滚动，右侧细滚动条</div>
+  </div>
+
+  <div class="notes">
+    <b>任务列表的排布规则</b>
+    <ul>
+      <li><b>顺序</b>：按 <code>todos[]</code> 原始顺序，不重排。用户写的顺序就是他的思路顺序。</li>
+      <li><b>限高</b>：<span class="k">max-height: 196dp</span>（约 7 条）。超过内部滚动，滚动条 3dp 宽、颜色 <span class="k">outline</span>。</li>
+      <li><b>三种状态点</b>：完成＝实心绿 + 勾、进行中＝旋转圈（primary）、待办＝空心灰圈。颜色语义复用现有 <span class="k">running / primary / outline</span>。</li>
+      <li><b>完成的条目</b>文字变 <span class="k">onSurfaceVariant</span> + 删除线，让「还剩什么」一眼可见。</li>
+      <li><b>进行中</b>的那条加粗，且 <code>in_progress</code> 在 DSH 里<b>最多只有一条</b>（真实日志核实）。</li>
+      <li><b>点胶囊外部</b>收起；再点胶囊也收起。</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s3">
+<h2>③ 排队区重构</h2>
+<p class="lede">
+  <b>现状</b>：排队条是一个灰色块，里面「排队中 N 条」+ 每条消息一个完整气泡（带时间与 footer 文案），操作是三个<b>文字按钮</b>。多条时整块很高，把消息区挤掉一截。<br>
+  <b>改成</b>：<b>单条</b>时显示那一行的内容 + 右侧三个<b>图标</b>按钮（插队 / 编辑 / 删除）；<b>多条</b>时收成<b>一行</b>，只显示「排队中 · N 条」与展开箭头，<b>不显示任何消息内容</b>；点开后才逐条展开，每条同样带三个图标按钮，列表限高滚动。
+</p>
+<div class="row">
+  <div class="col">
+    <div class="phone" style="height:420px">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></div>
+        <div class="title"><div class="l1">app开发 main</div><div class="l2">F:\bot</div></div>
+        <div class="goalchip" title="展开目标">
+          <div class="halo"></div>
+          <svg class="ico sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg>
+        </div>
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg></div>
+      </div>
+      <div class="chatlist" style="justify-content:flex-end;padding-bottom:8px">
+        <div class="ubub"><div class="b">把排队区重构一下</div></div>
+      </div>
+      <div class="queuestrip">
+        <div class="qsingle">
+          <div class="qtop">
+            <div class="qdot"></div>
+            <div class="qlbl">排队中 · 等当前轮结束后发出</div>
+            <div class="qacts">
+              <div class="qact steer" title="插队"><svg class="ico sm" viewBox="0 0 24 24"><path d="M13 3l-2 7h4l-2 8"/><path d="M6 21V9a3 3 0 013-3h1"/></svg></div>
+              <div class="qact" title="编辑"><svg class="ico sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></div>
+              <div class="qact" title="删除"><svg class="ico sm" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></div>
+            </div>
+          </div>
+          <div class="qtxt">再把排队区的三个按钮也换成图标，注意别挤</div>
+        </div>
+      </div>
+      <div class="composerwrap"><div class="composer"><div class="r1">
+        <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+        <div class="ph">描述你的任务…</div>
+        <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+      </div></div></div>
+    </div>
+    <div class="caption"><b>单条 · 收起</b><br>显示内容（最多 2 行）+ 三个图标按钮，总高约 <span class="k">68dp</span></div>
+  </div>
+
+  <div class="col">
+    <div class="phone" style="height:420px">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></div>
+        <div class="title"><div class="l1">app开发 main</div><div class="l2">F:\bot</div></div>
+        <div class="goalchip" title="展开目标">
+          <div class="halo"></div>
+          <svg class="ico sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg>
+        </div>
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg></div>
+      </div>
+      <div class="chatlist" style="justify-content:flex-end;padding-bottom:8px">
+        <div class="ubub"><div class="b">把排队区重构一下</div></div>
+        <div class="assist"><div class="rail"></div><div class="body">收到，我把单条与多条两种形态都做出来。<div class="meta">01:19</div></div></div>
+      </div>
+      <div class="queuestrip">
+        <div class="qmulti">
+          <div class="qstack"><i></i><i></i><i></i></div>
+          <div class="qlbl">排队中</div>
+          <div class="qn">3 条</div>
+          <div class="qchev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></div>
+        </div>
+      </div>
+      <div class="composerwrap"><div class="composer"><div class="r1">
+        <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+        <div class="ph">描述你的任务…</div>
+        <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+      </div></div></div>
+    </div>
+    <div class="caption"><b>多条 · 收起</b><br>只显示「排队中 3 条」+ 箭头，<b>不显示任何内容</b>，固定高 <span class="k">44dp</span></div>
+  </div>
+
+  <div class="col">
+    <div class="phone" style="height:560px">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></div>
+        <div class="title"><div class="l1">app开发 main</div><div class="l2">F:\bot</div></div>
+        <div class="goalchip" title="展开目标">
+          <div class="halo"></div>
+          <svg class="ico sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg>
+        </div>
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg></div>
+      </div>
+      <div class="chatlist" style="justify-content:flex-end;padding-bottom:8px">
+        <div class="ubub"><div class="b">把排队区重构一下</div></div>
+      </div>
+      <div class="queuestrip">
+        <div class="qmulti open">
+          <div class="qstack"><i></i><i></i><i></i></div>
+          <div class="qlbl">排队中</div>
+          <div class="qn">3 条</div>
+          <div class="qchev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></div>
+        </div>
+        <div class="qlist" style="margin-top:6px">
+          <div class="qsingle">
+            <div class="qtop"><div class="qdot"></div><div class="qlbl">等当前轮结束后发出</div>
+              <div class="qacts">
+                <div class="qact steer" title="插队"><svg class="ico sm" viewBox="0 0 24 24"><path d="M13 3l-2 7h4l-2 8"/><path d="M6 21V9a3 3 0 013-3h1"/></svg></div>
+                <div class="qact" title="编辑"><svg class="ico sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></div>
+                <div class="qact" title="删除"><svg class="ico sm" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></div>
+              </div>
+            </div>
+            <div class="qtxt">再把排队区的三个按钮也换成图标，注意别挤</div>
+          </div>
+          <div class="qsingle">
+            <div class="qtop"><div class="qdot"></div><div class="qlbl">等当前轮结束后发出</div>
+              <div class="qacts">
+                <div class="qact steer" title="插队"><svg class="ico sm" viewBox="0 0 24 24"><path d="M13 3l-2 7h4l-2 8"/><path d="M6 21V9a3 3 0 013-3h1"/></svg></div>
+                <div class="qact" title="编辑"><svg class="ico sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></div>
+                <div class="qact" title="删除"><svg class="ico sm" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></div>
+              </div>
+            </div>
+            <div class="qtxt">任务胶囊要放在排队条上面，别搞反了</div>
+          </div>
+          <div class="qsingle">
+            <div class="qtop"><div class="qdot"></div><div class="qlbl">等当前轮结束后发出</div>
+              <div class="qacts">
+                <div class="qact steer" title="插队"><svg class="ico sm" viewBox="0 0 24 24"><path d="M13 3l-2 7h4l-2 8"/><path d="M6 21V9a3 3 0 013-3h1"/></svg></div>
+                <div class="qact" title="编辑"><svg class="ico sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></div>
+                <div class="qact" title="删除"><svg class="ico sm" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></div>
+              </div>
+            </div>
+            <div class="qtxt">另外记得多端同步，别一边删了另一边还在</div>
+          </div>
+        </div>
+      </div>
+      <div class="composerwrap"><div class="composer"><div class="r1">
+        <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+        <div class="ph">描述你的任务…</div>
+        <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+      </div></div></div>
+    </div>
+    <div class="caption"><b>多条 · 展开</b><br>每条都有三图标；列表限高 <span class="k">210dp</span> 后滚动</div>
+  </div>
+
+  <div class="notes">
+    <b>排队区的规则</b>
+    <ul>
+      <li><b>单条</b>：显示内容（<span class="k">-webkit-line-clamp:2</span>，超过 2 行省略）+ 右侧三图标。总高约 68dp。</li>
+      <li><b>多条</b>：收起态<b>固定 44dp 一行</b>，只有「层叠图标 + 排队中 + N 条 + 箭头」，<b>不含任何消息内容</b>——这是你明确要求的「不展示实际信息内容」。</li>
+      <li><b>展开态</b>：列表限高 <span class="k">210dp</span>，内部滚动。每条是一个小卡（圆角 14dp，<span class="k">surfaceVariant</span> 底）。</li>
+      <li><b>三图标</b>：插队（闪电上箭头，仅 <code>generating</code> 时给）、编辑（铅笔）、删除（垃圾桶）。每个 <b>28dp 触控圆</b>，比文字按钮省约 96dp 宽。</li>
+      <li><b>未确认的排队消息</b>（本地回声还没被 <code>agent/inbox/spliced</code> 确认）：三按钮不显示，因为服务端只认 <code>itemId</code>，点了也发不出去。这是现有 <span class="k">R009</span> 的结论，保留。</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s4">
+<h2>④ 三者同时出现的排布顺序</h2>
+<p class="lede">
+  你特别提到的排布问题：<b>排队条贴着输入框，任务胶囊要在排队条之上</b>。所以自下而上的顺序是
+  <b>输入框 → 排队条 → 任务胶囊 → 消息区</b>；目标横幅在消息区<b>上方</b>（顶栏下面），不参与这个堆叠。<br>
+  三条都出现时，底部一共占掉约 <span class="k">52 + 68 + 34 + 间距 = 170dp</span>，加上目标横幅 56dp，屏幕可用消息区仍然有 550dp 左右（360×800 机型）。
+</p>
+<div class="row">
+  <div class="col">
+    <div class="phone tall">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></div>
+        <div class="title"><div class="l1">app开发 main</div><div class="l2">F:\bot</div></div>
+        <div class="goalchip" title="展开目标">
+          <div class="halo"></div>
+          <svg class="ico sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg>
+        </div>
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg></div>
+      </div>
+
+      <div class="goalbanner active" title="点击收起目标">
+        <div class="gtarget"></div>
+        <div class="gicon"><svg class="ico sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg></div>
+        <div class="gtext">
+          <div class="glabel"><span class="dot"></span>目标进行中 · 第 3 轮 / 12</div>
+          <div class="gobj">完成 R031 三项需求并按既有流程交付</div>
+        </div>
+        <div class="gacts">
+          <div class="gact pause"><svg class="ico" viewBox="0 0 24 24"><rect x="7" y="5" width="3.5" height="14" rx="1.2" fill="currentColor" stroke="none"/><rect x="13.5" y="5" width="3.5" height="14" rx="1.2" fill="currentColor" stroke="none"/></svg></div>
+          <div class="gact"><svg class="ico" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></div>
+          <div class="gact del"><svg class="ico" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></div>
+        </div>
+      </div>
+
+      <div class="chatlist">
+        <div class="assist"><div class="rail"></div><div class="body">
+          目标已建立。任务列表里第一步是摸清投影结构，我先把排队区也一起看了。
+          <div class="meta">01:12</div>
+        </div></div>
+        <div class="ubub"><div class="b">先画原型，顺便把排队区也重构</div></div>
+        <div class="assist"><div class="rail"></div><div class="body">
+          收到。原型里三条会同时出现，我按「输入框 → 排队 → 任务胶囊」的顺序排。
+          <div class="meta">01:14</div>
+        </div></div>
+        <div class="ubub"><div class="b">对，胶囊要在排队框上面</div></div>
+        <div class="divider">第 3 轮结束</div>
+      </div>
+
+      <!-- 顺序：任务胶囊 → 排队条 → 输入框 -->
+      <div class="taskpillwrapper" style="padding-bottom:0">
+        <div class="taskpill"><div class="spin"></div><div class="lbl">任务进行中</div><div class="cnt"><b>3</b>/7</div>
+          <div class="chev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></div></div>
+      </div>
+
+      <div class="queuestrip">
+        <div class="qmulti">
+          <div class="qstack"><i></i><i></i><i></i></div>
+          <div class="qlbl">排队中</div>
+          <div class="qn">3 条</div>
+          <div class="qchev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></div>
+        </div>
+      </div>
+
+      <div class="composerwrap" style="padding-top:0">
+        <div class="composer"><div class="r1">
+          <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+          <div class="ph">描述你的任务…</div>
+          <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+        </div></div>
+      </div>
+    </div>
+    <div class="caption"><b>目标 + 任务 + 排队 同时出现</b><br>自下而上：输入框 → 排队条 → 任务胶囊</div>
+  </div>
+
+  <div class="notes" style="max-width:560px">
+    <b>为什么是这个顺序</b>
+    <ul>
+      <li><b>排队条贴身</b>：它是「即将发出的内容」，紧贴输入框符合「我刚打的东西排在这」的直觉。这条是用户 m21177 定的，不变。</li>
+      <li><b>任务胶囊放在排队条外侧</b>：它描述的是「这个会话的宏观进度」，属于比排队更外层的上下文。放在排队条下面会让两者看起来是同一层信息。</li>
+      <li><b>目标横幅在顶部</b>：它是会话级元信息（这个会话为什么存在），与底部「当前在做什么」形成头尾呼应，不抢输入区。</li>
+      <li><b>都不挡消息</b>：三者都有明确的最大高度，且消息区是 <code>flex:1</code> 自适应收缩，不会出现「底部把内容挤没」。</li>
+    </ul>
+    <b style="display:block;margin-top:14px">双端同步（第 4 条注意事项）</b>
+    <ul>
+      <li><b>目标</b>：`session/follow` 快照的 <code>projections.values.goal</code> 是唯一真相；实时变化走 <code>goal/change</code> 事件（已核实 <code>operation</code> ∈ create / resume / pause / edit / complete / clear，<code>goal.phase</code> ∈ active / paused / complete）。手机端点暂停 → 调用 <code>update_goal</code> 工具或等价 RPC → 服务端广播 <code>goal/change</code> → 桌面端与手机端<b>都从同一条事件更新</b>，不存在两端各自维护状态。</li>
+      <li><b>任务</b>：<code>projections.values.todos</code> + <code>tool/call</code> 的 <code>todo_write</code>。手机端只读，不提供编辑——避免两端同时写导致覆盖。</li>
+      <li><b>排队</b>：<code>projections.values.inbox</code>（快照）+ <code>agent/inbox/spliced</code>（增量）。删除/编辑/插队都走 <code>session/updateQueue</code>，服务端确认后通过 splice 事件回来，两端同源。<b>本地不做乐观删除</b>——删了但服务端拒绝会导致「一端有、一端没有」。</li>
+      <li>所有三个都有 <code>revision</code> 或 <code>seq</code> 可比对，客户端必须<b>以服务端为准</b>，本地只做「请求中」的临时态（≤2s），失败则回滚。</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s4b">
+<h2>④b 两者同时出现时：互斥展开 + 输入法让位</h2>
+<p class="lede">
+  你提的两个边界情况，这里是明确规则。
+</p>
+
+<h3>A · 任务列表与排队列表同时存在时的展开规则</h3>
+<p class="lede">
+  <b>互斥展开</b>：同一时刻最多只有一个展开。点开任务列表时，若排队列表是展开的，<b>自动收起排队列表</b>；反之亦然。<br>
+  这样不需要算「两个都展开会不会超屏」——从根上避免。收起的那一个始终保留一行摘要（胶囊 / 一行排队条），信息不丢。
+</p>
+<div class="row">
+  <div class="col">
+    <div class="phone" style="height:600px">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></div>
+        <div class="title"><div class="l1">app开发 main</div><div class="l2">F:\bot</div></div>
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg></div>
+      </div>
+      <div class="chatlist" style="justify-content:flex-end">
+        <div class="ubub"><div class="b">任务和排队都展开看看</div></div>
+      </div>
+
+      <!-- 任务胶囊：展开 -->
+      <div class="taskpillwrapper">
+        <div class="taskpill open"><div class="spin"></div><div class="lbl">任务进行中</div><div class="cnt"><b>3</b>/7</div>
+          <div class="chev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></div></div>
+        <div class="taskpanel" style="margin-top:6px">
+          <div class="tph">
+            <svg class="ico xs" viewBox="0 0 24 24" style="color:var(--onSurfaceVariant)"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+            <div class="t">任务列表</div><div class="n">3 / 7 已完成</div>
+          </div>
+          <div class="tasklist">
+            <div class="taskrow done"><div class="marker">✓</div><div class="tx">摸清数据结构</div><div class="st">完成</div></div>
+            <div class="taskrow done"><div class="marker">✓</div><div class="tx">画原型 v1</div><div class="st">完成</div></div>
+            <div class="taskrow done"><div class="marker">✓</div><div class="tx">按反馈改原型 v2</div><div class="st">完成</div></div>
+            <div class="taskrow doing"><div class="marker"></div><div class="tx">确认互斥展开规则</div><div class="st">进行中</div></div>
+            <div class="taskrow todo"><div class="marker"></div><div class="tx">实现</div><div class="st">待办</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 排队：保持收起（一行） -->
+      <div class="queuestrip">
+        <div class="qmulti">
+          <div class="qstack"><i></i><i></i><i></i></div>
+          <div class="qlbl">排队中</div><div class="qn">3 条</div>
+          <div class="qchev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></div>
+        </div>
+      </div>
+
+      <div class="composerwrap"><div class="composer"><div class="r1">
+        <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+        <div class="ph">描述你的任务…</div>
+        <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+      </div></div></div>
+    </div>
+    <div class="caption"><b>任务展开 → 排队自动收起</b><br>排队退回一行摘要，仍能看到「3 条」</div>
+  </div>
+
+  <div class="col">
+    <div class="phone" style="height:600px">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></div>
+        <div class="title"><div class="l1">app开发 main</div><div class="l2">F:\bot</div></div>
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg></div>
+      </div>
+      <div class="chatlist" style="justify-content:flex-end">
+        <div class="ubub"><div class="b">把排队展开</div></div>
+      </div>
+
+      <!-- 任务胶囊：收起 -->
+      <div class="taskpillwrapper" style="padding-bottom:0">
+        <div class="taskpill"><div class="spin"></div><div class="lbl">任务进行中</div><div class="cnt"><b>3</b>/7</div>
+          <div class="chev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></div></div>
+      </div>
+
+      <!-- 排队：展开 -->
+      <div class="queuestrip">
+        <div class="qmulti open">
+          <div class="qstack"><i></i><i></i><i></i></div>
+          <div class="qlbl">排队中</div><div class="qn">3 条</div>
+          <div class="qchev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></div>
+        </div>
+        <div class="qlist" style="margin-top:6px">
+          <div class="qsingle">
+            <div class="qtop"><div class="qdot"></div><div class="qlbl">等当前轮结束后发出</div>
+              <div class="qacts">
+                <div class="qact steer" title="插队"><svg class="ico sm" viewBox="0 0 24 24"><path d="M13 3l-2 7h4l-2 8"/><path d="M6 21V9a3 3 0 013-3h1"/></svg></div>
+                <div class="qact" title="编辑"><svg class="ico sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></div>
+                <div class="qact" title="删除"><svg class="ico sm" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></div>
+              </div>
+            </div>
+            <div class="qtxt">再把排队区的三个按钮也换成图标</div>
+          </div>
+          <div class="qsingle">
+            <div class="qtop"><div class="qdot"></div><div class="qlbl">等当前轮结束后发出</div>
+              <div class="qacts">
+                <div class="qact steer" title="插队"><svg class="ico sm" viewBox="0 0 24 24"><path d="M13 3l-2 7h4l-2 8"/><path d="M6 21V9a3 3 0 013-3h1"/></svg></div>
+                <div class="qact" title="编辑"><svg class="ico sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></div>
+                <div class="qact" title="删除"><svg class="ico sm" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></div>
+              </div>
+            </div>
+            <div class="qtxt">任务胶囊要在排队框上面</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="composerwrap"><div class="composer"><div class="r1">
+        <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+        <div class="ph">描述你的任务…</div>
+        <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+      </div></div></div>
+    </div>
+    <div class="caption"><b>排队展开 → 任务自动收起</b><br>胶囊退回一行，仍能看到 3/7</div>
+  </div>
+
+  <div class="notes">
+    <b>为什么互斥而不是各自限高</b>
+    <ul>
+      <li>两个都展开时：任务面板最高 196dp + 排队列表最高 210dp + 胶囊 34 + 排队头 44 + 输入框 64 ≈ <b>548dp</b>，而 800dp 机型减去顶栏/状态栏/目标横幅后只剩约 <b>480dp</b>——<b>必然挤压消息区</b>，甚至把输入框顶出屏幕。</li>
+      <li>靠「各自限高 + 消息区 flex 收缩」也能不崩，但消息区会被压到只剩一两行，观感很差。</li>
+      <li><b>互斥</b>从根上避免：任何时刻底部最多一个展开区，最多占 210dp，消息区至少还有 270dp。</li>
+      <li>收起的那一个始终留一行摘要（胶囊「任务进行中 3/7」/ 排队「排队中 3 条」），用户知道它还在。</li>
+      <li>实现上只是一个枚举：<code>expandedDock: None | Tasks | Queue</code>。</li>
+    </ul>
+  </div>
+</div>
+
+<h3>B · 输入法弹出时：三者全部让位</h3>
+<p class="lede">
+  你的判断对——键盘占掉约 40% 屏幕高度，此时再挂目标横幅 + 任务面板 + 排队列表，不但挤压消息区，还会和顶部目标「打架」。规则：<b>键盘可见时，目标横幅、任务胶囊、排队条全部隐藏</b>，输入框直接贴键盘；键盘收起后原样恢复。<br>
+  <b>点下面的输入框可以模拟这个切换。</b>
+</p>
+<div class="row">
+  <div class="col">
+    <div class="phone ime-open" style="height:600px">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></div>
+        <div class="title"><div class="l1">app开发 main</div><div class="l2">F:\bot</div></div>
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg></div>
+      </div>
+
+      <div class="goalbanner active">
+        <div class="gtarget"></div>
+        <div class="gicon"><svg class="ico sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg></div>
+        <div class="gtext">
+          <div class="glabel"><span class="dot"></span>目标进行中 · 第 3 轮 / 12</div>
+          <div class="gobj">完成 R031 三项需求并按既有流程交付</div>
+        </div>
+        <div class="gacts">
+          <div class="gact pause" title="暂停"><svg class="ico" viewBox="0 0 24 24"><rect x="7" y="5" width="3.5" height="14" rx="1.2" fill="currentColor" stroke="none"/><rect x="13.5" y="5" width="3.5" height="14" rx="1.2" fill="currentColor" stroke="none"/></svg></div>
+          <div class="gact" title="编辑"><svg class="ico" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></div>
+          <div class="gact del" title="删除"><svg class="ico" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></div>
+        </div>
+      </div>
+
+      <div class="chatlist">
+        <div class="assist"><div class="rail"></div><div class="body">
+          键盘弹出时，目标横幅 / 任务胶囊 / 排队条都隐藏，消息区尽量留给你看上下文。
+          <div class="meta">01:21</div>
+        </div></div>
+      </div>
+
+      <div class="taskpillwrapper">
+        <div class="taskpill open"><div class="spin"></div><div class="lbl">任务进行中</div><div class="cnt"><b>3</b>/7</div>
+          <div class="chev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></div></div>
+        <div class="taskpanel" style="margin-top:6px">
+          <div class="tph"><div class="t">任务列表</div><div class="n">3 / 7 已完成</div></div>
+          <div class="tasklist">
+            <div class="taskrow doing"><div class="marker"></div><div class="tx">确认互斥展开规则</div><div class="st">进行中</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="queuestrip">
+        <div class="qmulti">
+          <div class="qstack"><i></i><i></i><i></i></div>
+          <div class="qlbl">排队中</div><div class="qn">3 条</div>
+          <div class="qchev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></div>
+        </div>
+      </div>
+
+      <div class="composerwrap">
+        <div class="composer exp">
+          <div class="r1">
+            <div class="inputtext">正在打字…<span class="caret"></span></div>
+          </div>
+          <div class="r2">
+            <div class="chip"><span class="dt"></span><span class="mono">deepseek-v4.1-flash</span></div>
+            <div class="spacer"></div>
+            <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+            <div class="sendbtn" style="background:var(--primary);color:var(--onPrimary)"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+          </div>
+        </div>
+      </div>
+      <div class="imebadge">输入法区域（三者已让位）</div>
+    </div>
+    <div class="caption"><b>输入法弹出</b><br>目标 / 任务 / 排队全部隐藏，输入框贴键盘</div>
+  </div>
+
+  <div class="notes">
+    <b>规则细节</b>
+    <ul>
+      <li><b>判据</b>：`WindowInsets.ime` 的可见高度 &gt; 0（或 `imeVisible == true`）。<b>不用</b>焦点判据——焦点在但键盘未弹出（外接键盘）时不该隐藏。</li>
+      <li><b>动画</b>：三者一起 <code>shrinkVertically(Motion.FAST)</code> 收起，与键盘动画同向；不要用 expand 的 MEDIUM，会显得拖沓。</li>
+      <li><b>恢复</b>：键盘收起后，<b>目标横幅按它原来的收起/展开状态</b>恢复（默认展开）；任务胶囊与排队条<b>一律回到收起态</b>——它们不该记得上次是不是展开的（与「不记忆」一致）。</li>
+      <li><b>正在行内编辑时弹键盘</b>：编辑中的那一行不隐藏（否则用户没法输入）。只有「没在编辑」时才隐藏。这是唯一例外。</li>
+      <li><b>目标横幅</b>：键盘期隐藏后，顶栏那枚 <code>.goalchip</code> 也不显示——键盘期不提供目标操作，避免误触。</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<section id="s5">
+<h2>⑤ 亮色主题对照</h2>
+<p class="lede">所有新组件都只用语义令牌，不写死颜色，切浅色主题时自动跟随。下面是同一屏在亮色下的样子。</p>
+<div class="row">
+  <div class="col">
+    <div class="phone light tall">
+      <div class="sbar"><span>01:20</span><span class="icons">▮▮▮ ᯤ ▰</span></div>
+      <div class="topbar" style="border-bottom:1px solid var(--outlineVariant)">
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></div>
+        <div class="title"><div class="l1">app开发 main</div><div class="l2">F:\bot</div></div>
+        <div class="goalchip" title="展开目标">
+          <div class="halo"></div>
+          <svg class="ico sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg>
+        </div>
+        <div class="iconbtn"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg></div>
+      </div>
+
+      <div class="goalbanner active" title="点击收起目标">
+        <div class="gtarget"></div>
+        <div class="gicon"><svg class="ico sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg></div>
+        <div class="gtext">
+          <div class="glabel"><span class="dot"></span>目标进行中 · 第 3 轮 / 12</div>
+          <div class="gobj">完成 R031 三项需求并按既有流程交付</div>
+        </div>
+        <div class="gacts">
+          <div class="gact pause"><svg class="ico" viewBox="0 0 24 24"><rect x="7" y="5" width="3.5" height="14" rx="1.2" fill="currentColor" stroke="none"/><rect x="13.5" y="5" width="3.5" height="14" rx="1.2" fill="currentColor" stroke="none"/></svg></div>
+          <div class="gact"><svg class="ico" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></div>
+          <div class="gact del"><svg class="ico" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></div>
+        </div>
+      </div>
+
+      <div class="chatlist">
+        <div class="assist"><div class="rail"></div><div class="body">
+          亮色下所有新组件都用同一套语义令牌，不写死颜色。
+          <div class="meta">01:16</div>
+        </div></div>
+        <div class="ubub"><div class="b">看看浅色的效果</div></div>
+      </div>
+
+      <div class="taskpillwrapper">
+        <div class="taskpill open"><div class="spin"></div><div class="lbl">任务进行中</div><div class="cnt"><b>3</b>/7</div>
+          <div class="chev"><svg class="ico xs" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></div></div>
+        <div class="taskpanel" style="margin-top:6px">
+          <div class="tph">
+            <svg class="ico xs" viewBox="0 0 24 24" style="color:var(--onSurfaceVariant)"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+            <div class="t">任务列表</div><div class="n">3 / 7 已完成</div>
+          </div>
+          <div class="tasklist">
+            <div class="taskrow done"><div class="marker">✓</div><div class="tx">摸清数据结构</div><div class="st">完成</div></div>
+            <div class="taskrow doing"><div class="marker"></div><div class="tx">确认双端同步方案</div><div class="st">进行中</div></div>
+            <div class="taskrow todo"><div class="marker"></div><div class="tx">实现并补测试</div><div class="st">待办</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="queuestrip">
+        <div class="qsingle">
+          <div class="qtop"><div class="qdot"></div><div class="qlbl">排队中 · 1 条</div>
+            <div class="qacts">
+              <div class="qact steer" title="插队"><svg class="ico sm" viewBox="0 0 24 24"><path d="M13 3l-2 7h4l-2 8"/><path d="M6 21V9a3 3 0 013-3h1"/></svg></div>
+              <div class="qact" title="编辑"><svg class="ico sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></div>
+              <div class="qact" title="删除"><svg class="ico sm" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></div>
+            </div>
+          </div>
+          <div class="qtxt">浅色下图标对比度也要够</div>
+        </div>
+      </div>
+
+      <div class="composerwrap"><div class="composer"><div class="r1">
+        <div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+        <div class="ph">描述你的任务…</div>
+        <div class="sendbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+      </div></div></div>
+    </div>
+    <div class="caption"><b>亮色主题</b><br>同一套结构，只换令牌</div>
+  </div>
+
+  <div class="notes">
+    <b>你的 7 条反馈已全部落进原型</b>
+    <ul>
+      <li><span class="tag new">已定</span> <b>目标删除二次确认</b>：AlertDialog，标题「删除目标？」，说明「目标与进度会被清空，任务列表不受影响」。</li>
+      <li><span class="tag new">已定</span> <b>胶囊全完成保留绿勾</b>：不自动消失，显示「任务全部完成 7/7」，停止动画。</li>
+      <li><span class="tag new">已定</span> <b>展开状态不记忆</b>：任务列表、排队列表、目标横幅收起状态，重新进会话一律回到默认（前两者收起、目标展开）。</li>
+      <li><span class="tag new">已定</span> <b>目标与任务解耦</b>：查 DSH 源码确认，目标暂停不中止当前轮、不冻结任务。任务胶囊<b>只跟 todos 状态</b>，不随目标变色。<span style="color:#8fb8e8">（见页面最上方的源码证据）</span></li>
+      <li><span class="tag new">已定</span> <b>行内编辑</b>：目标是横幅内联 input，排队是把内容行换成单行 input（可左右滑动）；编辑时只显示 <b>✓ / ×</b>，其余按钮隐藏。排队消息的<b>附件不可编辑</b>（按你说的不处理）。</li>
+      <li><span class="tag new">已定</span> <b>互斥展开</b>：任务列表与排队列表同一时刻最多展开一个，另一个自动收起（见 ④b-A）。</li>
+      <li><span class="tag new">已定</span> <b>输入法弹出时三者让位</b>：目标横幅 / 任务胶囊 / 排队条全部隐藏（见 ④b-B）。</li>
+      <li><span class="tag new">已定</span> <b>目标横幅可收起</b>：点横幅收起 → 顶栏出现一枚状态色圆点（进行中呼吸、暂停静止）；点圆点展开。默认展开、不记忆。</li>
+    </ul>
+    <b style="display:block;margin-top:14px">仍未包含（等你决定）</b>
+    <ul>
+      <li><b>目标编辑是否也能改 maxGoalRounds</b>：现在行内只改 objective。轮次数在 DSH 里属创建时参数，改它需要单独的 UI。</li>
+      <li><b>排队消息的附件数</b>：新版压缩成不显示（旧版 footer 有「含 N 个附件」）。要保留请说。</li>
+      <li><b>长按选择复制</b>（R030 已实现）与本次新增组件的共存：任务列表文字、目标 objective 是否也应可长按复制？我倾向<b>只让目标 objective 可选</b>，任务列表保持不可选（避免与胶囊点击冲突）。</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<p class="lede" style="margin-top:56px;padding-top:22px;border-top:1px solid #17212e">
+  <b>下一步</b>：你确认方向（含上面 5 个待拍板点）后我再开始开发。开发会按既有七步流程走：写进度 → 实现 → 全量构建/单测/lint → 真机验收 → 独立审查 → 四份文档 → 提交推送。<br>
+  数据来源已核实：<code>goal/change</code> 事件 21 条实测、<code>todos</code> 投影、<code>projections.values.inbox</code> + <code>agent/inbox/spliced</code> 增量。<b>以上均为静态效果图，尚未写任何代码。</b>
+</p>
+
+
+<div class="hint" id="hint"></div>
+<script>
+(function(){
+  const hint = document.getElementById('hint');
+  let hintTimer = null;
+  function say(msg){
+    hint.textContent = msg;
+    hint.classList.add('show');
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(function(){ hint.classList.remove('show'); }, 2000);
+  }
+  document.body.classList.add('interactive');
+
+  var pauseSVG = '<svg class="ico" viewBox="0 0 24 24"><rect x="7" y="5" width="3.5" height="14" rx="1.2" fill="currentColor" stroke="none"/><rect x="13.5" y="5" width="3.5" height="14" rx="1.2" fill="currentColor" stroke="none"/></svg>';
+  var playSVG  = '<svg class="ico" viewBox="0 0 24 24"><path d="M7 4.5l12 7.5-12 7.5z" fill="currentColor" stroke="none"/></svg>';
+  var editSVG  = '<svg class="ico" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+  var delSVG   = '<svg class="ico" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>';
+  var okSVG    = '<svg class="ico" viewBox="0 0 24 24"><path d="M4 12.5l5 5L20 6.5"/></svg>';
+  var noSVG    = '<svg class="ico" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+  var steerSVG = '<svg class="ico sm" viewBox="0 0 24 24"><path d="M13 3l-2 7h4l-2 8"/><path d="M6 21V9a3 3 0 013-3h1"/></svg>';
+  var editSVGsm = '<svg class="ico sm" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+  var delSVGsm  = '<svg class="ico sm" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>';
+
+  function goalActions(phase){
+    var first = phase === 'paused'
+      ? '<div class="gact play" title="开始">' + playSVG + '</div>'
+      : '<div class="gact pause" title="暂停">' + pauseSVG + '</div>';
+    return first +
+      '<div class="gact" title="编辑">' + editSVG + '</div>' +
+      '<div class="gact del" title="删除">' + delSVG + '</div>';
+  }
+
+  /* ---------- 目标横幅：点击收起 ---------- */
+  function collapseGoal(banner){
+    var phone = banner.closest('.phone');
+    banner.classList.add('collapsed');
+    var topbar = phone.querySelector('.topbar');
+    if (topbar) topbar.classList.add('has-goal-collapsed');
+    var chip = phone.querySelector('.goalchip');
+    if (chip) chip.classList.toggle('paused', banner.classList.contains('paused'));
+    say('目标已收起到顶栏（默认展开，重新打开会话仍为展开）');
+  }
+  function expandGoal(phone){
+    var banner = phone.querySelector('.goalbanner');
+    if (banner) banner.classList.remove('collapsed');
+    var topbar = phone.querySelector('.topbar');
+    if (topbar) topbar.classList.remove('has-goal-collapsed');
+    say('目标已展开');
+  }
+
+  document.querySelectorAll('.goalbanner').forEach(function(banner){
+    banner.addEventListener('click', function(e){
+      if (banner.classList.contains('editing')) return;
+      if (e.target.closest('.gact')) return;
+      if (e.target.closest('.ginput')) return;
+      collapseGoal(banner);
+    });
+  });
+  document.querySelectorAll('.goalchip').forEach(function(chip){
+    chip.addEventListener('click', function(e){
+      e.stopPropagation();
+      expandGoal(chip.closest('.phone'));
+    });
+  });
+
+  /* ---------- 目标：暂停 / 开始 ---------- */
+  document.querySelectorAll('.goalbanner').forEach(function(banner){
+    banner.addEventListener('click', function(e){
+      var btn = e.target.closest('.gact');
+      if (!btn) return;
+      if (btn.title !== '暂停' && btn.title !== '开始') return;
+      e.stopPropagation();
+      var nowPaused = banner.classList.contains('paused');
+      if (!nowPaused) {
+        banner.classList.remove('active'); banner.classList.add('paused');
+        var lbl = banner.querySelector('.glabel');
+        if (lbl) lbl.innerHTML = '<span class="dot"></span>目标已暂停 · 第 3 轮 / 12';
+        say('目标已暂停：只是不再自动「继续目标」，当前这一轮对话仍会输出，任务也照常推进');
+      } else {
+        banner.classList.add('active'); banner.classList.remove('paused');
+        var lbl2 = banner.querySelector('.glabel');
+        if (lbl2) lbl2.innerHTML = '<span class="dot"></span>目标进行中 · 第 3 轮 / 12';
+        say('目标已继续：下一轮起自动注入「继续目标」');
+      }
+      var acts = banner.querySelector('.gacts');
+      if (acts) acts.innerHTML = goalActions(banner.classList.contains('paused') ? 'paused' : 'active');
+      var chip = banner.closest('.phone').querySelector('.goalchip');
+      if (chip) chip.classList.toggle('paused', banner.classList.contains('paused'));
+    });
+  });
+
+  /* ---------- 目标：行内编辑 ---------- */
+  document.querySelectorAll('.goalbanner').forEach(function(banner){
+    banner.addEventListener('click', function(e){
+      var btn = e.target.closest('.gact');
+      if (!btn || btn.title !== '编辑') return;
+      e.stopPropagation();
+      if (banner.classList.contains('editing')) return;
+      var obj = banner.querySelector('.gobj');
+      if (!obj) return;
+      banner.dataset.original = obj.textContent;
+      banner.classList.add('editing');
+      obj.outerHTML = '<input class="ginput" type="text" value="' + obj.textContent.replace(/"/g, '&quot;') + '">';
+      var input = banner.querySelector('.ginput');
+      input.focus(); input.select();
+
+      var acts = banner.querySelector('.gacts');
+      acts.innerHTML = '<div class="gact save" title="保存">' + okSVG + '</div>' +
+                       '<div class="gact cancel" title="取消">' + noSVG + '</div>';
+      say('目标行内编辑：内容一行，可左右滑动；只显示 ✓ / ×');
+
+      function finish(value, msg){
+        banner.classList.remove('editing');
+        var inp = banner.querySelector('.ginput');
+        if (inp) inp.outerHTML = '<div class="gobj">' + value + '</div>';
+        acts.innerHTML = goalActions(banner.classList.contains('paused') ? 'paused' : 'active');
+        if (msg) say(msg);
+      }
+      acts.querySelector('.save').addEventListener('click', function(ev){
+        ev.stopPropagation();
+        var v = input.value.trim();
+        if (!v) { say('目标不能为空'); return; }
+        finish(v, '目标已保存（goals/edit + CAS 版本，双端同步）');
+      });
+      acts.querySelector('.cancel').addEventListener('click', function(ev){
+        ev.stopPropagation();
+        finish(banner.dataset.original, '已取消编辑');
+      });
+      input.addEventListener('keydown', function(ev){
+        if (ev.key === 'Enter') acts.querySelector('.save').click();
+        if (ev.key === 'Escape') acts.querySelector('.cancel').click();
+      });
+    });
+  });
+
+  /* ---------- 任务胶囊（与排队列表互斥展开） ---------- */
+  document.querySelectorAll('.taskpill').forEach(function(pill){
+    pill.addEventListener('click', function(e){
+      e.stopPropagation();
+      var wasOpen = pill.classList.contains('open');
+      pill.classList.toggle('open', !wasOpen);
+      if (!wasOpen) {
+        // 展开任务 → 收起同一屏的排队列表
+        var ph = pill.closest('.phone');
+        var m = ph ? ph.querySelector('.qmulti.open') : null;
+        if (m) { m.classList.remove('open'); say('任务列表已展开；排队列表自动收起（互斥）'); return; }
+        say('任务列表已展开（限高 196dp，超出滚动）');
+      } else {
+        say('任务列表已收起');
+      }
+    });
+  });
+
+  /* ---------- 多条排队（与任务列表互斥展开） ---------- */
+  document.querySelectorAll('.qmulti').forEach(function(multi){
+    multi.addEventListener('click', function(e){
+      e.stopPropagation();
+      var wasOpen = multi.classList.contains('open');
+      multi.classList.toggle('open', !wasOpen);
+      if (!wasOpen) {
+        var ph = multi.closest('.phone');
+        var p = ph ? ph.querySelector('.taskpill.open') : null;
+        if (p) { p.classList.remove('open'); say('排队列表已展开；任务列表自动收起（互斥）'); return; }
+        say('排队列表已展开（每条都有插队/编辑/删除）');
+      } else {
+        say('排队列表已收起');
+      }
+    });
+  });
+
+  /* ---------- 排队：行内编辑 ---------- */
+  document.querySelectorAll('.qsingle').forEach(function(row){
+    var acts0 = row.querySelector('.qacts');
+    if (!acts0) return;
+    acts0.addEventListener('click', function(e){
+      var btn = e.target.closest('.qact');
+      if (!btn || btn.title !== '编辑') return;
+      e.stopPropagation();
+      if (row.classList.contains('editing')) return;
+      var txt = row.querySelector('.qtxt');
+      if (!txt) return;
+      row.dataset.original = txt.textContent;
+      row.classList.add('editing');
+      txt.outerHTML = '<input class="qinput" type="text" value="' + txt.textContent.replace(/"/g, '&quot;') + '">';
+      var input = row.querySelector('.qinput');
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+
+      var acts = row.querySelector('.qacts');
+      acts.innerHTML = '<div class="qact save" title="保存">' + okSVG + '</div>' +
+                       '<div class="qact cancel" title="取消">' + noSVG + '</div>';
+      say('行内编辑：单行 + 可左右滑动；编辑时只显示 ✓ / ×');
+
+      function finish(value, msg){
+        row.classList.remove('editing');
+        var inp = row.querySelector('.qinput');
+        if (inp) inp.outerHTML = '<div class="qtxt">' + value + '</div>';
+        acts.innerHTML = '<div class="qact steer" title="插队">' + steerSVG + '</div>' +
+                         '<div class="qact" title="编辑">' + editSVGsm + '</div>' +
+                         '<div class="qact" title="删除">' + delSVGsm + '</div>';
+        if (msg) say(msg);
+      }
+      acts.querySelector('.save').addEventListener('click', function(ev){
+        ev.stopPropagation();
+        var v = input.value.trim();
+        if (!v) { say('排队内容不能为空'); return; }
+        finish(v, '已保存（session/updateQueue: edit，双端同源）');
+      });
+      acts.querySelector('.cancel').addEventListener('click', function(ev){
+        ev.stopPropagation();
+        finish(row.dataset.original, '已取消编辑');
+      });
+      input.addEventListener('keydown', function(ev){
+        if (ev.key === 'Enter') acts.querySelector('.save').click();
+        if (ev.key === 'Escape') acts.querySelector('.cancel').click();
+      });
+    });
+  });
+
+  /* ---------- 删除需要二次确认 ---------- */
+  document.addEventListener('click', function(e){
+    var btn = e.target.closest('.gact.del');
+    if (!btn) return;
+    e.stopPropagation();
+    say('删除需二次确认：「删除目标？」进度会清空，任务列表不受影响');
+  });
+
+  /* ---------- 输入法演示 ---------- */
+  document.querySelectorAll('.phone').forEach(function(ph){
+    var composer = ph.querySelector('.composer');
+    if (!composer) return;
+    composer.style.cursor = 'pointer';
+    composer.title = '点击模拟「输入法弹出」';
+    composer.addEventListener('click', function(){
+      ph.classList.toggle('ime-open');
+      say(ph.classList.contains('ime-open')
+        ? '输入法弹出：目标 / 任务 / 排队 三者全部让位（避免挤压与顶部冲突）'
+        : '输入法收起：三者恢复');
+    });
+  });
+})();
+
+</script>
+
+</body>
+</html>

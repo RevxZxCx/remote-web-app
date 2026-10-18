@@ -1307,6 +1307,65 @@ class ChatReducerTest {
     }
 
     @Test
+    fun `todo_write 事件实时覆盖任务列表`() {
+        // R031 独立审查 P1：任务胶囊的 n/m 只有靠这条事件才会实时变。
+        // `session/follow` 的快照只在订阅那一刻下发一次，之后模型的每次 todo 更新
+        // 都只走 `todo/write`。缺这条分支时胶囊永远是进会话那一刻的值。
+        val state = ChatUiState()
+        val frame = parse(
+            """
+            {"type":"todo/write","seq":11,"time":11000,
+             "data":{"todos":[
+               {"content":"读代码","status":"completed"},
+               {"content":"写测试","status":"in_progress"},
+               {"content":"跑全量","status":"pending"}]}}
+            """.trimIndent(),
+        )
+        val next = ChatReducer.reduce(state, frame)
+
+        assertEquals(3, next.todos.total)
+        assertEquals(1, next.todos.done)
+        assertEquals(1, next.todos.active)
+        assertEquals("1/3", next.todos.counter)
+        assertEquals("写测试", next.todos.items[1].content)
+        assertEquals(TodoStatus.IN_PROGRESS, next.todos.items[1].status)
+    }
+
+    @Test
+    fun `todo_write 空数组清空任务列表`() {
+        // 模型清空任务列表是合法操作（DSH 的 `todos: []`），不能被当成畸形事件忽略。
+        val state = ChatUiState(
+            todos = TodoList(listOf(TodoItem("旧任务", TodoStatus.PENDING))),
+        )
+        val frame = parse("""{"type":"todo/write","seq":12,"time":12000,"data":{"todos":[]}}""")
+        val next = ChatReducer.reduce(state, frame)
+
+        assertTrue(next.todos.items.isEmpty())
+        assertFalse(next.todos.visible)
+    }
+
+    @Test
+    fun `todo_write 不改动目标`() {
+        // 目标与任务独立（DSH 源码已查证）：任务事件必须不碰 goal，否则会出现
+        // 「手机端目标被任务状态带着跑」这种与桌面端不一致的表现。
+        val goal = Goal(
+            id = "goal-1",
+            revision = 3L,
+            objective = "目标",
+            phase = GoalPhase.ACTIVE,
+        )
+        val state = ChatUiState(goal = goal)
+        val frame = parse(
+            """{"type":"todo/write","seq":13,"time":13000,
+                "data":{"todos":[{"content":"任务","status":"pending"}]}}""",
+        )
+        val next = ChatReducer.reduce(state, frame)
+
+        assertSame(goal, next.goal)
+        assertEquals(1, next.todos.total)
+    }
+
+    @Test
     fun `回声摘除后普通事件照旧推进游标`() {
         // 摘回声不能顺手把别的事件处理逻辑短路掉（R006 P3-15 的同族风险）。
         val state = ChatUiState(queued = listOf(echo(1L)))

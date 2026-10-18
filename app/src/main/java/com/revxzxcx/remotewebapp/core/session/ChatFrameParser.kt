@@ -95,6 +95,14 @@ sealed interface ChatFrame {
          * 为 emptyList 表示这个投影没下发或队列是空的——两者对 UI 是同一件事。
          */
         val inbox: List<QueuedMessage> = emptyList(),
+        /**
+         * 会话目标（`projections.values.goal`）。null = 这个会话没有目标。
+         *
+         * 语义见 [Goal]：目标与任务**无联动**，目标暂停不中止当前轮、不冻结任务。
+         */
+        val goal: Goal? = null,
+        /** 任务列表（`projections.values.todos`）。空 = 没有任务。 */
+        val todos: TodoList = TodoList(),
     ) : ChatFrame
 
     /**
@@ -302,6 +310,8 @@ class ChatFrameParser(
             ),
             imageLimits = ImageLimits.of(values?.get("imageLimits")),
             inbox = QueueInboxParser.parseInbox(values),
+            goal = GoalTodoParser.parseGoal(values),
+            todos = GoalTodoParser.parseTodos(values),
         )
     }
 

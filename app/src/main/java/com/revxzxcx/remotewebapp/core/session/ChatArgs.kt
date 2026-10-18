@@ -277,6 +277,55 @@ object ChatArgs {
     }
 
     /**
+     * 目标变更的 CAS 引用（R031）。
+     *
+     * 服务端签名是 `goals.xxx(sessionId, ref, payload?)`，`ref` 形如
+     * `{ "id": "goal-…", "revision": 3 }`。**revision 必须带**：服务端用它做乐观并发，
+     * 陈旧值会被拒绝——这正是「桌面端先改了，手机端不能拿旧状态覆盖」的护栏。
+     */
+    fun goalRef(goalId: String, revision: Long): JsonObject = buildJsonObject {
+        put("id", JsonPrimitive(goalId))
+        put("revision", JsonPrimitive(revision))
+    }
+
+    /**
+     * `goals/pause` / `goals/resume` / `goals/clear` 的参数：**顶层** `agentId` + `ref`。
+     *
+     * ## 不是 `{request:{…}}`（R031 设备验收抓到的缺陷）
+     *
+     * 首版照 chat 方法的惯例套了 `request` 包装，服务端直接回：
+     * ```
+     * gateway/arguments-invalid: goals/pause: args fields do not match the descriptor:
+     *   missing "agentId", "ref"; unexpected "request"
+     * ```
+     * 即目标族的 wire 名与 chat 族**不同**：会话 id 叫 `agentId`（不是 `sessionId`），
+     * 且**没有** `request` 外层。三个动词都不带额外 payload（`goals.clear` 直接清）。
+     */
+    fun goalVerb(sessionId: String, goalId: String, revision: Long): JsonObject = buildJsonObject {
+        put("agentId", JsonPrimitive(sessionId))
+        put("ref", goalRef(goalId, revision))
+    }
+
+    /**
+     * `goals/edit` 的参数：顶层 `agentId` + `ref`，外加 `request:{ objective }`。
+     *
+     * 与 [goalVerb] 同套路，但编辑**有** payload 且它才叫 `request`（服务端报错原文
+     * `goals/edit: args fields do not match the descriptor: missing "request"`）。
+     *
+     * 只有 objective 可改——`maxGoalRounds` 是**创建时参数**，DSH 的编辑接口不接收它
+     * （用户 m45632 第 1 条：「轮次自动创建，所以没有修改选项」）。
+     */
+    fun editGoal(sessionId: String, goalId: String, revision: Long, objective: String): JsonObject =
+        buildJsonObject {
+            put("agentId", JsonPrimitive(sessionId))
+            put("ref", goalRef(goalId, revision))
+            put(
+                "request",
+                buildJsonObject { put("objective", JsonPrimitive(objective)) },
+            )
+        }
+
+    /**
      * 包一层 `{request: {...}}`。
      *
      * 五个 chat 方法的参数 wire 名**都是 `request`**（只有 `session/list` 是 `_request`）。
