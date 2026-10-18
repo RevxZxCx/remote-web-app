@@ -12,7 +12,9 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -64,6 +66,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.journeyapps.barcodescanner.BarcodeCallback
 import com.journeyapps.barcodescanner.BarcodeResult
 import com.journeyapps.barcodescanner.BarcodeView
@@ -71,7 +76,9 @@ import com.revxzxcx.remotewebapp.core.pairing.PairLink
 import com.revxzxcx.remotewebapp.core.pairing.PairLinkParser
 import com.revxzxcx.remotewebapp.core.pairing.PairParse
 import com.revxzxcx.remotewebapp.ui.common.maskDeviceId
+import com.revxzxcx.remotewebapp.ui.common.rememberAnimationsEnabled
 import com.revxzxcx.remotewebapp.ui.theme.LocalStatusRunning
+import com.revxzxcx.remotewebapp.ui.theme.chipShape
 import com.revxzxcx.remotewebapp.ui.theme.groupShape
 import com.revxzxcx.remotewebapp.ui.theme.pillShape
 
@@ -159,6 +166,7 @@ fun PairScreen(
 
                 PairEntry.Manual -> ManualEntryCards(
                     busy = state.busy,
+                    probing = state.probing,
                     baseUrl = manualBaseUrl,
                     onBaseUrlChange = {
                         manualBaseUrl = it
@@ -240,6 +248,10 @@ internal fun PairEntryPicker(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            // `selectableGroup()` 才把三个 `selectable` 归成「一组互斥选项」：没有它，
+            // TalkBack 会把它们念成三个孤立节点（「扫码，已选中 / 链接，未选中」），
+            // 上下文的「这是一组」丢失。反编译确认它只做 `semantics { selectableGroup() }`。
+            .selectableGroup()
             .background(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
                 shape = pillShape,
@@ -256,9 +268,14 @@ internal fun PairEntryPicker(
                 // 互斥选项」，也不知道当前停在哪一栏。`selectable(role = Role.Tab)` 会挂上
                 // `SemanticsProperties.Selected`，读屏念「已选中」，测试也能真的断言
                 // `assertIsSelected()` —— 在此之前「选中态」只有颜色，覆盖率为零。
+                // ⚠️ 触达高度必须 ≥48dp：`Modifier.selectable` **不带** Material 的
+                // `minimumInteractiveComponentSize` 保底（反编译 `SelectableKt` 里该调用
+                // 出现 0 次，而 `Surface(onClick)` 里有）。视觉仍是 34dp 的胶囊，
+                // 用 `heightIn(min = 48.dp)` 把可点区域补足——`height` 与 `heightIn`
+                // 同向时后者不会反过来压小前者，两者共存得到「48dp 可点、34dp 可见」。
                 modifier = Modifier
                     .weight(1f)
-                    .height(34.dp)
+                    .heightIn(min = 48.dp)
                     .selectable(
                         selected = isSelected,
                         role = Role.Tab,
@@ -272,7 +289,10 @@ internal fun PairEntryPicker(
                     MaterialTheme.colorScheme.onSurfaceVariant
                 },
             ) {
-                Box(contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier.height(34.dp).fillMaxWidth(),
+                    contentAlignment = Alignment.Center,
+                ) {
                     Text(
                         text = item.label,
                         style = MaterialTheme.typography.labelLarge,
@@ -296,15 +316,20 @@ internal fun PairEntryPicker(
  * 露出它那句状态字，看起来像渲染错位（R033 ③ 设备验收实录）。
  *
  * 取景框是**正方形**（`aspectRatio(1f)`）。改造前是 `fillMaxWidth().height(220.dp)`，
- * 在 360dp 屏上得到 336×220 的横矩形：页面里唯一一个非正方形的大色块（R033 ③）。
+ * 在 360dp 屏上得到 296×220 的横矩形（360 − 页面横向 20×2 − 卡片内 12×2）：页面里
+ * 唯一一个非正方形的大色块（R033 ③）。
  *
  * ⚠️ 扫码是**一次性**的：`decodeSingle` 只回调一次，加上 `consumed` 闩之后，配对失败
  * （token 过期 / 桌面端不可达）时继续扫不会有任何反应，而相机预览还在动——从界面
  * 完全看不出已经失效。所以 `scanEpoch` 一变就 `key(scanEpoch)` 重建整个 `AndroidView`
  * 并复位 `consumed`，并在失效后给一个显式的「重新扫描」入口。
+ *
+ * 可见性是 `internal`：没有权限时的分支（授权入口 / 二次拒绝后跳系统设置）只能靠渲染
+ * 层测试守——真机上「拒绝一次」之后的状态要复现得先清数据，而这条分支的出入口就只有
+ * 这一个界面（`AppState.Unpaired` 下没有别的页面可去）。
  */
 @Composable
-private fun ScanCard(
+internal fun ScanCard(
     enabled: Boolean,
     scanEpoch: Int,
     onRescan: () -> Unit,
@@ -353,10 +378,46 @@ private fun ScanCard(
 
     // BarcodeView 自身没有 pauseAndWait()（那是 DecoratedBarcodeView 的包装），
     // 它的父类 CameraPreview 有，所以这里按 CameraPreview 的类型调用。
+    //
+    // ⚠️ 这里**只** `pause()`，不 `pauseAndWait()`：`pauseAndWait()` 会轮询
+    // `isCameraClosed()`，上限 2s，而本 effect 的 key 里含 `hasPermission` —— 权限
+    // 一变它就会 dispose 一次，此时控件还挂在窗口上，没必要为「还要继续用」的对象
+    // 阻塞主线程等相机关闭。真正释放交给 `AndroidView(onRelease = …)`。
     DisposableEffect(scanner, hasPermission) {
         val view = scanner
         if (view != null && hasPermission) view.resume() else view?.pause()
-        onDispose { view?.pauseAndWait() }
+        onDispose { view?.pause() }
+    }
+
+    // 退到后台时暂停相机（R035）。
+    //
+    // 上面那个 `DisposableEffect` 只在**组合被销毁**时释放，而按 Home 键、切到别的 App
+    // 并不会销毁组合——`CameraPreview` 的字节码里只有 `onAttachedToWindow()` 一个生命周期
+    // override，没有 `onDetachedFromWindow`，也不监听 `ON_STOP`。于是相机与解码线程会在
+    // 后台一直跑（耗电、发热，部分机型摄像头指示灯常亮）。这里挂 `ON_RESUME`/`ON_PAUSE`。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, scanner, hasPermission) {
+        val view = scanner
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    // 从系统设置授权之后回到本页要能自己发现（见下面的权限复检）。
+                    hasPermission = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.CAMERA,
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (hasPermission && view != null) {
+                        deniedOnce = false
+                        view.resume()
+                    }
+                }
+
+                Lifecycle.Event.ON_PAUSE -> view?.pause()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     Surface(
@@ -398,7 +459,7 @@ private fun ScanCard(
                     modifier = Modifier
                         .fillMaxWidth()
                         .aspectRatio(1f)
-                        .background(Color.Black, RoundedCornerShape(14.dp)),
+                        .background(Color.Black, groupShape),
                 ) {
                     key(scanEpoch) {
                         AndroidView(
@@ -485,8 +546,12 @@ private fun ViewfinderBrackets(
  */
 @Composable
 private fun ScanLine(modifier: Modifier = Modifier) {
+    // 尊重系统「动画时长缩放＝关闭」（无障碍/省电）：工程里另外两处无限动画
+    // （`GeneratingGlyph`、`ConnectionIndicator`）都先过 `rememberAnimationsEnabled()`，
+    // 只有这里漏了。关掉动画时退化成一条静止的线，仍然能看见取景框。
+    val animated = rememberAnimationsEnabled()
     val transition = rememberInfiniteTransition(label = "pairScanLine")
-    val progress by transition.animateFloat(
+    val animatedProgress by transition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
@@ -495,6 +560,10 @@ private fun ScanLine(modifier: Modifier = Modifier) {
         ),
         label = "pairScanLineOffset",
     )
+    // 关掉动画时停在取景框正中（progress = 0.5 的观感），而不是停在顶边。
+    val progress = if (animated) animatedProgress else 0.5f
+    // 颜色要在组合里取出来：`Canvas` 的 draw lambda 不是 @Composable，读不到 MaterialTheme。
+    val lineColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
     Canvas(modifier = modifier.fillMaxSize()) {
         val inset = 12.dp.toPx()
         val y = inset + (size.height - inset * 2f) * progress
@@ -502,7 +571,7 @@ private fun ScanLine(modifier: Modifier = Modifier) {
             brush = Brush.horizontalGradient(
                 colors = listOf(
                     Color.Transparent,
-                    Color(0xFF5AA2FF).copy(alpha = 0.9f),
+                    lineColor,
                     Color.Transparent,
                 ),
                 startX = inset,
@@ -532,8 +601,10 @@ internal data class ParsePreview(
  *
  * ⚠️ `fallbackBaseUrl` 决定裸 token 能不能用：`PairingCoordinator` 对
  * `PairLink.BareToken` 的处理是 `fallbackBaseUrl?.let(::normalizeBaseUrl) ?: throw`，
- * 而全新安装或刚 `unpair()` 之后根本没有「上一次用过的地址」。所以裸 token 的 `ok`
- * 必须跟着 fallback 走——早先恒 `ok = true` 会让「开始配对」亮着，点下去必然失败。
+ * 而全新安装或进程重启后根本没有「上一次用过的地址」（App 内解绑不会清掉
+ * `PairViewModel` 里缓存的那份值——它是 Activity 作用域的，`unpair()` 也不碰它）。
+ * 所以裸 token 的 `ok` 必须跟着 fallback 走——早先恒 `ok = true` 会让「开始配对」
+ * 亮着，点下去必然失败。
  */
 internal fun previewOf(parse: PairParse, fallbackBaseUrl: String? = null): ParsePreview = when (parse) {
     is PairParse.Failed -> ParsePreview(
@@ -571,9 +642,16 @@ internal fun previewOf(parse: PairParse, fallbackBaseUrl: String? = null): Parse
     }
 }
 
-/** 取出 `scheme://host:port` 里的 `host:port`，用于「配对到哪台机器」这一句。 */
+/**
+ * 取出 `scheme://host:port` 里的 `host:port`，用于「配对到哪台机器」这一句。
+ *
+ * 必须**同时**剥掉尾斜杠和后缀路径：`PairLinkParser.baseUrlOf` 目前产出的 baseUrl 确实
+ * 不带路径，但 `hostOf` 也被 `ProbeResultCard` 用在用户手输的地址上（`probe.baseUrl`），
+ * 而手输 `http://h:1/a/b` 是可能的。原来只 `trimEnd('/')`，会把 `"h:1/a/b"` 原样显示
+ * 出来——与 `PairingApi.hostOf`（`substringBefore('/')`，会剥路径）同一语义两种行为。
+ */
 internal fun hostOf(baseUrl: String): String =
-    baseUrl.substringAfter("://", baseUrl).trimEnd('/')
+    baseUrl.substringAfter("://", baseUrl).trimEnd('/').substringBefore('/')
 
 /**
  * token 只露首尾各 4 位。
@@ -653,10 +731,10 @@ internal fun ParsePreviewCard(
     }
     Surface(
         color = accent.copy(alpha = 0.08f),
-        shape = RoundedCornerShape(9.dp),
+        shape = chipShape,
         modifier = modifier
             .fillMaxWidth()
-            .border(1.dp, accent.copy(alpha = 0.4f), RoundedCornerShape(9.dp)),
+            .border(1.dp, accent.copy(alpha = 0.4f), chipShape),
     ) {
         Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
             Text(
@@ -687,6 +765,7 @@ internal fun ParsePreviewCard(
 @Composable
 internal fun ManualEntryCards(
     busy: Boolean,
+    probing: Boolean = false,
     baseUrl: String,
     onBaseUrlChange: (String) -> Unit,
     deviceId: String,
@@ -698,6 +777,7 @@ internal fun ManualEntryCards(
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         ServerCard(
             busy = busy,
+            probing = probing,
             baseUrl = baseUrl,
             onBaseUrlChange = onBaseUrlChange,
             probe = probe,
@@ -705,6 +785,7 @@ internal fun ManualEntryCards(
         )
         DeviceIdCard(
             busy = busy,
+            probing = probing,
             baseUrl = baseUrl,
             deviceId = deviceId,
             onDeviceIdChange = onDeviceIdChange,
@@ -717,6 +798,7 @@ internal fun ManualEntryCards(
 @Composable
 private fun ServerCard(
     busy: Boolean,
+    probing: Boolean,
     baseUrl: String,
     onBaseUrlChange: (String) -> Unit,
     probe: PairProbe?,
@@ -743,9 +825,11 @@ private fun ServerCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
             )
             OutlinedButton(
-                enabled = !busy && baseUrl.isNotBlank(),
+                // 探测只受「探测中」与「配对中」两个条件约束；`probing` 期间禁用是为了
+                // 不让用户连点发出多个请求（晚回的会盖掉早回的结论）。
+                enabled = !busy && !probing && baseUrl.isNotBlank(),
                 onClick = { onProbe(baseUrl) },
-            ) { Text("探测地址") }
+            ) { Text(if (probing) "探测中…" else "探测地址") }
             probe?.let { ProbeResultCard(it) }
         }
     }
@@ -755,6 +839,7 @@ private fun ServerCard(
 @Composable
 private fun DeviceIdCard(
     busy: Boolean,
+    probing: Boolean,
     baseUrl: String,
     deviceId: String,
     onDeviceIdChange: (String) -> Unit,
@@ -787,7 +872,7 @@ private fun DeviceIdCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
             )
             Button(
-                enabled = !busy && baseUrl.isNotBlank() && deviceId.isNotBlank(),
+                enabled = !busy && !probing && baseUrl.isNotBlank() && deviceId.isNotBlank(),
                 onClick = { onManual(baseUrl, deviceId) },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("登记") }
@@ -830,10 +915,10 @@ internal fun ProbeResultCard(
     val accent = if (probe.ok) LocalStatusRunning.current else MaterialTheme.colorScheme.error
     Surface(
         color = accent.copy(alpha = 0.1f),
-        shape = RoundedCornerShape(9.dp),
+        shape = chipShape,
         modifier = modifier
             .fillMaxWidth()
-            .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(9.dp)),
+            .border(1.dp, accent.copy(alpha = 0.45f), chipShape),
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
@@ -845,6 +930,17 @@ internal fun ProbeResultCard(
                 fontWeight = FontWeight.Medium,
                 color = accent,
             )
+            // 回显被探测的地址：`clearProbe()` 只在「改地址」时清卡，挡不住在途请求——
+            // 地址 A 慢、B 快时 A 的结论会后到并把 B 的绿卡盖掉。把结论对应的地址一起
+            // 显示出来，用户至少能看见「这张卡说的不是我刚填的那个地址」。
+            if (probe.baseUrl.isNotBlank()) {
+                Text(
+                    text = hostOf(probe.baseUrl),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                )
+            }
             probe.lines.forEach { line ->
                 Text(
                     text = line,

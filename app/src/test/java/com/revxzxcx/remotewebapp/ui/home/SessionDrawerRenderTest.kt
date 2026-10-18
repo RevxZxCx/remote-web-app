@@ -1,11 +1,12 @@
 package com.revxzxcx.remotewebapp.ui.home
 
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasScrollToNodeAction
@@ -94,7 +95,11 @@ class SessionDrawerRenderTest {
     private fun session(sessionId: String, title: String, updatedAt: Long): SessionSummary =
         SessionSummary(sessionId = sessionId, title = title, updatedAt = updatedAt, agentAvailable = true)
 
-    private fun setDrawer(state: HomeUiState, viewportHeight: Dp = 4000.dp) {
+    private fun setDrawer(
+        state: HomeUiState,
+        viewportHeight: Dp = 4000.dp,
+        onRefreshSessions: () -> Unit = {},
+    ) {
         compose.setContent {
             MaterialTheme {
                 // ⚠️ 这里**不能**套 `verticalScroll`：抽屉自身是
@@ -112,7 +117,7 @@ class SessionDrawerRenderTest {
                     SessionDrawer(
                         state = state,
                         onOpenSession = { _, _ -> },
-                        onRefreshSessions = {},
+                        onRefreshSessions = onRefreshSessions,
                         now = 10_000L,
                     )
                 }
@@ -210,6 +215,62 @@ class SessionDrawerRenderTest {
     }
 
     @Test
+    fun `置顶与归档会话在语义树里带可朗读的状态`() {
+        // 置顶 / 归档原本只由「3dp 竖条颜色 + 标题透明度」表达：读屏听到的与普通行
+        // 一模一样，色弱用户在 3dp 窄条上也分不清主色与三级色。`stateDescription`
+        // 把状态变成可朗读的文字。uiautomator dump 不带这个属性（真机 dump 里
+        // 没有 state-desc 字段），所以只能在这里守。
+        val base = state()
+        setDrawer(
+            base.copy(
+                pinned = listOf(base.sessions.items.first() to null),
+                snapshot = base.snapshot.copy(pinnedSessionIds = setOf("shared-session")),
+            ).withDerivedLists(),
+        )
+
+        // 3 个节点：1 个在「置顶」段、2 个在两个工作区段——同一个会话在三处都是置顶状态，
+        // 状态由 `snapshot.pinnedSessionIds` 统一推导，不由调用点写死。
+        compose.onAllNodes(
+            SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "已置顶"),
+        ).assertCountEquals(3)
+    }
+
+    @Test
+    fun `会话列表里同一归档会话重复出现时抽屉不崩`() {
+        // `session/list` 的解析只做 `mapNotNull`，原样保留重复条目（`SessionGroupingTest`
+        // 有一条对应用例）。归档聚合视图若直接 `items(archivedSessions, key =
+        // "archived-${sessionId}")`，重复 id 会撞 key 抛
+        // `IllegalArgumentException: Key "archived-X" was already used` —— 抽屉直接打不开。
+        // 同一份数据在 `recentSessions` / `group()` / `pinnedSessions` 三处都防过，
+        // 只有 R033 新增的这条链漏了。这条用例就是那个漏点的守门人。
+        val base = state()
+        val dup = session("archived-dup", "重复归档会话", updatedAt = 9_000L)
+        val snapshot = base.snapshot.copy(
+            items = base.snapshot.items.map { ws ->
+                if (ws.workspaceId == "ws-a") {
+                    ws.copy(sessionIds = ws.sessionIds + "archived-dup")
+                } else {
+                    ws
+                }
+            },
+            archivedSessionIds = setOf("archived-dup"),
+        )
+        val sessions = SessionListResult(items = base.sessions.items + dup + dup.copy(updatedAt = 9_500L))
+        setDrawer(
+            base.copy(
+                snapshot = snapshot,
+                sessions = sessions,
+                groups = SessionGrouping.group(snapshot, sessions),
+            ).withDerivedLists(),
+        )
+
+        // 组合期不抛异常，且聚合视图里只有一行（不是两行同名）。
+        compose.onNodeWithText("已归档 1").assertExists()
+        compose.onNodeWithText("已归档 1").performClick()
+        compose.onAllNodesWithText("重复归档会话").assertCountEquals(1)
+    }
+
+    @Test
     fun `读不到会话时抽屉给出可点的重试`() {
         val base = state()
         val state = base.copy(
@@ -217,12 +278,15 @@ class SessionDrawerRenderTest {
             groups = SessionGrouping.group(base.snapshot, SessionListResult(items = emptyList())),
             sessionsError = "transport：网络请求失败",
         )
-        setDrawer(state)
+        var refreshed = 0
+        setDrawer(state, onRefreshSessions = { refreshed++ })
 
         // M3 T009：失败与「真的没有会话」在抽屉里长得一模一样，用户既不知道失败、
-        // 也不知道可以点重试。这里钉住「失败必须可见 + 有重试入口」。
+        // 也不知道可以点重试。这里钉住「失败必须可见 + 重试真的接到回调」。
+        // 只 `performClick()` 是不够的：那个节点只要可点就会绿，即使接的是空 lambda。
         compose.onNodeWithText("会话列表读取失败：transport：网络请求失败").assertExists()
         compose.onNodeWithText("重试").performClick()
+        assertEquals(1, refreshed)
     }
 
     @Test

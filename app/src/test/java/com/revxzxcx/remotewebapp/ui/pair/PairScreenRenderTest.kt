@@ -4,7 +4,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -40,7 +39,8 @@ import org.robolectric.annotation.Config
  * 1. **三入口互斥**：点分段只切换一条路径，不是把三张卡全摊开——改造前三个输入框
  *    挤在一张卡里，真机上踩过把 token 填进「服务器地址」。
  * 2. **贴链接即解析**：解析结论要提前说清「这段文本会被当成什么」。
- * 3. **探测结果分色**：成功与失败必须是两种可区分的形态（改造前都写进同一个错误条）。
+ * 3. **探测结果分色**：成功与失败必须是两种可区分的形态（改造前都写进同一个错误条），
+ *    并且结论要回显它对应的是哪个地址（赶不上`clearProbe()` 的在途请求会造成错配）。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -111,9 +111,14 @@ class PairScreenRenderTest {
     }
 
     @Test
-    fun `主机名里带路径时只留 scheme 之后的部分`() {
+    fun `hostOf 只留 scheme 之后的主机与端口，剥掉尾斜杠与路径`() {
         assertEquals("192.168.1.5:19387", hostOf("http://192.168.1.5:19387"))
         assertEquals("192.168.1.5:19387", hostOf("http://192.168.1.5:19387/"))
+        // 用例名原本就写着「带路径」，但断言里一条带路径的样本都没有——于是
+        // `substringAfter("://").trimEnd('/')` 不剥路径这个缺陷一直没被发现，
+        // 与 `PairingApi.hostOf`（`substringBefore('/')`）语义分叉。下面两条才是正题。
+        assertEquals("192.168.1.5:19387", hostOf("http://192.168.1.5:19387/a/b"))
+        assertEquals("h:1", hostOf("https://h:1/x?y=1"))
     }
 
     @Test
@@ -267,6 +272,26 @@ class PairScreenRenderTest {
         assertEquals(emptyList<String>(), clicks)
     }
 
+    // ---------------------------------------------------------------- 扫码权限
+
+    @Test
+    fun `没有相机权限时给授权入口而不是一个黑框`() {
+        // Robolectric 默认不授予 CAMERA。改造前（R031）这里只有一句「需要相机权限才能
+        // 扫码。」+ 按钮，但**二次拒绝**之后那个按钮是死的（系统不再弹窗，`launch` 立刻
+        // 回调 false，界面毫无变化）。现在 `deniedOnce` 会把按钮换成「打开系统设置」。
+        // 这里守的是首次进入的那一支：必须能点到授权，且不显示取景框。
+        compose.setContent {
+            MaterialTheme {
+                ScanCard(enabled = true, scanEpoch = 0, onRescan = {}, onScanned = {})
+            }
+        }
+
+        compose.onNodeWithText("授予相机权限").assertExists()
+        compose.onNodeWithText("需要相机权限才能扫码。也可以换用「链接」或「手工」入口。").assertExists()
+        compose.onAllNodesWithText("把桌面端的二维码放进取景框内。").assertCountEquals(0)
+        compose.onAllNodesWithText("重新扫描").assertCountEquals(0)
+    }
+
     // ---------------------------------------------------------------- 结果卡分色
 
     @Test
@@ -286,6 +311,28 @@ class PairScreenRenderTest {
         compose.onNodeWithText("地址可达").assertIsDisplayed()
         compose.onNodeWithText("桌面端当前无配对设备").assertIsDisplayed()
         compose.onNodeWithText("局域网地址 192.168.1.5:19387").assertIsDisplayed()
+    }
+
+    @Test
+    fun `探测卡回显被探测的地址，避免结论贴错输入框`() {
+        // 场景：地址 A 探测很慢，用户改成 B 又点了一次；A 的结论后到。`clearProbe()`
+        // 只在「用户改地址」那一刻清卡，挡不住在途请求回来写状态。卡片自带地址回显后，
+        // 这种错配在界面上是可自证的，而不是一张绿灯贴着一个没探过的地址。
+        compose.setContent {
+            MaterialTheme {
+                ProbeResultCard(
+                    PairProbe(
+                        ok = true,
+                        baseUrl = "http://10.0.2.2:19387",
+                        headline = "地址可达",
+                        lines = listOf("桌面端当前无配对设备"),
+                    ),
+                )
+            }
+        }
+
+        compose.onNodeWithText("地址可达").assertIsDisplayed()
+        compose.onNodeWithText("10.0.2.2:19387").assertIsDisplayed()
     }
 
     @Test

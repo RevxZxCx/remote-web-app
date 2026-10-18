@@ -40,3 +40,12 @@ internal val groupShape = RoundedCornerShape(14.dp)
 
 /** 输入区与底部工具条上的小控件。 */
 internal val pillShape = RoundedCornerShape(999.dp)
+
+/**
+ * 结论条 / 提示条这类「贴着一个输入框、说一句话」的小块（R035）。
+ *
+ * 9dp 落在 [AppShapes] 的 6/10/14 档位之间：用 `small`（10dp）在 34dp 高的窄条上
+ * 显得圆过头，用 `extraSmall`（6dp）又太硬。单独成 token 是为了让这个值只有一处，
+ * 而不是在四个卡片里各写一遍 `RoundedCornerShape(9.dp)`。
+ */
+internal val chipShape = RoundedCornerShape(9.dp)

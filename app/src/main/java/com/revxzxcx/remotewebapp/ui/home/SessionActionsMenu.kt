@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -31,7 +32,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.ui.chat.ChevronDownIcon
-import com.revxzxcx.remotewebapp.ui.chat.ChevronUpIcon
 import com.revxzxcx.remotewebapp.ui.theme.bubbleShape
 
 /**
@@ -69,9 +69,12 @@ internal fun SessionActionsMenu(
     title: String? = null,
     subtitle: String? = null,
 ) {
-    // 二次确认的状态放在菜单外面：点「移入归档」时先 `onDismiss()` 收起菜单，
-    // 再由同一个 Box 里的 `AlertDialog` 接管。两个 Popup 重叠时层级由最后请求者
-    // 决定，先收再弹是唯一不依赖实现细节的顺序。
+    // 二次确认：点「移入归档」时先 `onDismiss()` 收起菜单，再弹 `AlertDialog`。
+    // 两个 Popup 重叠时层级由最后请求者决定，先收再弹是唯一不依赖实现细节的顺序。
+    //
+    // 用 `remember` 而不是 `rememberSaveable`：`menuOpen` 是 saveable（旋屏后菜单要留在
+    // 原地），但确认框不该在重建后自己冒出来——那会把「用户按到一半」变成「App 替我
+    // 决定要归档」。两者生命周期不一致是刻意的。
     var confirmingArchive by remember { mutableStateOf(false) }
 
     DropdownMenu(
@@ -234,22 +237,26 @@ internal fun ArchiveConfirmDialog(
 @Composable
 internal fun DrawerArchivedEntry(
     count: Int,
-    expanded: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // 用 `Surface(onClick)` 而不是 `Modifier.clickable`：前者会挂 Material 的
+    // `minimumInteractiveComponentSize`（48dp 保底）并带 `Role.Button`，后者两样都没有。
+    // 抽屉里这是唯一的归档入口，还长在列表末尾，触达面积不该比旁边的会话行更小。
+    // 顺带修掉涟漪层级：`clickable` 若排在 `clip` 之后、`Surface` 的 background 之前，
+    // 涟漪会画在底色下层（几乎看不见）。
     Surface(
+        onClick = onToggle,
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 6.dp)
-            .clip(bubbleShape)
-            .clickable(onClick = onToggle),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         shape = bubbleShape,
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(min = 48.dp)
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -267,13 +274,13 @@ internal fun DrawerArchivedEntry(
                 modifier = Modifier.weight(1f),
             )
             Text(
-                text = if (expanded) "收起" else "查看",
+                text = "查看",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.primary,
             )
             Spacer(Modifier.width(6.dp))
             Icon(
-                imageVector = if (expanded) ChevronUpIcon else ChevronDownIcon,
+                imageVector = ChevronDownIcon,
                 contentDescription = null,
                 modifier = Modifier.size(16.dp),
                 tint = MaterialTheme.colorScheme.primary,

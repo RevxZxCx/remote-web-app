@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -32,8 +31,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowRight
@@ -43,7 +40,6 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerState
@@ -75,6 +71,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
@@ -101,7 +101,6 @@ import com.revxzxcx.remotewebapp.ui.common.rememberPressTint
 import com.revxzxcx.remotewebapp.ui.theme.LocalStatusRunning
 import com.revxzxcx.remotewebapp.ui.theme.Motion
 import com.revxzxcx.remotewebapp.ui.theme.bubbleShape
-import com.revxzxcx.remotewebapp.ui.theme.groupShape
 import com.revxzxcx.remotewebapp.ui.theme.pillShape
 import kotlinx.coroutines.launch
 
@@ -685,8 +684,13 @@ private fun SessionRowItem(
     // `rememberSaveable` 而不是 `remember`：旋屏会让 `remember` 复位、菜单弹到一半消失
     // （R012 P3-2）。与全工程其它 menuOpen（`HomeScreen.kt:385`）保持一致。
     var menuOpen by rememberSaveable { mutableStateOf(false) }
-    val scale = rememberPressScale()
-    val pressTint = rememberPressTint()
+    // ⚠️ 三个 hook 必须共用同一个 `interactionSource`：`rememberPressScale()` /
+    // `rememberPressTint()` 在不传参时各自 `remember { MutableInteractionSource() }`，
+    // 而 `combinedClickable` 不传参时 Compose 内部再新建一个——三个源互不相干，
+    // `scale` 恒 1f、`pressTint` 恒透明，按下去毫无反馈（R018 P2-2，R035 补修主区）。
+    val interactionSource = remember { MutableInteractionSource() }
+    val scale = rememberPressScale(interactionSource = interactionSource)
+    val pressTint = rememberPressTint(interactionSource = interactionSource)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -695,6 +699,8 @@ private fun SessionRowItem(
             .clip(bubbleShape)
             .background(pressTint)
             .combinedClickable(
+                interactionSource = interactionSource,
+                indication = ripple(),
                 onClick = { onOpenSession(summary) },
                 onLongClick = { menuOpen = true },
             )
@@ -867,9 +873,19 @@ internal fun SessionDrawer(
     // 归档聚合视图（R033 ①）：抽屉底部「已归档 N」点进去看全局归档会话。
     // 用 rememberSaveable 是为了转屏/进程重建后仍停在用户打开的那一屏。
     var archivedOpen by rememberSaveable { mutableStateOf(false) }
+    // ⚠️ `distinctBy` 不能省：`session/list` 的解析只做 `mapNotNull`，原样保留重复条目
+    // （`SessionListParser.summaries` / `SessionListResult.items` 都不去重；工程里
+    // `SessionGroupingTest` 的「recentSessions 对 sessionList 里的重复条目只保留一条」
+    // 说明这个数据形态是真实存在的）。不去的后果不是「多一行」，而是
+    // `items(key = "archived-${sessionId}")` 撞 key 抛
+    // `IllegalArgumentException: Key "archived-X" was already used`——LazyColumn 直接崩，
+    // 整个抽屉打不开。同一份数据在 `recentSessions`（`distinctBy`）、`group()`
+    // （`sessionIds.distinct()`）、`pinnedSessions`（`associateBy`）三处都防过，
+    // 漏掉的只有 R033 新增的这条链。
     val archivedSessions = remember(archivedIds, state.sessions.items) {
         state.sessions.items
             .filter { it.sessionId in archivedIds }
+            .distinctBy { it.sessionId }
             .sortedByDescending { it.updatedAt }
     }
 
@@ -877,7 +893,16 @@ internal fun SessionDrawer(
         DrawerHead(
             state = state,
             workspaceCount = groups.size,
-            sessionCount = state.sessions.items.size,
+            // 与抽屉里实际能看到的行同源：`items` 含子代理会话（`topLevel` 才过滤），
+            // 也不去重，直接计数会出现「胶囊说 51、列表里最多 47 行」的对不上账。
+            // 抽屉的三段（最近 / 置顶 / 按工作区）都以 `snapshot` 为骨架，所以骨架为空
+            // 时这里也必须是 0——否则「刚装好、会话列表已到、工作区快照未到」的窗口里
+            // 会显示「128 会话」而下面一行都没有、也没有任何入口。
+            sessionCount = if (state.snapshot.isEmpty) {
+                0
+            } else {
+                state.sessions.topLevel.distinctBy { it.sessionId }.size
+            },
             pinnedCount = pinnedIds.size,
             // ⚠️ 必须用 `archivedSessions.size` 而不是 `archivedIds.size`：胶囊与底部入口
             // 是同一个「已归档」概念的两个出口，若一个读快照 id 集合、一个读会话列表过滤结果，
@@ -1087,7 +1112,6 @@ internal fun SessionDrawer(
                         Box(Modifier.padding(top = 10.dp, bottom = 10.dp)) {
                             DrawerArchivedEntry(
                                 count = archivedSessions.size,
-                                expanded = false,
                                 onToggle = { archivedOpen = true },
                             )
                         }
@@ -1224,7 +1248,10 @@ private fun DrawerHead(
                 .height(34.dp)
                 .clip(pillShape)
                 .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
-                .padding(horizontal = 12.dp),
+                .padding(horizontal = 12.dp)
+                // 它长得和真输入框一模一样却点不动：不声明的话，用户点下去毫无反馈会
+                // 归因成「App 卡了」，读屏也会把它当可聚焦的纯噪音。显式标成 disabled。
+                .semantics { disabled() },
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
@@ -1235,7 +1262,7 @@ private fun DrawerHead(
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                text = "搜索会话",
+                text = "搜索会话（暂未开放）",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
             )
@@ -1298,13 +1325,16 @@ private fun DrawerSectionHeader(text: String, count: Int) {
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Medium,
             letterSpacing = 0.6.sp,
-            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.45f),
+            // 对比度：11sp 小字在浅色主题（background #F4F7FB / onBackground #182430）下
+            // 要满足 AA 4.5:1。实测 0.45 折算后只有 ≈2.7:1、计数 0.3 只有 ≈1.8:1，
+            // 强光下基本看不见。0.7 / 0.55 是同一观感下能达标的下限。
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
         )
         Spacer(Modifier.width(6.dp))
         Text(
             text = count.toString(),
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.3f),
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f),
         )
         Spacer(Modifier.width(10.dp))
         Box(
@@ -1406,6 +1436,12 @@ private fun DrawerSessionRow(
                 onClick = onClick,
                 onLongClick = { menuOpen = true },
             )
+            // 置顶 / 归档原本只由「3dp 竖条颜色 + 标题透明度」表达：读屏用户听到的是
+            // 一模一样的「标题 + 时间 + 会话操作」，色弱用户在 3dp 窄条上分不清
+            // #5AA2FF 与 #F2C14E。`stateDescription` 把状态变成可朗读的文字。
+            .semantics {
+                if (pinned) stateDescription = "已置顶" else if (archived) stateDescription = "已归档"
+            }
             .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1415,14 +1451,18 @@ private fun DrawerSessionRow(
                 .padding(end = 10.dp)
                 .size(width = 3.dp, height = 22.dp)
                 .clip(RoundedCornerShape(2.dp))
-                .background(barColor),
+                .background(barColor)
+                // 纯装饰：状态已经由上面的 `stateDescription` 表达，这里再挂语义会被
+                // 读屏重复念一遍。
+                .clearAndSetSemantics {},
         )
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
                 text = summary.displayName,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = if (pinned) FontWeight.Medium else FontWeight.Normal,
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = if (archived) 0.5f else 1f),
+                // 归档行标题 0.5 → 0.62：11~13sp 正文的 AA 下限，同时仍能看出「退后」。
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = if (archived) 0.62f else 1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -1432,7 +1472,8 @@ private fun DrawerSessionRow(
                     TimeText.relative(summary.updatedAt, now).ifBlank { null },
                 ).joinToString(" · "),
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.45f),
+                // 副标题 0.45 → 0.65（同上，11sp 小字的 AA 下限）。
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.65f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

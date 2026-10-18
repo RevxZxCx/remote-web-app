@@ -15,6 +15,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -51,12 +52,13 @@ class SessionActionsMenuRenderTest {
         onUnpin: () -> Unit = {},
         title: String? = null,
         subtitle: String? = null,
+        onDismiss: () -> Unit = {},
     ) {
         compose.setContent {
             MaterialTheme {
                 SessionActionsMenu(
                     expanded = expanded,
-                    onDismiss = {},
+                    onDismiss = onDismiss,
                     archived = archived,
                     pinned = pinned,
                     busy = busy,
@@ -132,14 +134,23 @@ class SessionActionsMenuRenderTest {
     }
 
     @Test
-    fun `点移入归档先弹二次确认且不立即回调`() {
+    fun `点移入归档先收菜单再弹二次确认且不立即回调`() {
         var archiveCalls = 0
-        setMenu(expanded = true, onArchive = { archiveCalls++ })
+        var dismissed = 0
+        setMenu(
+            expanded = true,
+            onArchive = { archiveCalls++ },
+            onDismiss = { dismissed++ },
+        )
 
         compose.onNodeWithText("移入归档").performClick()
 
         // 关键断言：点完菜单项，onArchive 还不能被调用。
         assertEquals(0, archiveCalls)
+        // 而且必须先收起菜单：菜单与 AlertDialog 是两个独立 Popup，同时存在时层级由
+        // 最后请求者决定，随平台/版本变。`setMenu` 原先把 `onDismiss` 写死成空 lambda，
+        // 所以这个顺序从来没被守过——把实现里的 `onDismiss()` 删掉，本条仍会全绿。
+        assertTrue("点「移入归档」必须先收起菜单", dismissed >= 1)
         compose.onNodeWithText("移入归档？").assertIsDisplayed()
         // 对话框里说明「可以从已归档里找回」，让这一步是可预期的。
         compose.onNodeWithText("可以从「已归档」里找回。", substring = true).assertIsDisplayed()
