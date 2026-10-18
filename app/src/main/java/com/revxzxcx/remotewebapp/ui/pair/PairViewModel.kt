@@ -17,6 +17,22 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
+/**
+ * 地址探测的结构化结果（R033 ③）。
+ *
+ * 为什么不是一段拼好的字符串：探测要分「成功 / 失败」两种**视觉**（成功绿描边、
+ * 失败红描边）。字符串只能靠 `startsWith("已连通")` 猜，一旦文案微调就静默走错分支。
+ * 把结论拆成 [ok] + 标题 + 细节行，UI 直接按 [ok] 选色。
+ */
+data class PairProbe(
+    /** 地址是否可达。 */
+    val ok: Boolean,
+    /** 一句话结论，如「地址可达」「连不上这个地址」。 */
+    val headline: String,
+    /** 细节行，逐行展示（配对状态、公网/局域网地址、失败原因）。 */
+    val lines: List<String> = emptyList(),
+)
+
 /** 配对页的状态。 */
 data class PairUiState(
     /** 是否正在配对（禁用按钮 + 转圈）。 */
@@ -24,7 +40,7 @@ data class PairUiState(
     /** 失败提示；成功时为 `null`。 */
     val error: String? = null,
     /** 地址探测结果，仅用于展示「已连通 / 不可达」。 */
-    val probe: String? = null,
+    val probe: PairProbe? = null,
     /** 上一次用过的地址，用于裸 token 补全。 */
     val lastBaseUrl: String? = null,
     /** 设备型号，作为凭证 label。 */
@@ -105,33 +121,59 @@ class PairViewModel(
     fun probe(baseUrl: String) {
         val normalized = PairLinkParser.normalizeBaseUrl(baseUrl)
         if (normalized == null) {
-            _state.value = _state.value.copy(error = "地址格式不对：请填 http(s)://主机[:端口]")
+            // 格式问题也是「探测结论」，要贴着输入框显示，不进全局错误条（R033 ③）。
+            _state.value = _state.value.copy(
+                busy = false,
+                error = null,
+                probe = PairProbe(
+                    ok = false,
+                    headline = "地址格式不对",
+                    lines = listOf("请填 http(s)://主机[:端口]，例如 http://192.168.1.5:19387"),
+                ),
+            )
             return
         }
-        HostPolicy.rejectionReason(normalized)?.let {
-            _state.value = _state.value.copy(error = it)
+        HostPolicy.rejectionReason(normalized)?.let { reason ->
+            _state.value = _state.value.copy(
+                busy = false,
+                error = null,
+                probe = PairProbe(ok = false, headline = "这个地址不能用", lines = listOf(reason)),
+            )
             return
         }
         _state.value = _state.value.copy(busy = true, error = null, probe = null)
         viewModelScope.launch {
             try {
                 val status: PairStatus = PairingApi(container.probeHttp()).status(normalized)
-                val text = buildString {
-                    append("已连通")
-                    append(if (status.paired) "；桌面端已有配对设备" else "；桌面端当前无配对设备")
-                    status.publicUrl?.let { append("\n公网地址：$it") }
+                val lines = buildList {
+                    add(if (status.paired) "桌面端已有配对设备" else "桌面端当前无配对设备")
+                    status.publicUrl?.let { add("公网地址 $it") }
                     if (status.lanAddresses.isNotEmpty()) {
-                        append("\n局域网地址：${status.lanAddresses.joinToString("、")}")
+                        add("局域网地址 ${status.lanAddresses.joinToString("、")}")
                     }
                 }
-                _state.value = _state.value.copy(busy = false, probe = text)
+                _state.value = _state.value.copy(
+                    busy = false,
+                    probe = PairProbe(ok = true, headline = "地址可达", lines = lines),
+                )
             } catch (e: PairingException) {
-                _state.value = _state.value.copy(busy = false, error = e.message ?: "地址不可达")
+                _state.value = _state.value.copy(
+                    busy = false,
+                    probe = PairProbe(
+                        ok = false,
+                        headline = "连不上这个地址",
+                        lines = listOf(e.message ?: "地址不可达"),
+                    ),
+                )
             } catch (e: Exception) {
                 // 兜底：任何未预期异常都不能逃出 launch（否则进程崩溃）。
                 _state.value = _state.value.copy(
                     busy = false,
-                    error = e.message ?: "地址不可达（${e.javaClass.simpleName}）",
+                    probe = PairProbe(
+                        ok = false,
+                        headline = "连不上这个地址",
+                        lines = listOf(e.message ?: "地址不可达（${e.javaClass.simpleName}）"),
+                    ),
                 )
             }
         }

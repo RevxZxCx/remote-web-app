@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,13 +32,16 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -71,6 +76,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontFamily
@@ -759,6 +766,9 @@ private fun SessionRowItem(
             onUnarchive = { onUnarchive(summary.sessionId) },
             onPin = { onPin(summary.sessionId) },
             onUnpin = { onUnpin(summary.sessionId) },
+            // 主区的长按菜单与抽屉走同一个组件，上下文头也要一致（R033 ②）。
+            title = summary.displayName,
+            subtitle = TimeText.relative(summary.updatedAt, now),
         )
     }
 }
@@ -783,19 +793,48 @@ internal fun HomeDrawerSheet(
     drawerState: DrawerState,
     content: @Composable () -> Unit,
 ) {
-    ModalDrawerSheet(drawerState = drawerState) { content() }
+    ModalDrawerSheet(
+        drawerState = drawerState,
+        modifier = Modifier
+            .fillMaxHeight()
+            .width(DrawerPanelWidth)
+            .shadow(elevation = 12.dp, shape = DrawerPanelShape, clip = false)
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+                shape = DrawerPanelShape,
+            ),
+        drawerShape = DrawerPanelShape,
+        drawerContainerColor = MaterialTheme.colorScheme.surface,
+        drawerTonalElevation = 0.dp,
+    ) { content() }
 }
 
 /**
- * 左侧会话抽屉：置顶 / 最近 / 按工作区分组。
+ * 抽屉浮起面板的宽度（R033 ①）。
+ *
+ * 默认 `ModalDrawerSheet` 铺满 `NavigationDrawerTokens.ContainerWidth = 360dp`，在本机
+ * （360dp 宽）等于**整屏**：没有右边界、没有圆角，用户看到的是一块和页面糊在一起的面，
+ * 而不是「浮在页面上的一层」。318dp 留出 42dp 让底下的页面与遮罩透出来，层级才成立。
+ *
+ * ⚠️ 318 是设计值不是「自适应」：`ModalDrawerSheet` 内部会再套一层
+ * `sizeIn(min 240dp, max 360dp)`，所以比 240 小的值会被 system 抬回 240，
+ * 比 360 大的值会被压回 360。真正要改宽度只能改这里。
+ */
+private val DrawerPanelWidth = 318.dp
+
+/** 抽屉面板圆角：只圆右侧两角，左侧贴边（它是从左边滑出来的）。 */
+private val DrawerPanelShape = RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp)
+
+/** 抽屉里每一行会话的圆角（R033 ①）：10dp，和卡片的其他圆角同一档。 */
+private val DrawerRowShape = RoundedCornerShape(10.dp)
+
+/**
+ * 左侧会话抽屉：置顶 / 最近 / 按工作区分组，外加一个「已归档」聚合视图。
  *
  * 为什么要有抽屉而不是只靠工作区展开：实测有 5 个工作区、47 条会话，
  * 用户「最近在哪个会话里说过话」的记忆通常强于「它在哪个工作区」，
  * 所以「最近」这一段是主入口（原型 `#home` 的会话抽屉）。
- */
-@Composable
-/**
- * 会话抽屉。
  *
  * 可见性是 `internal` 而不是 `private`：这个组装的 `LazyColumn` key 唯一性是一个
  * **反复逃逸**的真实缺陷（R003：同一会话同时出现在两个工作区的 `sessionIds` 里时
@@ -803,6 +842,7 @@ internal fun HomeDrawerSheet(
  * 才抓得到——502 项纯逻辑单测全部漏掉了它。测试源码集与 main 同模块，
  * `internal` 正好够用，不必把实现细节公开成 `public`。
  */
+@Composable
 internal fun SessionDrawer(
     state: HomeUiState,
     onOpenSession: (SessionSummary, Workspace?) -> Unit,
@@ -824,22 +864,24 @@ internal fun SessionDrawer(
     val archivedIds = state.snapshot.archivedSessionIds
     val pinnedIds = state.snapshot.pinnedSessionIds
 
+    // 归档聚合视图（R033 ①）：抽屉底部「已归档 N」点进去看全局归档会话。
+    // 用 rememberSaveable 是为了转屏/进程重建后仍停在用户打开的那一屏。
+    var archivedOpen by rememberSaveable { mutableStateOf(false) }
+    val archivedSessions = remember(archivedIds, state.sessions.items) {
+        state.sessions.items
+            .filter { it.sessionId in archivedIds }
+            .sortedByDescending { it.updatedAt }
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
-        Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("会话", style = MaterialTheme.typography.titleLarge)
-                Text(
-                    text = if (state.sessionsLoading) {
-                        "正在读取会话…"
-                    } else {
-                        val topLevel = state.snapshot.items.sumOf { it.sessionIds.size }
-                        "共 ${state.sessions.items.size} 条 · 顶层 $topLevel · 已归档 ${state.snapshot.archivedSessionIds.size}"
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
-                )
-            }
-        }
+        DrawerHead(
+            state = state,
+            workspaceCount = groups.size,
+            sessionCount = state.sessions.items.size,
+            pinnedCount = pinnedIds.size,
+            archivedCount = archivedIds.size,
+            onRefreshSessions = onRefreshSessions,
+        )
         HorizontalDivider(color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.08f))
 
         // 真机踩到的坑（M2 T009 首次出现，M3 复验时仍能复现）：抽屉先打开、会话列表后到，
@@ -873,28 +915,36 @@ internal fun SessionDrawer(
         }
 
         LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-            if (pinned.isNotEmpty()) {
-                item(key = "hdr-pinned") { DrawerHeader("置顶") }
-                items(pinned, key = { "pin-${it.first.sessionId}" }) { pair ->
-                    DrawerSessionRow(
-                        summary = pair.first,
-                        subtitle = pair.second?.displayName,
-                        onClick = { onOpenSession(pair.first, pair.second) },
-                        now = now,
-                        busy = pair.first.sessionId in busySessionIds,
-                        archivedIds = archivedIds,
-                        pinnedIds = pinnedIds,
-                        onArchive = onArchive,
-                        onUnarchive = onUnarchive,
-                        onPin = onPin,
-                        onUnpin = onUnpin,
-                    )
+            if (archivedOpen) {
+                // 归档聚合视图（R033 ①）：取代上面的常规三段，只显示归档会话。
+                // 归档会话在主区是「工作区展开段」里的一个子段，抽屉里此前完全没有入口——
+                // 用户归档完就再也找不到它，只能去桌面端取消归档。
+                //
+                // ⚠️ 返回入口必须放在**顶部**：归档会话可能几十条，把「返回」放在列表末尾
+                // 等于要求用户先滚到底才出得去；而 `archivedOpen` 是 `rememberSaveable`，
+                // 关掉抽屉再打开仍停在这一屏，没有返回入口就是一个死胡同。
+                item(key = "archived-back") {
+                    TextButton(
+                        onClick = { archivedOpen = false },
+                        modifier = Modifier.padding(start = 8.dp, top = 2.dp),
+                    ) {
+                        Text("返回会话列表")
+                    }
                 }
-            }
-
-            if (recent.isNotEmpty()) {
-                item(key = "hdr-recent") { DrawerHeader("最近") }
-                items(recent, key = { "recent-${it.sessionId}" }) { summary ->
+                item(key = "hdr-archived") {
+                    DrawerSectionHeader(text = "已归档", count = archivedSessions.size)
+                }
+                if (archivedSessions.isEmpty()) {
+                    item(key = "archived-empty") {
+                        Text(
+                            text = "还没有归档的会话。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
+                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+                        )
+                    }
+                }
+                items(archivedSessions, key = { "archived-${it.sessionId}" }) { summary ->
                     DrawerSessionRow(
                         summary = summary,
                         subtitle = state.snapshot.workspaceOf(summary.sessionId)?.displayName,
@@ -911,71 +961,120 @@ internal fun SessionDrawer(
                         onUnpin = onUnpin,
                     )
                 }
-            }
-
-            item(key = "hdr-ws") { DrawerHeader("按工作区") }
-            groups.forEach { group ->
-                // key 里**不能带下标**（R006 P3-2）：工作区顺序由 `order` 帧决定，插入/重排会
-                // 让所有下标位移，于是全部 key 变化、LazyColumn 无法复用项，滚动位置直接丢失。
-                // workspaceId 已是稳定唯一标识。
-                item(key = "ws-${group.workspace.workspaceId}") {
-                    Text(
-                        text = "${group.workspace.displayName} · ${group.activeCount}",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Medium,
-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
-                    )
-                }
-                items(
-                    // 排除归档与置顶：归档在「已归档」段、置顶在「置顶」段各有归属，
-                    // 同一会话在抽屉里出现两次是 R003 指出的问题。
-                    group.rows.filter { it.isArchived.not() && it.isPinned.not() },
-                    // key 必须带上 workspaceId：同一个会话可能同时出现在两个工作区的
-                    // sessionIds 里（`SessionGroupingTest` 有专门用例），只用 sessionId
-                    // 会让 LazyColumn 因重复 key 直接抛 IllegalArgumentException。
-                    key = { "drawer-${group.workspace.workspaceId}-${it.sessionId}" },
-                ) { row ->
-                    DrawerSessionRow(
-                        summary = row.summary,
-                        subtitle = null,
-                        onClick = { onOpenSession(row.summary, group.workspace) },
-                        now = now,
-                        busy = row.summary.sessionId in busySessionIds,
-                        archivedIds = archivedIds,
-                        pinnedIds = pinnedIds,
-                        onArchive = onArchive,
-                        onUnarchive = onUnarchive,
-                        onPin = onPin,
-                        onUnpin = onUnpin,
-                    )
-                }
-            }
-
-            // 空态必须能区分「读取失败」与「确实没有会话」。旧实现只写「没有读到会话。
-            // 下拉主区刷新，或检查连接。」——而 `sessionsError` 的黄条只挂在主区，
-            // 抽屉里根本看不到，于是超时失败与空列表长得一模一样（M3 T009 真机踩到：
-            // 冷启动 `session/list` 要 2.6s，与 mux 建连抢带宽时会超时，用户只看到
-            // 「没有读到会话」，既不知道是失败、也不知道可以点重试）。
-            if (state.sessions.isEmpty && state.sessionsLoading.not()) {
-                item(key = "empty") {
-                    val failure = state.sessionsError
-                    Column(
-                        Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(
-                            text = if (failure == null) {
-                                "没有读到会话。下拉主区刷新，或检查连接。"
-                            } else {
-                                "会话列表读取失败：$failure"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
+            } else {
+                if (pinned.isNotEmpty()) {
+                    item(key = "hdr-pinned") { DrawerSectionHeader(text = "置顶", count = pinned.size) }
+                    items(pinned, key = { "pin-${it.first.sessionId}" }) { pair ->
+                        DrawerSessionRow(
+                            summary = pair.first,
+                            subtitle = pair.second?.displayName,
+                            onClick = { onOpenSession(pair.first, pair.second) },
+                            now = now,
+                            busy = pair.first.sessionId in busySessionIds,
+                            archivedIds = archivedIds,
+                            pinnedIds = pinnedIds,
+                            onArchive = onArchive,
+                            onUnarchive = onUnarchive,
+                            onPin = onPin,
+                            onUnpin = onUnpin,
                         )
-                        TextButton(onClick = onRefreshSessions) { Text("重试") }
+                    }
+                }
+
+                if (recent.isNotEmpty()) {
+                    item(key = "hdr-recent") { DrawerSectionHeader(text = "最近", count = recent.size) }
+                    items(recent, key = { "recent-${it.sessionId}" }) { summary ->
+                        DrawerSessionRow(
+                            summary = summary,
+                            subtitle = state.snapshot.workspaceOf(summary.sessionId)?.displayName,
+                            onClick = {
+                                onOpenSession(summary, state.snapshot.workspaceOf(summary.sessionId))
+                            },
+                            now = now,
+                            busy = summary.sessionId in busySessionIds,
+                            archivedIds = archivedIds,
+                            pinnedIds = pinnedIds,
+                            onArchive = onArchive,
+                            onUnarchive = onUnarchive,
+                            onPin = onPin,
+                            onUnpin = onUnpin,
+                        )
+                    }
+                }
+
+                item(key = "hdr-ws") { DrawerSectionHeader(text = "按工作区", count = groups.size) }
+                groups.forEach { group ->
+                    // key 里**不能带下标**（R006 P3-2）：工作区顺序由 `order` 帧决定，插入/重排会
+                    // 让所有下标位移，于是全部 key 变化、LazyColumn 无法复用项，滚动位置直接丢失。
+                    // workspaceId 已是稳定唯一标识。
+                    item(key = "ws-${group.workspace.workspaceId}") {
+                        DrawerWorkspaceHeader(
+                            name = group.workspace.displayName,
+                            activeCount = group.activeCount,
+                        )
+                    }
+                    items(
+                        // 排除归档与置顶：归档在「已归档」段、置顶在「置顶」段各有归属，
+                        // 同一会话在抽屉里出现两次是 R003 指出的问题。
+                        group.rows.filter { it.isArchived.not() && it.isPinned.not() },
+                        // key 必须带上 workspaceId：同一个会话可能同时出现在两个工作区的
+                        // sessionIds 里（`SessionGroupingTest` 有专门用例），只用 sessionId
+                        // 会让 LazyColumn 因重复 key 直接抛 IllegalArgumentException。
+                        key = { "drawer-${group.workspace.workspaceId}-${it.sessionId}" },
+                    ) { row ->
+                        DrawerSessionRow(
+                            summary = row.summary,
+                            subtitle = null,
+                            onClick = { onOpenSession(row.summary, group.workspace) },
+                            now = now,
+                            busy = row.summary.sessionId in busySessionIds,
+                            archivedIds = archivedIds,
+                            pinnedIds = pinnedIds,
+                            onArchive = onArchive,
+                            onUnarchive = onUnarchive,
+                            onPin = onPin,
+                            onUnpin = onUnpin,
+                        )
+                    }
+                }
+
+                // 空态必须能区分「读取失败」与「确实没有会话」。旧实现只写「没有读到会话。
+                // 下拉主区刷新，或检查连接。」——而 `sessionsError` 的黄条只挂在主区，
+                // 抽屉里根本看不到，于是超时失败与空列表长得一模一样（M3 T009 真机踩到：
+                // 冷启动 `session/list` 要 2.6s，与 mux 建连抢带宽时会超时，用户只看到
+                // 「没有读到会话」，既不知道是失败、也不知道可以点重试）。
+                if (state.sessions.isEmpty && state.sessionsLoading.not()) {
+                    item(key = "empty") {
+                        val failure = state.sessionsError
+                        Column(
+                            Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = if (failure == null) {
+                                    "没有读到会话。下拉主区刷新，或检查连接。"
+                                } else {
+                                    "会话列表读取失败：$failure"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f),
+                            )
+                            TextButton(onClick = onRefreshSessions) { Text("重试") }
+                        }
+                    }
+                }
+
+                // 归档入口固定在列表末尾（R033 ①）。只有真的有归档会话时才出现——
+                // 0 条的入口点进去是空列表，纯粹是噪音。
+                if (archivedSessions.isNotEmpty()) {
+                    item(key = "archived-entry") {
+                        Box(Modifier.padding(top = 10.dp, bottom = 10.dp)) {
+                            DrawerArchivedEntry(
+                                count = archivedSessions.size,
+                                expanded = false,
+                                onToggle = { archivedOpen = true },
+                            )
+                        }
                     }
                 }
             }
@@ -983,16 +1082,272 @@ internal fun SessionDrawer(
     }
 }
 
+/**
+ * 抽屉头部的应用标识（R033 ①）。
+ *
+ * 为什么不用 `painterResource(R.mipmap.ic_launcher)`：`mipmap-anydpi/ic_launcher.xml`
+ * 是 R031 做的 `<adaptive-icon>`，`painterResource` 只认得 VectorDrawable 与位图，
+ * 遇到 adaptive-icon 会直接抛
+ * `IllegalArgumentException: Only VectorDrawables and rasterized asset types are supported`。
+ * 这在真机上不会崩（`Image` 走的是 `BitmapPainter` 路径），但在 Robolectric 里
+ * 每一条渲染层测试都会炸——`SessionDrawerRenderTest` 与 `SessionActionsMenuRenderTest`
+ * 一共 6 条用例当场全红。用渐变方块 + 图标自绘，既保住视觉，也不给测试埋雷。
+ *
+ * 渐变取 R031 应用图标的四角（#8DDCFD → #C4B9FB → #D3AEFE）。
+ */
 @Composable
-private fun DrawerHeader(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.45f),
-        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp),
-    )
+private fun DrawerAppMark() {
+    Box(
+        modifier = Modifier
+            .size(30.dp)
+            .clip(RoundedCornerShape(9.dp))
+            .background(
+                Brush.linearGradient(
+                    listOf(
+                        Color(0xFF8DDCFD),
+                        Color(0xFFC4B9FB),
+                        Color(0xFFD3AEFE),
+                    ),
+                ),
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = Icons.Default.List,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = Color(0xFF0B1420).copy(alpha = 0.72f),
+        )
+    }
 }
 
+/**
+ * 抽屉头部（R033 ①）。
+ *
+ * 改造前这里是一个 `Surface` 铺满宽度、里面两行纯文字：「会话」+「共 N 条 · 顶层 M ·
+ * 已归档 K」。三个问题：
+ *  1. 三个数字塞在一行 11sp 的灰字里，扫视时读不出重点；
+ *  2. 没有任何「这是哪个应用」的标识，抽屉浮起来之后和主区不像同一个产品；
+ *  3. 唯一的动作是长按行——没有刷新入口（主区要下拉，抽屉里没手势）。
+ *
+ * 现在：30dp 应用图标 + 标题 + 一行状态副标题 + 刷新按钮；下面三枚统计胶囊把会话 /
+ * 置顶 / 归档拆成可扫视的三块；再下面一行 34dp 的搜索占位。
+ *
+ * ⚠️ 搜索框是**纯视觉占位**，不接任何输入：`DshEndpoints.SESSION_SEARCH` 这个常量
+ * 在工程里只有定义、没有任何实现，`session/search` 的 wire 参数形状从未实测过
+ * （决策 D88：第三方 RPC 的 wire 形状必须逐端点实测，不能照着名字猜）。挂一个点了
+ * 没反应的输入框比不挂更糟，所以这里只画一条「搜索」提示，等参数形状验证过再接。
+ *
+ * ⚠️ 同理没有「新建会话」按钮：`DshEndpoints.SESSION_CREATE` 同样只有常量没有实现。
+ *
+ * 图标由 [DrawerAppMark] 自绘（理由见它的 KDoc）。
+ */
+@Composable
+private fun DrawerHead(
+    state: HomeUiState,
+    workspaceCount: Int,
+    sessionCount: Int,
+    pinnedCount: Int,
+    archivedCount: Int,
+    onRefreshSessions: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 14.dp, end = 10.dp, top = 12.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            DrawerAppMark()
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "会话",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                )
+                Text(
+                    // 副标题是**状态陈述**，不能一律写「已连接」（R033 审查 P2-1）：
+                    // 解绑（`needsRepair`）与缓存（`fromCache`）时那句「已连接」是假的，
+                    // 而抽屉里没有别的地方能纠正它——`ConnectionBanner` 只挂在主区。
+                    text = when {
+                        state.sessionsLoading -> "正在读取…"
+                        state.needsRepair -> "设备已解绑 · 需要重新配对"
+                        state.sessionsError != null -> "读取失败 · 可点右侧重试"
+                        state.fromCache -> "$workspaceCount 个工作区 · 缓存数据"
+                        else -> "$workspaceCount 个工作区 · 已连接"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    maxLines = 1,
+                )
+            }
+            AppIconButton(onClick = onRefreshSessions, contentDescription = "刷新会话") {
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            DrawerStatPill(value = sessionCount, unit = "会话")
+            DrawerStatPill(value = pinnedCount, unit = "置顶", accent = MaterialTheme.colorScheme.primary)
+            DrawerStatPill(value = archivedCount, unit = "归档", accent = MaterialTheme.colorScheme.tertiary)
+        }
+
+        // 搜索占位：只有视觉，不接收输入（理由见上方 KDoc）。
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(34.dp)
+                .clip(pillShape)
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Default.Search,
+                contentDescription = null,
+                modifier = Modifier.size(15.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "搜索会话",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+            )
+        }
+    }
+}
+
+/**
+ * 抽屉统计胶囊。与主区的 [StatPill] 同形（`pillShape` + 半透明 `surfaceVariant`），
+ * 但数字用等宽字重强调、单位后置，并且可以带一个强调色（置顶蓝 / 归档黄）——
+ * 主区那三枚是「工作区属性」，这里是「全局计数」，两者不该长得一模一样。
+ */
+@Composable
+private fun DrawerStatPill(value: Int, unit: String, accent: Color? = null) {
+    Row(
+        modifier = Modifier
+            .clip(pillShape)
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+            .border(
+                width = 1.dp,
+                color = accent?.copy(alpha = 0.3f) ?: MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                shape = pillShape,
+            )
+            .padding(horizontal = 9.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            text = value.toString(),
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = accent ?: MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            text = unit,
+            style = MaterialTheme.typography.labelSmall,
+            color = (accent ?: MaterialTheme.colorScheme.onSurfaceVariant).copy(alpha = 0.75f),
+        )
+    }
+}
+
+/**
+ * 抽屉分组标题（R033 ①）。
+ *
+ * 改造前只有一行 11sp 灰字（"置顶" / "最近" / "按工作区"），三段的视觉权重完全一样，
+ * 而且没有条数——用户看不出「最近」里到底有 3 条还是 30 条。现在：全大写字距拉开的
+ * 小标题 + 计数 + 右侧一条渐隐的细线；细线用 `Box` 的横向渐变画，把标题和内容分开，
+ * 但不引入第二条实线（实线会和上下的 `HorizontalDivider` 打架）。
+ */
+@Composable
+private fun DrawerSectionHeader(text: String, count: Int) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 0.6.sp,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.45f),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = count.toString(),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.3f),
+        )
+        Spacer(Modifier.width(10.dp))
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(1.dp)
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.onBackground.copy(alpha = 0.1f),
+                            Color.Transparent,
+                        ),
+                    ),
+                ),
+        )
+    }
+}
+
+/** 抽屉里的工作区小标题（R033 ①）：工作区名 + 活跃会话数。 */
+@Composable
+private fun DrawerWorkspaceHeader(name: String, activeCount: Int) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = name,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = activeCount.toString(),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.35f),
+        )
+    }
+}
+
+/**
+ * 抽屉里的一行会话（R033 ①）。
+ *
+ * 改造前：一个 `Row` 加 `padding(horizontal = 16.dp, vertical = 9.dp)`，两行文字上下堆叠，
+ * 行与行之间没有任何形状或分隔，整段看起来像一块连续的文本块；右侧只有运行中的均衡器，
+ * 长按是唯一能唤出菜单的方式（没有任何视觉提示说明可长按）。
+ *
+ * 现在：
+ *  - 10dp 圆角行 + 左右 8dp 外边距，行与行之间有呼吸缝，扫视时每行是独立目标；
+ *  - 左侧 3dp 状态条：置顶蓝 / 归档黄 / 普通灰（原来只有置顶有 2dp 条，且在主区）；
+ *  - 右侧常驻 `⋮` 按钮（26dp 触达 + 12dp 视觉），长按仍然保留——两条路径都能出菜单；
+ *  - 归档行标题降到 45% 不透明度，从视觉上「退到后面去」。
+ *
+ * ⚠️ `rememberPressScale` / `rememberPressTint` 必须和 `clickable` 共用同一个
+ * `interactionSource`，否则缩放恒为 1f、着色恒为透明（R018 P2-2 踩过）。
+ */
 @Composable
 private fun DrawerSessionRow(
     summary: SessionSummary,
@@ -1008,17 +1363,47 @@ private fun DrawerSessionRow(
     onUnpin: (String) -> Unit = {},
 ) {
     var menuOpen by rememberSaveable { mutableStateOf(false) }
+    val interactionSource = remember { MutableInteractionSource() }
+    val scale = rememberPressScale(interactionSource = interactionSource)
+    val pressTint = rememberPressTint(interactionSource = interactionSource)
+    val archived = summary.sessionId in archivedIds
+    val pinned = summary.sessionId in pinnedIds
+    val barColor = when {
+        pinned -> MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+        archived -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.55f)
+        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .combinedClickable(onClick = onClick, onLongClick = { menuOpen = true })
-            .padding(horizontal = 16.dp, vertical = 9.dp),
+            .padding(horizontal = 8.dp, vertical = 1.dp)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(DrawerRowShape)
+            .background(pressTint)
+            .combinedClickable(
+                interactionSource = interactionSource,
+                indication = ripple(),
+                onClick = onClick,
+                onLongClick = { menuOpen = true },
+            )
+            .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // 左侧状态条：3dp 宽、贴着行高的 22dp，圆角 2dp。
+        Box(
+            modifier = Modifier
+                .padding(end = 10.dp)
+                .size(width = 3.dp, height = 22.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(barColor),
+        )
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
                 text = summary.displayName,
                 style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (pinned) FontWeight.Medium else FontWeight.Normal,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = if (archived) 0.5f else 1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -1040,21 +1425,41 @@ private fun DrawerSessionRow(
             //
             // 顺带修掉硬编码 `Color(0xFF4ADE80)`：R017 的 `statusRunning` token 让
             // 它在浅色主题下也能保持 ≥3:1 对比度（原绿在白底上会发灰）。
-            GeneratingGlyph(size = GlyphSize.SM, tint = LocalStatusRunning.current)
+            Box(Modifier.padding(start = 6.dp)) {
+                GeneratingGlyph(size = GlyphSize.SM, tint = LocalStatusRunning.current)
+            }
         }
-        // 抽屉里没有独立的「已归档」段（归档会话只在工作区展开段出现），所以
-        // archived / pinned 从 `state.snapshot` 推导而不是写死——写死会在主区与抽屉
-        // 行为分叉，而这条分叉没有测试盯着。
+        // 常驻的 ⋮：抽屉里此前只能长按唤出菜单，用户根本发现不了。
+        AppIconButton(
+            onClick = { menuOpen = true },
+            contentDescription = "会话操作",
+            enabled = true,
+        ) {
+            Icon(
+                imageVector = Icons.Default.MoreVert,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onBackground.copy(alpha = if (archived) 0.3f else 0.5f),
+            )
+        }
+        // archived / pinned 一律从 `state.snapshot` 的两个全局 id 集合推导，不由调用点
+        // 写死——写死会让「最近段」「工作区段」「已归档聚合视图」三处的菜单行为分叉，
+        // 而这条分叉没有测试盯着。
         SessionActionsMenu(
             expanded = menuOpen,
             onDismiss = { menuOpen = false },
-            archived = summary.sessionId in archivedIds,
-            pinned = summary.sessionId in pinnedIds,
+            archived = archived,
+            pinned = pinned,
             busy = busy,
             onArchive = { onArchive(summary.sessionId) },
             onUnarchive = { onUnarchive(summary.sessionId) },
             onPin = { onPin(summary.sessionId) },
             onUnpin = { onUnpin(summary.sessionId) },
+            title = summary.displayName,
+            subtitle = listOfNotNull(
+                subtitle,
+                TimeText.relative(summary.updatedAt, now).ifBlank { null },
+            ).joinToString(" · "),
         )
     }
 }

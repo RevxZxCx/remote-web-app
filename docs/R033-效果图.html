@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>R033 效果图 · 会话抽屉 / 长按菜单 / 配对页</title>
+<style>
+/* ============================================================
+   设计令牌 —— 与 app 的 Theme.kt / Shape.kt / Motion.kt 逐字对应
+   （沿用 R031-效果图.html 的令牌表，保证三份原型同源）
+   ============================================================ */
+:root{
+  --primary:#5AA2FF; --onPrimary:#08131F; --primaryContainer:#1B3E63; --onPrimaryContainer:#D3E5FF;
+  --secondary:#7FA8D4; --secondaryContainer:#1D3348; --onSecondaryContainer:#C9DDF2;
+  --background:#0B1420; --onBackground:#E4ECF6;
+  --surface:#111C2B; --onSurface:#E4ECF6;
+  --surfaceVariant:#1A2942; --onSurfaceVariant:#A6BDD8;
+  --outline:#31485F; --outlineVariant:#22334A;
+  --error:#FF8A80; --errorContainer:#48211F; --onErrorContainer:#FFDAD6;
+  --tertiary:#F2C14E; --tertiaryContainer:#4A3A12; --onTertiaryContainer:#FFE7B0;
+  --running:#4ADE80;
+  --r-xs:6px; --r-sm:10px; --r-md:14px; --r-lg:20px; --r-xl:28px; --r-pill:999px;
+  --t-fast:140ms; --t-med:240ms; --t-slow:360ms;
+  --ease:cubic-bezier(.2,0,0,1);
+  --mono:"Cascadia Mono",Consolas,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:#05080d;color:#8ea3bd;
+  font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+  padding:40px 32px 80px;
+}
+h1{font-size:26px;color:#e4ecf6;font-weight:600;margin-bottom:6px}
+h2{font-size:17px;color:#e4ecf6;font-weight:600;margin:52px 0 4px;padding-top:20px;border-top:1px solid #17212e}
+h2:first-of-type{border-top:none;margin-top:32px}
+h3{font-size:13.5px;color:#b9cbe0;font-weight:600;margin:18px 0 6px}
+.lede{font-size:13px;line-height:1.75;color:#7d90a8;max-width:1180px;margin-bottom:8px}
+.lede b{color:#c3d3e6;font-weight:600}
+.lede .k{color:#8fb8e8;font-family:var(--mono);font-size:11.5px}
+code{font-family:var(--mono);font-size:12px;background:#121b27;border:1px solid #1e2a3a;border-radius:4px;padding:1px 5px;color:#9fc0e0}
+.row{display:flex;flex-wrap:wrap;gap:34px;align-items:flex-start;margin-top:22px}
+.col{display:flex;flex-direction:column;gap:10px;align-items:center}
+.caption{font-size:12px;color:#6f8299;letter-spacing:.3px;text-align:center;max-width:380px;line-height:1.6}
+.caption b{color:#a8bdd6;font-weight:600}
+.notes{font-size:12px;line-height:1.85;color:#7d90a8;max-width:420px}
+.notes li{margin-left:16px;margin-top:3px}
+.notes b{color:#b9cbe0;font-weight:600}
+.notes .k{color:#8fb8e8;font-family:var(--mono);font-size:11px}
+.tag{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:4px;font-size:10px;font-family:var(--mono)}
+.tag.new{background:rgba(74,222,128,.13);color:var(--running)}
+.tag.mod{background:rgba(242,193,78,.13);color:var(--tertiary)}
+.tag.keep{background:rgba(90,162,255,.13);color:var(--primary)}
+
+/* ---------- 手机外框 ---------- */
+.phone{
+  width:360px;height:800px;background:var(--background);position:relative;overflow:hidden;
+  border-radius:26px;box-shadow:0 0 0 1px #1b2836, 0 24px 60px rgba(0,0,0,.6);
+  display:flex;flex-direction:column;color:var(--onBackground);
+}
+.phone.tall{height:853px}
+.sbar{height:28px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;flex:0 0 auto;font-size:11px;color:#c8d6e6;font-weight:500}
+.sbar .icons{display:flex;gap:5px;align-items:center;opacity:.9}
+svg{display:block}
+.ico{width:18px;height:18px;stroke:currentColor;stroke-width:1.9;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.ico.sm{width:15px;height:15px;stroke-width:2}
+.ico.xs{width:12px;height:12px;stroke-width:2.2}
+.appicon{border-radius:9px;overflow:hidden;flex:0 0 auto;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+.appicon img{width:100%;height:100%;object-fit:cover;display:block}
+
+/* ============================================================
+   ① 会话抽屉
+   ============================================================ */
+.homebg{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--background)}
+.homebg .tb{height:56px;display:flex;align-items:center;gap:4px;padding:0 4px}
+.homebg .tb .tt{flex:1;min-width:0;padding-left:4px}
+.homebg .tb .tt .l1{font-size:16px;font-weight:600;color:var(--onSurface)}
+.homebg .tb .tt .l2{font-size:11px;color:var(--onSurfaceVariant);margin-top:1px}
+.homebg .ws{padding:8px 14px;display:flex;flex-direction:column;gap:8px}
+.homebg .wcard{height:56px;border-radius:var(--r-md);background:var(--surface);border:1px solid var(--outlineVariant)}
+
+.drawerwrap{position:absolute;inset:0;display:flex;z-index:5}
+.scrim{flex:1;background:rgba(4,8,14,.62)}
+.drawer{
+  width:318px;height:100%;background:var(--surface);
+  border-right:1px solid var(--outline);
+  border-radius:0 var(--r-lg) var(--r-lg) 0;
+  box-shadow:14px 0 44px rgba(0,0,0,.6);
+  display:flex;flex-direction:column;overflow:hidden;position:relative;z-index:2;
+}
+.dhead{flex:0 0 auto;padding:12px 12px 10px;display:flex;flex-direction:column;gap:10px}
+.dhead .r1{display:flex;align-items:center;gap:9px}
+.dhead .r1 .appicon{width:30px;height:30px}
+.dhead .r1 .ht{font-size:16px;font-weight:600;color:var(--onSurface);line-height:20px}
+.dhead .r1 .hs{font-size:10px;color:var(--onSurfaceVariant);letter-spacing:.2px;margin-top:1px}
+.dhead .r1 .acts{margin-left:auto;display:flex;gap:2px}
+.cbtn{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--onSurfaceVariant);flex:0 0 auto}
+.dstats{display:flex;gap:6px;flex-wrap:wrap}
+.stat{height:24px;border-radius:var(--r-pill);background:var(--surfaceVariant);border:1px solid var(--outlineVariant);display:inline-flex;align-items:center;gap:5px;padding:0 9px;font-size:10.5px;color:var(--onSurfaceVariant)}
+.stat b{color:var(--onSurface);font-family:var(--mono);font-size:11px;font-weight:600}
+.stat.pin{border-color:rgba(90,162,255,.35);color:#9CC4F0}
+.stat.arc{border-color:rgba(242,193,78,.3);color:var(--tertiary)}
+.dsearch{height:34px;border-radius:var(--r-pill);background:var(--background);border:1px solid var(--outlineVariant);display:flex;align-items:center;gap:7px;padding:0 11px;color:var(--outline);font-size:12px}
+
+.dlist{flex:1 1 auto;overflow:hidden;padding:0 8px}
+.dhdr{display:flex;align-items:center;gap:7px;padding:12px 8px 5px;font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--onSurfaceVariant);opacity:.85}
+.dhdr .n{font-family:var(--mono);font-size:9.5px;letter-spacing:0;color:var(--outline)}
+.dhdr::after{content:'';flex:1;height:1px;background:var(--outlineVariant);opacity:.75}
+.srow{display:flex;align-items:center;gap:8px;padding:7px 8px 7px 6px;border-radius:var(--r-sm);position:relative}
+.srow.sel{background:var(--surfaceVariant)}
+.srow .bar{width:3px;height:28px;border-radius:2px;background:transparent;flex:0 0 auto}
+.srow.run .bar{background:var(--running)}
+.srow.pin .bar{background:var(--primary)}
+.srow .txt{flex:1 1 auto;min-width:0}
+.srow .l1{font-size:13px;line-height:18px;color:var(--onSurface);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.srow .l2{font-size:10.5px;line-height:15px;color:var(--onSurfaceVariant);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.srow .tr{display:flex;align-items:center;gap:3px;flex:0 0 auto}
+.morebtn{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--outline)}
+.eq{display:flex;align-items:flex-end;gap:2px;height:11px;width:13px}
+.eq i{width:2.5px;border-radius:1.5px;background:var(--running);animation:eq 900ms ease-in-out infinite}
+.eq i:nth-child(1){height:5px;animation-delay:0ms}
+.eq i:nth-child(2){height:11px;animation-delay:150ms}
+.eq i:nth-child(3){height:7px;animation-delay:300ms}
+@keyframes eq{0%,100%{transform:scaleY(.45)}50%{transform:scaleY(1)}}
+
+.dfoot{flex:0 0 auto;border-top:1px solid var(--outlineVariant);padding:7px 8px 9px;background:var(--surface)}
+.frow{display:flex;align-items:center;gap:9px;padding:8px;border-radius:var(--r-sm);font-size:12.5px;color:var(--onSurfaceVariant)}
+.frow .n{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--outline)}
+
+/* 浮动菜单 */
+.menu{
+  position:absolute;width:200px;background:var(--surface);border:1px solid var(--outline);
+  border-radius:var(--r-md);box-shadow:0 14px 44px rgba(0,0,0,.66);padding:5px;z-index:9;
+  animation:menuIn 140ms var(--ease);
+}
+@keyframes menuIn{from{opacity:0;transform:scale(.95) translateY(-5px)}to{opacity:1;transform:none}}
+.mhead{padding:8px 10px 7px;border-bottom:1px solid var(--outlineVariant);margin-bottom:4px}
+.mhead .m1{font-size:12.5px;color:var(--onSurface);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mhead .m2{font-size:10px;color:var(--onSurfaceVariant);margin-top:2px}
+.mitem{display:flex;align-items:center;gap:9px;height:40px;padding:0 10px;border-radius:8px;font-size:12.5px;color:var(--onSurface)}
+.mitem .ico{width:16px;height:16px;color:var(--onSurfaceVariant);flex:0 0 auto}
+.mitem .mo{margin-left:auto;font-size:10px;color:var(--outline)}
+.mitem.sel{background:var(--surfaceVariant)}
+
+/* 对话框 */
+.dlgwrap{position:absolute;inset:0;background:rgba(4,8,14,.68);display:flex;align-items:center;justify-content:center;z-index:20;padding:0 24px;animation:fadeIn 160ms var(--ease)}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.dlg{width:100%;background:var(--surface);border:1px solid var(--outline);border-radius:var(--r-xl);padding:18px 16px 10px;box-shadow:0 26px 64px rgba(0,0,0,.72);animation:dlgIn 200ms var(--ease)}
+@keyframes dlgIn{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:none}}
+.dlg .dt{font-size:16px;font-weight:600;color:var(--onSurface);display:flex;align-items:center;gap:8px}
+.dlg .dd{font-size:12.5px;line-height:1.72;color:var(--onSurfaceVariant);margin-top:9px}
+.dlg .dcard{margin-top:11px;border-radius:var(--r-sm);background:var(--surfaceVariant);border:1px solid var(--outlineVariant);padding:9px 11px;display:flex;align-items:center;gap:8px}
+.dlg .dcard .dc1{font-size:12px;color:var(--onSurface);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dlg .dcard .dc2{font-size:10px;color:var(--onSurfaceVariant);margin-top:1px}
+.dlg .dacts{display:flex;justify-content:flex-end;gap:6px;margin-top:15px;padding-bottom:2px}
+.dbtn{height:36px;padding:0 15px;border-radius:var(--r-pill);font-size:12.5px;display:inline-flex;align-items:center;justify-content:center}
+.dbtn.ghost{color:var(--primary)}
+.dbtn.fill{background:var(--primary);color:var(--onPrimary);font-weight:600}
+.dhint{display:flex;align-items:flex-start;gap:7px;margin-top:10px;font-size:11px;line-height:1.6;color:var(--tertiary)}
+.dhint .ico{color:var(--tertiary);flex:0 0 auto;margin-top:1px}
+
+/* ============================================================
+   ② 配对页
+   ============================================================ */
+.pairbody{flex:1 1 auto;overflow:hidden;display:flex;flex-direction:column;gap:11px;padding:6px 16px 12px}
+.pairhero{display:flex;align-items:center;gap:11px;padding:4px 0 2px}
+.pairhero .appicon{width:44px;height:44px;border-radius:12px}
+.pairhero .t1{font-size:18px;font-weight:600;color:var(--onSurface);line-height:24px}
+.pairhero .t2{font-size:11px;line-height:15px;color:var(--onSurfaceVariant);margin-top:1px}
+.seg{display:flex;gap:4px;background:var(--surfaceVariant);border:1px solid var(--outlineVariant);border-radius:var(--r-pill);padding:3px;flex:0 0 auto}
+.seg .s{flex:1;height:30px;border-radius:var(--r-pill);display:flex;align-items:center;justify-content:center;gap:6px;font-size:12px;color:var(--onSurfaceVariant)}
+.seg .s.on{background:var(--surface);color:var(--onSurface);box-shadow:0 1px 5px rgba(0,0,0,.35);font-weight:500}
+.seg .s .ico{width:14px;height:14px}
+
+.card{background:var(--surface);border:1px solid var(--outlineVariant);border-radius:var(--r-md);padding:12px;display:flex;flex-direction:column;gap:10px;flex:0 0 auto}
+.card .ch{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--onSurface);font-weight:600}
+.card .ch .n{margin-left:auto;font-family:var(--mono);font-size:9.5px;color:var(--onSurfaceVariant);font-weight:400;letter-spacing:.5px}
+
+/* 正方形取景框 */
+.scan{width:100%;aspect-ratio:1/1;background:#05080d;border-radius:var(--r-md);position:relative;overflow:hidden;border:1px solid var(--outlineVariant)}
+.scan .cn{position:absolute;width:26px;height:26px;border:2.5px solid var(--primary);opacity:.85}
+.scan .cn.tl{left:14px;top:14px;border-right:none;border-bottom:none;border-radius:8px 0 0 0}
+.scan .cn.tr{right:14px;top:14px;border-left:none;border-bottom:none;border-radius:0 8px 0 0}
+.scan .cn.bl{left:14px;bottom:14px;border-right:none;border-top:none;border-radius:0 0 0 8px}
+.scan .cn.br{right:14px;bottom:14px;border-left:none;border-top:none;border-radius:0 0 8px 0}
+.scan .line{position:absolute;left:8%;right:8%;height:2px;background:linear-gradient(90deg,transparent,rgba(90,162,255,.95),transparent);animation:scanmove 2400ms ease-in-out infinite;box-shadow:0 0 12px rgba(90,162,255,.6)}
+@keyframes scanmove{0%,100%{top:11%}50%{top:87%}}
+.scan .hintc{position:absolute;left:0;right:0;bottom:0;height:60px;background:linear-gradient(to top,rgba(5,8,13,.95),rgba(5,8,13,0));display:flex;align-items:flex-end;justify-content:center;padding-bottom:12px;font-size:11px;color:#9fb4cc}
+.scan .grid{position:absolute;inset:0;background-image:linear-gradient(rgba(90,162,255,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(90,162,255,.06) 1px,transparent 1px);background-size:24px 24px}
+
+.fgroup{display:flex;flex-direction:column;gap:5px}
+.flabel{font-size:11px;color:var(--onSurfaceVariant);letter-spacing:.2px}
+.finput{height:40px;border-radius:var(--r-sm);background:var(--background);border:1px solid var(--outline);display:flex;align-items:center;gap:8px;padding:0 11px;font-family:var(--mono);font-size:11.5px;color:var(--onSurface)}
+.finput .ph{color:var(--outline)}
+.finput.focus{border-color:var(--primary)}
+.fhelp{font-size:10px;line-height:1.5;color:var(--onSurfaceVariant);opacity:.78}
+.fhelp .k{font-family:var(--mono);color:#8fb8e8}
+
+.btnrow{display:flex;gap:8px}
+.btn{height:40px;border-radius:var(--r-pill);display:flex;align-items:center;justify-content:center;gap:7px;font-size:13px;flex:1}
+.btn.fill{background:var(--primary);color:var(--onPrimary);font-weight:600;box-shadow:0 4px 16px rgba(90,162,255,.28)}
+.btn.out{background:transparent;border:1px solid var(--outline);color:var(--onSurface);flex:0 0 auto;padding:0 16px}
+.btn.ghost{background:transparent;color:var(--onSurfaceVariant);flex:0 0 auto;padding:0 12px;font-size:12px}
+
+.probe{border-radius:var(--r-sm);border:1px solid;padding:9px 11px;display:flex;flex-direction:column;gap:4px}
+.probe.ok{border-color:rgba(74,222,128,.42);background:rgba(74,222,128,.07)}
+.probe.bad{border-color:rgba(255,138,128,.42);background:rgba(255,138,128,.07)}
+.probe .pt{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600}
+.probe.ok .pt{color:var(--running)}
+.probe.bad .pt{color:var(--error)}
+.probe .pl{font-size:10.5px;line-height:1.6;color:var(--onSurfaceVariant);font-family:var(--mono)}
+.probe .pl b{color:#8fb8e8;font-weight:400}
+
+.stepline{display:flex;align-items:flex-start;gap:9px;font-size:11px;line-height:1.6;color:var(--onSurfaceVariant)}
+.stepline .num{width:17px;height:17px;border-radius:50%;background:var(--surfaceVariant);border:1px solid var(--outline);display:flex;align-items:center;justify-content:center;font-size:9.5px;font-family:var(--mono);color:var(--primary);flex:0 0 auto;margin-top:1px}
+
+.footnote{margin-top:auto;padding-top:6px;font-size:10px;line-height:1.6;color:var(--onSurfaceVariant);opacity:.72;display:flex;align-items:flex-start;gap:6px}
+.footnote .ico{width:12px;height:12px;flex:0 0 auto;margin-top:1px;color:var(--outline)}
+
+/* 亮色对照 */
+.light{
+  --background:#F4F7FB;--onBackground:#182430;--surface:#FFFFFF;--onSurface:#182430;
+  --surfaceVariant:#E9EFF7;--onSurfaceVariant:#45586D;--outline:#B9C8D9;--outlineVariant:#DCE5EF;
+  --primary:#1F6FEB;--onPrimary:#FFFFFF;--primaryContainer:#D8E6FF;--onPrimaryContainer:#10305C;
+  --secondaryContainer:#DCE8F6;--onSecondaryContainer:#1B3247;--error:#B3261E;--tertiary:#C08A12;
+  --running:#15803D;
+}
+.light .drawer{box-shadow:14px 0 44px rgba(15,35,60,.18)}
+.light .dlg,.light .menu{box-shadow:0 20px 48px rgba(15,35,60,.2)}
+.light .scan{background:#0B1420}
+</style>
+</head>
+<body>
+
+<h1>R033 效果图 · 会话抽屉 / 长按菜单 / 配对页</h1>
+<p class="lede">
+  三块改动：<b>①</b> <b>会话抽屉</b>美化（与聊天页同一套令牌，不再是"一坨文字"）；<b>②</b> 长按菜单加图标与上下文头、<b>归档加二次确认</b>；<b>③</b> <b>配对页重排</b>（扫码框改成正方形、三种入口分段互斥、字段带说明）。
+</p>
+<p class="lede">
+  <b>关于「删除」（你选的是 B）</b>：我逐条验证过 <span class="k">session/delete</span> 一类的端点——App 里用到的 20 个 <span class="k">session/*</span> 方法里没有删除，<span class="k">POST /remote/api/session/delete</span> 返回 <span class="k">not found</span>，HTTP 的 <span class="k">DELETE /api/sessions/&lt;id&gt;</span> 是 401。所以<b>不做假删除</b>：把「归档」措辞改软成「移入归档」，并加二次确认说明"可在归档里找回"。证据见文末。
+</p>
+
+<!-- ============================================================ -->
+<section id="s0">
+<h2>① 会话抽屉</h2>
+<p class="lede">
+  现在的问题（左图按当前实现还原）：抽屉是<b>一整块 surface 色铺满到底</b>，没有边界、没有圆角，和页面糊在一起；每一行只是两行文字上下堆叠，<b>行与行之间没有任何分辨</b>；分组标题「最近 / 按工作区」又小又淡，扫视时抓不到；运行中的会话只有末端一枚小绿柱，几乎看不见；归档数量只藏在副标题里，<b>没有入口</b>。
+</p>
+
+<div class="row">
+  <div class="col">
+    <div class="caption"><b>现在</b>（代码还原：<span class="k">SessionDrawer</span>）</div>
+    <div class="phone">
+      <div class="sbar"><span>17:50</span><span class="icons">▾ ▮ 84</span></div>
+      <div class="drawerwrap">
+        <div class="drawer" style="border-radius:0;border-right:none;box-shadow:none">
+          <div class="dhead" style="padding:16px">
+            <div style="font-size:20px;font-weight:600;color:var(--onSurface);line-height:26px">会话</div>
+            <div style="font-size:10.5px;color:var(--onSurfaceVariant);margin-top:3px">共 125 条 · 顶层 35 · 已归档 2</div>
+          </div>
+          <div style="height:1px;background:var(--outlineVariant);opacity:.5"></div>
+          <div class="dlist" style="padding:0 4px">
+            <div style="font-size:10px;color:var(--onSurfaceVariant);padding:13px 12px 5px;opacity:.55">最近</div>
+            <div style="padding:7px 12px"><div style="font-size:14px;color:var(--onSurface)">开发（new）</div></div>
+            <div style="padding:0 12px 8px;font-size:11px;color:var(--onSurfaceVariant);opacity:.5">bot · 9 分钟前</div>
+            <div style="padding:7px 12px"><div style="font-size:14px;color:var(--onSurface)">App公网配对 Connection Reset 问题修复</div></div>
+            <div style="padding:0 12px 8px;font-size:11px;color:var(--onSurfaceVariant);opacity:.5">bot · 20 分钟前</div>
+            <div style="padding:7px 12px"><div style="font-size:14px;color:var(--onSurface)">维护会话</div></div>
+            <div style="padding:0 12px 8px;font-size:11px;color:var(--onSurfaceVariant);opacity:.5">WDMTG · 15:49</div>
+            <div style="padding:7px 12px"><div style="font-size:14px;color:var(--onSurface)">ZZ-R031-PROBE</div></div>
+            <div style="padding:0 12px 8px;font-size:11px;color:var(--onSurfaceVariant);opacity:.5">bot · 10:28</div>
+            <div style="padding:7px 12px"><div style="font-size:14px;color:var(--onSurface)">Bash 环境当前异常（msys 报错）</div></div>
+            <div style="padding:0 12px 8px;font-size:11px;color:var(--onSurfaceVariant);opacity:.5">default-workspace · 10:09</div>
+          </div>
+        </div>
+        <div class="scrim" style="background:rgba(4,8,14,.75)"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="caption"><b>改后</b> —— 有边界的浮层面板、分组有节奏、运行中一眼可见</div>
+    <div class="phone">
+      <div class="sbar"><span>17:50</span><span class="icons">▾ ▮ 84</span></div>
+      <div class="homebg">
+        <div class="tb">
+          <div class="cbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></div>
+          <div class="tt"><div class="l1">远程 Web</div><div class="l2">工作区 6 · 会话 125</div></div>
+        </div>
+        <div class="ws"><div class="wcard"></div><div class="wcard"></div><div class="wcard"></div></div>
+      </div>
+      <div class="drawerwrap">
+        <div class="drawer">
+          <div class="dhead">
+            <div class="r1">
+              <div class="appicon"><img src="R031-app-icon.png" alt="DSHRM"></div>
+              <div>
+                <div class="ht">会话</div>
+                <div class="hs">6 个工作区 · 已连接</div>
+              </div>
+              <div class="acts">
+                <div class="cbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+                <div class="cbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg></div>
+              </div>
+            </div>
+            <div class="dstats">
+              <div class="stat"><b>125</b> 会话</div>
+              <div class="stat pin"><b>4</b> 置顶</div>
+              <div class="stat arc"><b>2</b> 归档</div>
+            </div>
+            <div class="dsearch">
+              <svg class="ico sm" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+              搜索会话
+            </div>
+          </div>
+
+          <div class="dlist">
+            <div class="dhdr">置顶 <span class="n">4</span></div>
+            <div class="srow pin">
+              <div class="bar"></div>
+              <div class="txt">
+                <div class="l1">开发（new）</div>
+                <div class="l2">bot · 9 分钟前</div>
+              </div>
+              <div class="tr">
+                <div class="eq"><i></i><i></i><i></i></div>
+                <div class="morebtn"><svg class="ico xs" viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></div>
+              </div>
+            </div>
+            <div class="srow pin sel">
+              <div class="bar"></div>
+              <div class="txt">
+                <div class="l1">隧道公网访问</div>
+                <div class="l2">bot · 昨天 10:00</div>
+              </div>
+              <div class="tr">
+                <div class="morebtn"><svg class="ico xs" viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></div>
+              </div>
+            </div>
+
+            <div class="dhdr">最近 <span class="n">28</span></div>
+            <div class="srow">
+              <div class="bar"></div>
+              <div class="txt">
+                <div class="l1">App公网配对 Connection Reset 问题修复</div>
+                <div class="l2">bot · 20 分钟前</div>
+              </div>
+              <div class="tr">
+                <div class="morebtn"><svg class="ico xs" viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></div>
+              </div>
+            </div>
+            <div class="srow">
+              <div class="bar"></div>
+              <div class="txt">
+                <div class="l1">维护会话</div>
+                <div class="l2">WDMTG · 15:49</div>
+              </div>
+              <div class="tr">
+                <div class="morebtn"><svg class="ico xs" viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></div>
+              </div>
+            </div>
+            <div class="srow">
+              <div class="bar"></div>
+              <div class="txt">
+                <div class="l1">ZZ-R031-PROBE</div>
+                <div class="l2">bot · 10:28</div>
+              </div>
+              <div class="tr">
+                <div class="morebtn"><svg class="ico xs" viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></div>
+              </div>
+            </div>
+            <div class="srow">
+              <div class="bar"></div>
+              <div class="txt">
+                <div class="l1">Bash 环境当前异常（msys 报错）</div>
+                <div class="l2">default-workspace · 10:09</div>
+              </div>
+              <div class="tr">
+                <div class="morebtn"><svg class="ico xs" viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></div>
+              </div>
+            </div>
+
+            <div class="dhdr">工作区 · bot <span class="n">35</span></div>
+            <div class="srow">
+              <div class="bar"></div>
+              <div class="txt">
+                <div class="l1">写一个 html，内容是 svg 动画企鹅</div>
+                <div class="l2">昨天 07:48</div>
+              </div>
+              <div class="tr">
+                <div class="morebtn"><svg class="ico xs" viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="dfoot">
+            <div class="frow">
+              <svg class="ico sm" viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg>
+              已归档
+              <span class="n">2</span>
+              <svg class="ico xs" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+            </div>
+          </div>
+        </div>
+        <div class="scrim"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div><b>改动清单（<span class="k">ui/home/HomeScreen.kt</span> 的 <span class="k">SessionDrawer</span>）</b></div>
+    <ul>
+      <li><b>抽屉变成一块"浮起的面板"</b>：宽 318dp（不再铺满 360dp）、右侧 20dp 圆角、<span class="k">outline</span> 描边 + 投影。现在 <span class="k">ModalDrawerSheet</span> 是整块 surface，没有边界，与页面糊成一片——这是"风格不一致"的根。</li>
+      <li><b>头部</b>：30dp 应用图标 + 「会话」+ 副标题「6 个工作区 · 已连接」，右侧两个图标按钮（新建 / 刷新），替代现在 60dp 高的两行纯文字。</li>
+      <li><b>统计胶囊</b>：<span class="k">125 会话 / 4 置顶 / 2 归档</span> 三枚 24dp 胶囊，把挤在副标题里的一行字拆成可扫视的三块（置顶蓝、归档琥珀）。</li>
+      <li><b>搜索框</b>：34dp 胶囊占位，先只做视觉，是否接 <span class="k">session/search</span> 见文末决策点。</li>
+      <li><b>分组标题</b>：12sp 半透明 → <b>9.5sp 全大写 + 计数 + 右侧渐隐细线</b>，置顶 / 最近 / 工作区 · &lt;名字&gt; 三组形成节奏。</li>
+      <li><b>会话行</b>：从"两行文字堆叠"改成 <b>10dp 圆角行</b>；左侧 3dp 状态条（运行中绿 / 置顶蓝 / 无）；标题 13sp、副标题 10.5sp；行高 42dp，行间 2dp。</li>
+      <li><b>右侧常驻「⋯」</b>（26dp 触控区）：现在只能长按，发现不了；点它与长按弹同一个菜单。</li>
+      <li><b>运行中</b>：绿色均衡器三柱（沿用聊天页 <span class="k">GeneratingGlyph</span> 的观感），替掉那个几乎看不见的单柱。</li>
+      <li><b>底部「已归档 2 ›」</b>：给归档一个入口，不再只藏在副标题里。</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s1">
+<h2>② 长按菜单 + 归档二次确认</h2>
+<p class="lede">
+  现在是一个裸 <span class="k">DropdownMenu</span>，两项纯文字「归档 / 置顶」，<b>点了立刻执行、没法撤回</b>，也看不出自己在操作哪一条。改后：<b>顶部加会话上下文头</b>、每项带图标、<b>「移入归档」走二次确认</b>并说明能从归档里找回。置顶不加确认——可逆且零成本。
+</p>
+
+<div class="row">
+  <div class="col">
+    <div class="caption"><b>长按 / 点 ⋯ 弹出</b>（锚定在被按的那一行上）</div>
+    <div class="phone">
+      <div class="sbar"><span>17:50</span><span class="icons">▾ ▮ 84</span></div>
+      <div class="homebg">
+        <div class="tb"><div class="cbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></div><div class="tt"><div class="l1">远程 Web</div><div class="l2">工作区 6 · 会话 125</div></div></div>
+      </div>
+      <div class="drawerwrap">
+        <div class="drawer">
+          <div class="dhead">
+            <div class="r1">
+              <div class="appicon"><img src="R031-app-icon.png" alt="DSHRM"></div>
+              <div><div class="ht">会话</div><div class="hs">6 个工作区 · 已连接</div></div>
+            </div>
+            <div class="dstats">
+              <div class="stat"><b>125</b> 会话</div>
+              <div class="stat pin"><b>4</b> 置顶</div>
+              <div class="stat arc"><b>2</b> 归档</div>
+            </div>
+            <div class="dsearch"><svg class="ico sm" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>搜索会话</div>
+          </div>
+          <div class="dlist">
+            <div class="dhdr">最近 <span class="n">28</span></div>
+            <div class="srow">
+              <div class="bar"></div>
+              <div class="txt"><div class="l1">App公网配对 Connection Reset 问题修复</div><div class="l2">bot · 20 分钟前</div></div>
+              <div class="tr"><div class="morebtn"><svg class="ico xs" viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></div></div>
+            </div>
+            <div class="srow sel" style="position:relative">
+              <div class="bar"></div>
+              <div class="txt"><div class="l1">维护会话</div><div class="l2">WDMTG · 15:49</div></div>
+              <div class="tr"><div class="morebtn" style="color:var(--onSurfaceVariant)"><svg class="ico xs" viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></div></div>
+              <div class="menu" style="left:96px;top:34px">
+                <div class="mhead">
+                  <div class="m1">维护会话</div>
+                  <div class="m2">WDMTG · 15:49</div>
+                </div>
+                <div class="mitem sel">
+                  <svg class="ico" viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/><path d="M3 7V5h7l2 2"/></svg>
+                  移入归档
+                </div>
+                <div class="mitem">
+                  <svg class="ico" viewBox="0 0 24 24"><path d="M9 4h6v6l3 10H6L9 10z"/><path d="M9 4h6v6"/></svg>
+                  置顶
+                </div>
+              </div>
+            </div>
+            <div class="srow">
+              <div class="bar"></div>
+              <div class="txt"><div class="l1">ZZ-R031-PROBE</div><div class="l2">bot · 10:28</div></div>
+              <div class="tr"><div class="morebtn"><svg class="ico xs" viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></div></div>
+            </div>
+            <div class="srow">
+              <div class="bar"></div>
+              <div class="txt"><div class="l1">Bash 环境当前异常（msys 报错）</div><div class="l2">default-workspace · 10:09</div></div>
+              <div class="tr"><div class="morebtn"><svg class="ico xs" viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></div></div>
+            </div>
+            <div class="srow">
+              <div class="bar"></div>
+              <div class="txt"><div class="l1">写一个 html，内容是 svg 动画企鹅</div><div class="l2">bot · 昨天 07:48</div></div>
+              <div class="tr"><div class="morebtn"><svg class="ico xs" viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="scrim"></div>
+      </div>
+    </div>
+
+    <div class="caption" style="margin-top:6px"><b>点「移入归档」之后</b>（二次确认）</div>
+    <div class="phone" style="height:420px">
+      <div class="sbar"><span>17:50</span><span class="icons">▾ ▮ 84</span></div>
+      <div class="homebg"></div>
+      <div class="dlgwrap">
+        <div class="dlg">
+          <div class="dt">
+            <svg class="ico" viewBox="0 0 24 24" style="color:var(--primary)"><path d="M3 7h6l2 2h10v10H3z"/><path d="M3 7V5h7l2 2"/></svg>
+            移入归档？
+          </div>
+          <div class="dcard">
+            <svg class="ico sm" viewBox="0 0 24 24" style="color:var(--outline);flex:0 0 auto"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <div style="min-width:0">
+              <div class="dc1">维护会话</div>
+              <div class="dc2">WDMTG · 15:49 · 已归档 2 条</div>
+            </div>
+          </div>
+          <div class="dd">它会从「最近」里移到归档，<b style="color:var(--onSurface)">之后可以在抽屉底部的「已归档」里找回</b>。桌面端与其它设备的列表会同步这一变化。</div>
+          <div class="dhint">
+            <svg class="ico sm" viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+            <div>App 没有删除会话的权限，归档是唯一可逆的"移走"方式。</div>
+          </div>
+          <div class="dacts">
+            <div class="dbtn ghost">取消</div>
+            <div class="dbtn fill">移入归档</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div><b>改动清单（<span class="k">ui/home/SessionActionsMenu.kt</span>，现 55 行）</b></div>
+    <ul>
+      <li><b>上下文头</b>：菜单顶部一块（会话名 + <span class="k">工作区 · 时间</span>）。现在 <span class="k">DropdownMenu</span> 只有两项，长按列表中部时根本看不出在操作哪条。</li>
+      <li><b>每项带图标</b>：归档用文件夹、置顶用图钉（与抽屉状态条同色）。行高 40dp。</li>
+      <li><b>措辞改软</b>：<span class="k">归档</span> → <b>移入归档</b>；归档态的 <span class="k">取消归档</span> → <b>移出归档</b>。"移入"表达的是搬走，不是销毁。</li>
+      <li><b>二次确认</b>：<span class="k">AlertDialog</span>（M3）——标题「移入归档？」+ 会话上下文卡 + 一句"可以在已归档里找回" + 一句 why（App 没有删除权限）。按钮「取消 / 移入归档」。<b>置顶不加确认</b>。</li>
+      <li><b>状态机不变</b>：确认后仍走 <span class="k">viewModel.archiveSession(id)</span>；<span class="k">busy</span> 时菜单项保持 disabled（现有行为）。</li>
+      <li><b>不新增"删除"</b>：证据见文末。</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s2">
+<h2>③ 配对页</h2>
+<p class="lede">
+  现在（左）：扫码窗是 <b>336×220 的横矩形</b>（代码里就是 <span class="k">fillMaxWidth().height(220.dp)</span>），四角突兀；往下是<b>三个动机完全不同的输入框挤在同一张卡里</b>——"配对链接 / 服务器地址 / 设备 id"，用户不知道该填哪个（上一轮真机上就踩过：把 token 填进第 1 格，配对直接失败）；错误与探测结果都是<b>裸文字</b>，没有视觉归属。
+</p>
+
+<div class="row">
+  <div class="col">
+    <div class="caption"><b>现在</b></div>
+    <div class="phone">
+      <div class="sbar"><span>17:50</span><span class="icons">▾ ▮ 84</span></div>
+      <div class="pairbody" style="padding:16px 20px;gap:12px">
+        <div style="font-size:18px;font-weight:600;color:var(--onSurface)">配对桌面端</div>
+        <div style="font-size:11px;line-height:1.7;color:var(--onSurfaceVariant);opacity:.7">桌面端点「生成配对二维码」，App 扫它，或把二维码里的链接粘到下面。</div>
+        <div class="card" style="padding:12px;gap:8px">
+          <div style="font-size:12.5px;font-weight:500;color:var(--onSurface)">扫码</div>
+          <div style="width:100%;height:220px;background:#000;border-radius:8px;position:relative">
+            <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:11px;color:#3d4a5a">取景框 336 × 220</div>
+          </div>
+          <div style="font-size:10.5px;color:var(--onSurfaceVariant);opacity:.7">把桌面端的二维码放进取景框内。</div>
+        </div>
+        <div style="font-size:12px;color:var(--primary);padding:2px 0">手输链接 / 设备 id</div>
+        <div class="card" style="padding:12px;gap:9px">
+          <div style="font-size:10.5px;color:var(--onSurfaceVariant)">配对链接或 token</div>
+          <div class="finput" style="height:56px;align-items:flex-start;padding-top:9px"><span class="ph">https://…/pair-accept?pair=…</span></div>
+          <div class="btn" style="background:var(--surfaceVariant);color:var(--onSurfaceVariant);height:36px;font-size:12px">用链接配对</div>
+          <div style="font-size:10px;color:var(--onSurfaceVariant);opacity:.6;line-height:1.5">或者手工登记（跳过 accept，直接使用已有 deviceId）</div>
+          <div class="finput"><span class="ph">服务器地址</span></div>
+          <div class="finput"><span class="ph">设备 id</span></div>
+          <div style="display:flex;gap:8px">
+            <div class="btn out" style="height:34px;font-size:12px;flex:1">探测地址</div>
+            <div class="btn fill" style="height:34px;font-size:12px;flex:1">登记</div>
+          </div>
+          <div style="font-size:12px;color:var(--onSurfaceVariant);text-align:center;opacity:.7">收起</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="caption"><b>改后 · 扫码</b>（正方形取景框 + 四角标 + 扫描线）</div>
+    <div class="phone">
+      <div class="sbar"><span>17:50</span><span class="icons">▾ ▮ 84</span></div>
+      <div class="pairbody">
+        <div class="pairhero">
+          <div class="appicon"><img src="R031-app-icon.png" alt="DSHRM"></div>
+          <div>
+            <div class="t1">配对桌面端</div>
+            <div class="t2">扫二维码，或手输链接 / 设备 id</div>
+          </div>
+        </div>
+        <div class="seg">
+          <div class="s on">
+            <svg class="ico" viewBox="0 0 24 24"><path d="M4 8V5h3M20 8V5h-3M4 16v3h3M20 16v3h-3"/><path d="M8 12h8"/></svg>
+            扫码
+          </div>
+          <div class="s">
+            <svg class="ico" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>
+            链接
+          </div>
+          <div class="s">
+            <svg class="ico" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+            手工
+          </div>
+        </div>
+        <div class="scan">
+          <div class="grid"></div>
+          <div class="cn tl"></div><div class="cn tr"></div><div class="cn bl"></div><div class="cn br"></div>
+          <div class="line"></div>
+          <div class="hintc">把桌面端的二维码放进取景框内</div>
+        </div>
+        <div class="stepline">
+          <div class="num">1</div>
+          <div>桌面端点「生成配对二维码」（入口在桌面端网页里，只监听本机，App 无法自己发起）</div>
+        </div>
+        <div class="stepline">
+          <div class="num">2</div>
+          <div>App 扫到后立刻配对，成功后凭证用 Keystore 加密存在本机</div>
+        </div>
+        <div class="footnote">
+          <svg class="ico" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+          <div>配对失效（HTTP 403 unpaired）通常意味着桌面端撤销了这台设备，重新扫一次即可。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="caption"><b>改后 · 手工登记</b>（分段互斥，字段带说明与实时校验）</div>
+    <div class="phone">
+      <div class="sbar"><span>17:50</span><span class="icons">▾ ▮ 84</span></div>
+      <div class="pairbody">
+        <div class="pairhero">
+          <div class="appicon"><img src="R031-app-icon.png" alt="DSHRM"></div>
+          <div>
+            <div class="t1">手工登记</div>
+            <div class="t2">跳过 accept，直接用已有 deviceId</div>
+          </div>
+        </div>
+        <div class="seg">
+          <div class="s">
+            <svg class="ico" viewBox="0 0 24 24"><path d="M4 8V5h3M20 8V5h-3M4 16v3h3M20 16v3h-3"/><path d="M8 12h8"/></svg>
+            扫码
+          </div>
+          <div class="s">
+            <svg class="ico" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>
+            链接
+          </div>
+          <div class="s on">
+            <svg class="ico" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+            手工
+          </div>
+        </div>
+        <div class="card">
+          <div class="ch">
+            <svg class="ico sm" viewBox="0 0 24 24" style="color:var(--primary)"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h4M7 13h10M7 17h7"/></svg>
+            服务器
+            <span class="n">填 1 / 2</span>
+          </div>
+          <div class="fgroup">
+            <div class="flabel">地址</div>
+            <div class="finput focus">
+              <svg class="ico sm" viewBox="0 0 24 24" style="color:var(--primary)"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18"/></svg>
+              http://192.168.1.5:19387
+            </div>
+            <div class="fhelp">可以只写 <span class="k">192.168.1.5:19387</span>，会自动补 <span class="k">http://</span></div>
+          </div>
+          <div class="probe ok">
+            <div class="pt">
+              <svg class="ico xs" viewBox="0 0 24 24"><path d="m5 13 4 4L19 7"/></svg>
+              地址可达
+            </div>
+            <div class="pl">version <b>0.9.4</b> · 4 个工作区 · 125 个会话</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="ch">
+            <svg class="ico sm" viewBox="0 0 24 24" style="color:var(--primary)"><rect x="5" y="2" width="14" height="20" rx="3"/><path d="M11 19h2"/></svg>
+            设备 id
+            <span class="n">填 2 / 2</span>
+          </div>
+          <div class="fgroup">
+            <div class="finput"><span class="ph">32 位十六进制</span></div>
+            <div class="fhelp">桌面端配对记录里的 <span class="k">deviceId</span>，形如 <span class="k">717de5233c…0f25</span></div>
+          </div>
+        </div>
+        <div class="btnrow">
+          <div class="btn out">粘贴</div>
+          <div class="btn fill">
+            <svg class="ico sm" viewBox="0 0 24 24"><path d="m5 13 4 4L19 7"/></svg>
+            登记
+          </div>
+        </div>
+        <div class="footnote">
+          <svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5h1"/></svg>
+          <div>手工登记不会在桌面端新建设备记录，适合从旧手机迁移凭证。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row" style="margin-top:16px">
+  <div class="col">
+    <div class="caption"><b>改后 · 链接粘贴</b>（一次只做一件事，贴完即解析）</div>
+    <div class="phone" style="height:620px">
+      <div class="sbar"><span>17:50</span><span class="icons">▾ ▮ 84</span></div>
+      <div class="pairbody">
+        <div class="pairhero">
+          <div class="appicon"><img src="R031-app-icon.png" alt="DSHRM"></div>
+          <div><div class="t1">粘贴配对链接</div><div class="t2">从桌面端的二维码页面复制</div></div>
+        </div>
+        <div class="seg">
+          <div class="s"><svg class="ico" viewBox="0 0 24 24"><path d="M4 8V5h3M20 8V5h-3M4 16v3h3M20 16v3h-3"/><path d="M8 12h8"/></svg>扫码</div>
+          <div class="s on"><svg class="ico" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>链接</div>
+          <div class="s"><svg class="ico" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg>手工</div>
+        </div>
+        <div class="card">
+          <div class="ch">
+            <svg class="ico sm" viewBox="0 0 24 24" style="color:var(--primary)"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>
+            配对链接 / token
+          </div>
+          <div class="fgroup">
+            <div class="finput" style="height:auto;min-height:56px;align-items:flex-start;padding:9px 11px;line-height:1.6;word-break:break-all">https://47.114.41.61/pair-accept?pair=d159c7a23bfcfcf8b58fac142b331d6b</div>
+            <div class="fhelp">整条链接、只贴 token、或从剪贴板粘贴都可以</div>
+          </div>
+          <div class="probe ok">
+            <div class="pt"><svg class="ico xs" viewBox="0 0 24 24"><path d="m5 13 4 4L19 7"/></svg>已识别</div>
+            <div class="pl">host <b>47.114.41.61</b> · token <b>d159…1d6b</b></div>
+          </div>
+        </div>
+        <div class="btnrow">
+          <div class="btn out">从剪贴板读</div>
+          <div class="btn fill">开始配对</div>
+        </div>
+        <div class="probe bad" style="margin-top:2px">
+          <div class="pt"><svg class="ico xs" viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01"/><circle cx="12" cy="12" r="9"/></svg>上次失败的提示会落在这里</div>
+          <div class="pl">例如 <b>HTTP 403</b> · unpaired：设备未配对或已被桌面端撤销</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="notes" style="max-width:470px">
+    <div><b>改动清单（<span class="k">ui/pair/PairScreen.kt</span>，325 行）</b></div>
+    <ul>
+      <li><b>正方形取景框</b>：<span class="k">fillMaxWidth().height(220.dp)</span> → <span class="k">fillMaxWidth().aspectRatio(1f)</span>（360dp 屏可用宽 328dp → 328×328）。这是"不是正方形"的直接修法，一行。</li>
+      <li><b>取景框装饰</b>：纯黑底 + 四角 26dp 直角标 + 上下往复扫描线（2.4s，与 <span class="k">Motion</span> 的无限循环同节奏）。不用整圈描边——相机取景的通用语言就是四角标。</li>
+      <li><b>三种入口分段互斥</b>：<span class="k">扫码 / 链接 / 手工</span> 胶囊分段，<b>一次只显示一种</b>。现在三个字段并排在一张卡里，正是"不知道该填哪个"的根源。</li>
+      <li><b>手工登记拆两张卡</b>：「服务器」（地址 + 探测结果）与「设备 id」，各带 <span class="k">填 1/2 · 2/2</span>；地址框下说明可省略 <span class="k">http://</span>，设备 id 框下给真实样例。</li>
+      <li><b>探测结果卡</b>：成功绿描边写 <span class="k">version / 工作区数 / 会话数</span>，失败红描边写 HTTP 码与原因。替代现在的裸 <span class="k">Text</span>。</li>
+      <li><b>顶部 hero</b>：44dp 图标 + 标题 + 一行副标题，替掉 18sp 纯文字标题 + 一大段说明。</li>
+      <li><b>安全提示收到页脚</b>：一行 10sp + 锁/信息图标，讲 Keystore 与 403 unpaired 的含义。</li>
+      <li><b>贴链接自动解析</b>：识别后立刻显示 <span class="k">host</span> 与 <span class="k">token 前后各 4 位</span>，让用户确认"贴对了"——这是上一轮真机踩坑（token 填错格子）的直接防线。</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s3">
+<h2>④ 亮色主题对照</h2>
+<p class="lede">令牌与深色共用一套，只覆盖颜色变量。三块在浅色下同样成立（抽屉靠 1px 描边与投影分层；配对页取景框保持纯黑，以免削弱对比）。</p>
+<div class="row">
+  <div class="col">
+    <div class="caption">抽屉 · 浅色</div>
+    <div class="phone light">
+      <div class="sbar"><span>17:50</span><span class="icons">▾ ▮ 84</span></div>
+      <div class="homebg"></div>
+      <div class="drawerwrap">
+        <div class="drawer">
+          <div class="dhead">
+            <div class="r1">
+              <div class="appicon"><img src="R031-app-icon.png" alt="DSHRM"></div>
+              <div><div class="ht">会话</div><div class="hs">6 个工作区 · 已连接</div></div>
+              <div class="acts">
+                <div class="cbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+                <div class="cbtn"><svg class="ico" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg></div>
+              </div>
+            </div>
+            <div class="dstats">
+              <div class="stat"><b>125</b> 会话</div>
+              <div class="stat pin"><b>4</b> 置顶</div>
+              <div class="stat arc"><b>2</b> 归档</div>
+            </div>
+            <div class="dsearch"><svg class="ico sm" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>搜索会话</div>
+          </div>
+          <div class="dlist">
+            <div class="dhdr">置顶 <span class="n">4</span></div>
+            <div class="srow pin">
+              <div class="bar"></div>
+              <div class="txt"><div class="l1">开发（new）</div><div class="l2">bot · 9 分钟前</div></div>
+              <div class="tr"><div class="eq"><i></i><i></i><i></i></div></div>
+            </div>
+            <div class="dhdr">最近 <span class="n">28</span></div>
+            <div class="srow sel">
+              <div class="bar"></div>
+              <div class="txt"><div class="l1">维护会话</div><div class="l2">WDMTG · 15:49</div></div>
+            </div>
+            <div class="srow">
+              <div class="bar"></div>
+              <div class="txt"><div class="l1">Bash 环境当前异常（msys 报错）</div><div class="l2">default-workspace · 10:09</div></div>
+            </div>
+          </div>
+          <div class="dfoot">
+            <div class="frow"><svg class="ico sm" viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg>已归档<span class="n">2</span><svg class="ico xs" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></div>
+          </div>
+        </div>
+        <div class="scrim" style="background:rgba(20,32,48,.34)"></div>
+      </div>
+    </div>
+  </div>
+  <div class="col">
+    <div class="caption">配对 · 浅色</div>
+    <div class="phone light">
+      <div class="sbar"><span>17:50</span><span class="icons">▾ ▮ 84</span></div>
+      <div class="pairbody">
+        <div class="pairhero">
+          <div class="appicon"><img src="R031-app-icon.png" alt="DSHRM"></div>
+          <div><div class="t1">配对桌面端</div><div class="t2">扫二维码，或手输链接 / 设备 id</div></div>
+        </div>
+        <div class="seg">
+          <div class="s on"><svg class="ico" viewBox="0 0 24 24"><path d="M4 8V5h3M20 8V5h-3M4 16v3h3M20 16v3h-3"/><path d="M8 12h8"/></svg>扫码</div>
+          <div class="s"><svg class="ico" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>链接</div>
+          <div class="s"><svg class="ico" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg>手工</div>
+        </div>
+        <div class="scan">
+          <div class="grid"></div>
+          <div class="cn tl"></div><div class="cn tr"></div><div class="cn bl"></div><div class="cn br"></div>
+          <div class="line"></div>
+          <div class="hintc">把桌面端的二维码放进取景框内</div>
+        </div>
+        <div class="stepline"><div class="num">1</div><div>桌面端点「生成配对二维码」</div></div>
+        <div class="stepline"><div class="num">2</div><div>App 扫到后立刻配对</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="col">
+    <div class="caption">归档确认 · 浅色</div>
+    <div class="phone light" style="height:430px">
+      <div class="sbar"><span>17:50</span><span class="icons">▾ ▮ 84</span></div>
+      <div class="homebg"></div>
+      <div class="dlgwrap">
+        <div class="dlg">
+          <div class="dt"><svg class="ico" viewBox="0 0 24 24" style="color:var(--primary)"><path d="M3 7h6l2 2h10v10H3z"/><path d="M3 7V5h7l2 2"/></svg>移入归档？</div>
+          <div class="dcard">
+            <svg class="ico sm" viewBox="0 0 24 24" style="color:var(--outline);flex:0 0 auto"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <div style="min-width:0"><div class="dc1">维护会话</div><div class="dc2">WDMTG · 15:49</div></div>
+          </div>
+          <div class="dd">它会从「最近」里移到归档，之后可以在抽屉底部的「已归档」里找回。</div>
+          <div class="dacts"><div class="dbtn ghost">取消</div><div class="dbtn fill">移入归档</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s4">
+<h2>⑤ 证据：为什么不做「删除」</h2>
+<p class="lede">以下是我在桌面端（<span class="k">F:\DSH\resources\app.asar</span>）与远程 API 上逐条验证的结果，供你判断。</p>
+<div class="row">
+  <div class="notes" style="max-width:560px">
+    <ul>
+      <li>App 里出现的 <span class="k">session/*</span> 方法名<b>共 20 个</b>（<span class="k">grep -o</span> 去重实测）：<span class="k">attachment / canOpenWorkspacePath / cancel / control / create / follow / fork / initializeDefaultModel / list / modelCatalog / openWorkspacePath / page / projections / prompt / rename / search / selectModel / title / updateQueue / workspacePathApplications</span> —— <b>没有 delete / remove / purge</b>。</li>
+      <li><span class="k">POST /remote/api/session/delete</span> 试过三种参数形状（<span class="k">{sessionId}</span> / <span class="k">{_request:{…}}</span> / <span class="k">{}</span>），全部 <b>not found</b>。</li>
+      <li>HTTP 侧 <span class="k">DELETE /api/sessions/&lt;id&gt;</span> 返回 <b>401 unauthorized</b>（那是桌面端网页自己的鉴权，设备头走不通）。</li>
+      <li>asar 里确实有 16 处 <span class="k">session/delete</span>，但全属 <b>ACP 协议</b>（agent 侧）的 schema，与 remote API 是两套东西。</li>
+      <li>唯一可用的"移除"是 <span class="k">workspace/archiveSession</span>（<b>按工作区批量</b>）与 <span class="k">workspace/pinSession</span>。</li>
+    </ul>
+  </div>
+  <div class="notes" style="max-width:520px">
+    <div><b>所以三个候选里，按你选的 B 落地：</b></div>
+    <ul>
+      <li><span class="tag keep">采纳</span> 不加「删除」；「归档」改称「移入归档」，加二次确认，文案明确"可从已归档找回"。</li>
+      <li><span class="tag mod">待你定</span> 抽屉底部「已归档」入口要不要真做？现在归档的会话在 App 里<b>看不到</b>，只能去桌面端取消归档。要做得新增一个归档视图（数据已有：<span class="k">session/list</span> 带 <span class="k">archived</span> 过滤）。</li>
+      <li><span class="tag new">待你定</span> 搜索框要不要真接 <span class="k">session/search</span>？</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+</body>
+</html>

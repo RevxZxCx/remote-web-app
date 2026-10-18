@@ -6,20 +6,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
-import androidx.compose.ui.test.longClick
 import androidx.compose.ui.unit.dp
-import com.revxzxcx.remotewebapp.core.session.SessionGrouping
-import com.revxzxcx.remotewebapp.core.session.SessionListResult
-import com.revxzxcx.remotewebapp.core.session.SessionSummary
-import com.revxzxcx.remotewebapp.core.workspace.Workspace
-import com.revxzxcx.remotewebapp.core.workspace.WorkspaceSnapshot
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -30,10 +24,13 @@ import org.robolectric.annotation.Config
 /**
  * 会话长按菜单的渲染层测试。
  *
- * 守的是两件事：
+ * 守的是四件事：
  * 1. **长按**（不是点击）才出菜单——行本身仍然是「点一下打开会话」，两条手势不能互相吞。
- * 2. 文案跟着状态走：普通行显示「归档」，已归档行显示「取消归档」；置顶同理。
- *    以及**不能出现「删除」**：服务端没有删除会话的 API（`SessionActions` 的 KDoc 记了
+ * 2. 文案跟着状态走：普通行显示「移入归档」，已归档行显示「取消归档」；置顶同理。
+ * 3. **移入归档要二次确认**（R033 ②）：点菜单项不能直接回调 `onArchive`，必须先出
+ *    「移入归档？」对话框。这条断言的意义是——归档是唯一会让行从列表消失的操作，
+ *    误触的代价是一条会话在 App 里再也看不到。
+ * 4. **不能出现「删除」**：服务端没有删除会话的 API（`SessionActions` 的 KDoc 记了
  *    全量 grep 的证据），菜单里出现「删除」就是承诺了一个做不到的操作。
  */
 @RunWith(RobolectricTestRunner::class)
@@ -52,6 +49,8 @@ class SessionActionsMenuRenderTest {
         onUnarchive: () -> Unit = {},
         onPin: () -> Unit = {},
         onUnpin: () -> Unit = {},
+        title: String? = null,
+        subtitle: String? = null,
     ) {
         compose.setContent {
             MaterialTheme {
@@ -66,6 +65,8 @@ class SessionActionsMenuRenderTest {
                     onPin = onPin,
                     onUnpin = onUnpin,
                     modifier = Modifier,
+                    title = title,
+                    subtitle = subtitle,
                 )
             }
         }
@@ -74,13 +75,13 @@ class SessionActionsMenuRenderTest {
     @Test
     fun `收起时什么都不显示`() {
         setMenu(expanded = false)
-        compose.onAllNodesWithText("归档").assertCountEquals(0)
+        compose.onAllNodesWithText("移入归档").assertCountEquals(0)
     }
 
     @Test
-    fun `普通行显示归档与置顶`() {
+    fun `普通行显示移入归档与置顶`() {
         setMenu(expanded = true)
-        compose.onNodeWithText("归档").assertIsDisplayed()
+        compose.onNodeWithText("移入归档").assertIsDisplayed()
         compose.onNodeWithText("置顶").assertIsDisplayed()
         // 已归档的行才会出现「取消归档」。
         compose.onAllNodesWithText("取消归档").assertCountEquals(0)
@@ -91,7 +92,7 @@ class SessionActionsMenuRenderTest {
     fun `已归档行显示取消归档`() {
         setMenu(expanded = true, archived = true)
         compose.onNodeWithText("取消归档").assertIsDisplayed()
-        compose.onAllNodesWithText("归档").assertCountEquals(0)
+        compose.onAllNodesWithText("移入归档").assertCountEquals(0)
         compose.onNodeWithText("置顶").assertIsDisplayed()
     }
 
@@ -100,13 +101,13 @@ class SessionActionsMenuRenderTest {
         setMenu(expanded = true, pinned = true)
         compose.onNodeWithText("取消置顶").assertIsDisplayed()
         compose.onAllNodesWithText("置顶").assertCountEquals(0)
-        compose.onNodeWithText("归档").assertIsDisplayed()
+        compose.onNodeWithText("移入归档").assertIsDisplayed()
     }
 
     @Test
     fun `进行中的动作禁用两个入口`() {
         setMenu(expanded = true, busy = true)
-        compose.onNodeWithText("归档").assertIsNotEnabled()
+        compose.onNodeWithText("移入归档").assertIsNotEnabled()
         compose.onNodeWithText("置顶").assertIsNotEnabled()
     }
 
@@ -119,22 +120,86 @@ class SessionActionsMenuRenderTest {
     }
 
     @Test
-    fun `点归档会调一次回调`() {
-        var archiveCalls = 0
-        var pinCalls = 0
-        setMenu(expanded = true, onArchive = { archiveCalls++ }, onPin = { pinCalls++ })
-        compose.onNodeWithText("归档").performClick()
-        compose.onNodeWithText("置顶").performClick()
-        assertEquals(1, archiveCalls)
-        assertEquals(1, pinCalls)
+    fun `菜单顶部显示会话上下文`() {
+        // 长按之后菜单会盖住被按的那一行，没有上下文头就不知道在操作哪一条。
+        setMenu(
+            expanded = true,
+            title = "被按住的会话",
+            subtitle = "远程 Web · 3 分钟前",
+        )
+        compose.onNodeWithText("被按住的会话").assertIsDisplayed()
+        compose.onNodeWithText("远程 Web · 3 分钟前").assertIsDisplayed()
     }
 
     @Test
-    fun `抽屉里长按一行真的能唤出菜单并点到归档`() {
+    fun `点移入归档先弹二次确认且不立即回调`() {
+        var archiveCalls = 0
+        setMenu(expanded = true, onArchive = { archiveCalls++ })
+
+        compose.onNodeWithText("移入归档").performClick()
+
+        // 关键断言：点完菜单项，onArchive 还不能被调用。
+        assertEquals(0, archiveCalls)
+        compose.onNodeWithText("移入归档？").assertIsDisplayed()
+        // 对话框里说明「可以从已归档里找回」，让这一步是可预期的。
+        compose.onNodeWithText("可以从「已归档」里找回。", substring = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun `二次确认点取消不回调`() {
+        var archiveCalls = 0
+        setMenu(expanded = true, onArchive = { archiveCalls++ })
+
+        compose.onNodeWithText("移入归档").performClick()
+        compose.onNodeWithText("取消").performClick()
+
+        assertEquals(0, archiveCalls)
+        compose.onAllNodesWithText("移入归档？").assertCountEquals(0)
+    }
+
+    @Test
+    fun `二次确认点确认才回调一次`() {
+        var archiveCalls = 0
+        setMenu(expanded = true, onArchive = { archiveCalls++ })
+
+        compose.onNodeWithText("移入归档").performClick()
+        // 对话框的确认按钮是「确认移入」，与菜单项不同名——同名会让两处节点共存时
+        // `onNodeWithText` 命中两个（R033 首跑踩到）。
+        compose.onNodeWithText("确认移入").performClick()
+
+        assertEquals(1, archiveCalls)
+    }
+
+    @Test
+    fun `点置顶不弹确认直接回调`() {
+        // 置顶可逆且无破坏性，不该多一次打扰。
+        var pinCalls = 0
+        setMenu(expanded = true, onPin = { pinCalls++ })
+
+        compose.onNodeWithText("置顶").performClick()
+
+        assertEquals(1, pinCalls)
+        compose.onAllNodesWithText("移入归档？").assertCountEquals(0)
+    }
+
+    @Test
+    fun `取消归档不弹确认`() {
+        // 取消归档是把会话放回来，不是破坏性动作。
+        var unarchiveCalls = 0
+        setMenu(expanded = true, archived = true, onUnarchive = { unarchiveCalls++ })
+
+        compose.onNodeWithText("取消归档").performClick()
+
+        assertEquals(1, unarchiveCalls)
+        compose.onAllNodesWithText("移入归档？").assertCountEquals(0)
+    }
+
+    @Test
+    fun `抽屉里长按一行真的能唤出菜单并走完二次确认`() {
         // 这一条守的是 `combinedClickable(onClick, onLongClick)` 的接线：只写 onClick
         // 不长按出菜单，菜单就永远点不到；反过来长按若同时触发 onClick 会一边打开
         // 会话一边弹菜单。Compose 的 combinedClickable 已经保证互斥，这里把整条
-        // 「长按 → 菜单出现 → 点归档 → 回调」的链路钉住。
+        // 「长按 → 菜单出现 → 移入归档 → 二次确认 → 回调」的链路钉住。
         var opened = 0
         var archived = emptyList<String>()
         val summary = com.revxzxcx.remotewebapp.core.session.SessionSummary(
@@ -170,7 +235,7 @@ class SessionActionsMenuRenderTest {
 
         compose.setContent {
             MaterialTheme {
-                androidx.compose.foundation.layout.Box(
+                Box(
                     modifier = Modifier.requiredHeight(4000.dp),
                 ) {
                     SessionDrawer(
@@ -189,8 +254,10 @@ class SessionActionsMenuRenderTest {
         compose.onAllNodesWithText("可长按的会话")[0].performTouchInput { longClick() }
         // 长按只出菜单，不打开会话。
         assertEquals(0, opened)
-        compose.onNodeWithText("归档").assertIsDisplayed()
-        compose.onNodeWithText("归档").performClick()
+        compose.onNodeWithText("移入归档").assertIsDisplayed()
+        compose.onNodeWithText("移入归档").performClick()
+        assertEquals(emptyList<String>(), archived)
+        compose.onNodeWithText("确认移入").performClick()
         assertEquals(listOf("s-row"), archived)
     }
 }

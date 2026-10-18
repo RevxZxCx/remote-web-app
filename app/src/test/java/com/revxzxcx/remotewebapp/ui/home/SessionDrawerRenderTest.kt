@@ -153,11 +153,55 @@ class SessionDrawerRenderTest {
         compose.onAllNodesWithText("归档会话").assertCountEquals(0)
         compose.onAllNodesWithText("共享会话").assertCountEquals(3)
         // 置顶段自己的标题与会话都在。
-        compose.onNodeWithText("置顶").assertExists()
-        // 抽屉里**没有**「已归档」段（那段在主区 `HomeScreen.kt:364`）：归档会话在抽屉里
-        // 被整段排除，所以「归档会话」一次都不出现。若将来给抽屉加了归档段，这条会失败。
-        // （抽屉标题里那个「已归档 N」是统计数字，不是段标题，所以用 substring 会撞上它。）
+        // 「置顶」现在是 2 处：分组标题 + 头部统计胶囊的单位（R033 ① 新增）。
+        compose.onAllNodesWithText("置顶").assertCountEquals(2)
+        compose.onNodeWithText("置顶会话").assertExists()
+        // 抽屉默认视图里**没有**归档会话：`最近` 与 `按工作区` 两段都排除归档，归档只
+        // 出现在底部「已归档 N」点进去的聚合视图里（R033 ①）。所以默认屏上「归档会话」
+        // 一次都不出现——这条同时守住「别把归档行漏进最近段」。
+        // （头部统计胶囊里那个「归档」是单位文字，与段标题不同词，不会撞上。）
         compose.onAllNodesWithText("归档会话").assertCountEquals(0)
+        // 但底部必须有入口，否则归档在 App 里等于消失（R033 ① 的核心动机）。
+        compose.onNodeWithText("已归档 1").assertExists()
+    }
+
+    @Test
+    fun `点已归档入口能看到归档聚合视图并返回`() {
+        // R033 ①：归档聚合视图只能靠这一行进入。改造前它在 App 里完全没有入口——
+        // 用户归档完就再也找不到，只能去桌面端取消归档。
+        val base = state()
+        val archived = SessionSummary(
+            sessionId = "archived-session",
+            updatedAt = 9_000L,
+            title = "归档会话",
+        )
+        val snapshot = base.snapshot.copy(
+            // ⚠️ 必须**改造已有的** ws-a，不能新增一个同 id 的 Workspace：`LazyColumn`
+            // 的工作区头 key 是 `"ws-${workspaceId}"`，重复 id 会直接抛
+            // `IllegalArgumentException: Key "ws-ws-a" was already used`。
+            items = base.snapshot.items.map { ws ->
+                if (ws.workspaceId == "ws-a") {
+                    ws.copy(sessionIds = ws.sessionIds + "archived-session")
+                } else {
+                    ws
+                }
+            },
+            archivedSessionIds = setOf("archived-session"),
+        )
+        val sessions = SessionListResult(items = listOf(archived) + base.sessions.items)
+        val state = base.copy(
+            snapshot = snapshot,
+            sessions = sessions,
+            groups = SessionGrouping.group(snapshot, sessions),
+        ).withDerivedLists()
+        setDrawer(state)
+
+        compose.onNodeWithText("已归档 1").performClick()
+
+        // 聚合视图里那一条必须出现，并且能回到常规列表。
+        compose.onNodeWithText("归档会话").assertExists()
+        compose.onNodeWithText("返回会话列表").performClick()
+        compose.onAllNodesWithText("返回会话列表").assertCountEquals(0)
     }
 
     @Test
