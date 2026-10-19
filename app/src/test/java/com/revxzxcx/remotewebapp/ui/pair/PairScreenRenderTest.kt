@@ -60,9 +60,11 @@ class PairScreenRenderTest {
         )
 
         assertTrue(preview.ok)
-        assertEquals("将配对到 192.168.1.5:19387", preview.headline)
+        // 成功态压成一行：host 与 token 必须同时在一行里，用户扫一眼就能核对
+        // 「贴的是不是那台机器、是不是那个 token」。
+        assertEquals("已识别", preview.headline)
         // token 只露首尾 4 位：整段显示等于把凭证摊在屏幕上。
-        assertEquals("token abcd…2345", preview.detail)
+        assertEquals("host 192.168.1.5:19387 · token abcd…2345", preview.detail)
     }
 
     @Test
@@ -72,8 +74,8 @@ class PairScreenRenderTest {
         )
 
         assertTrue(preview.ok)
-        assertEquals("将直接登记到 10.0.0.9:8080", preview.headline)
-        assertEquals("设备 id 717de5…0f25", preview.detail)
+        assertEquals("已识别", preview.headline)
+        assertEquals("host 10.0.0.9:8080 · 设备 717de5…0f25", preview.detail)
     }
 
     @Test
@@ -95,8 +97,8 @@ class PairScreenRenderTest {
         )
 
         assertTrue(preview.ok)
-        assertEquals("这是一个裸 token", preview.headline)
-        assertEquals("将用上次的地址 192.168.1.5:19387 去配对", preview.detail)
+        assertEquals("已识别为裸 token", preview.headline)
+        assertEquals("host 192.168.1.5:19387 · token abcd…2345", preview.detail)
     }
 
     @Test

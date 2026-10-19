@@ -149,6 +149,12 @@ class PairingApi(
                 code == "rate-limited" -> "尝试过于频繁，请稍后再试"
                 trimmed == "unauthorized" -> "桌面端要求浏览器鉴权（地址可能不是配对入口）"
                 trimmed == "forbidden" -> "桌面端拒绝了此地址"
+                // 服务端对「token 未知 / 已过期 / 已停止」只回 `{ok:false,code:'invalid'}`
+                // 并以 **404** 下发（`src/pairing.ts` + `src/routes.ts`）。若这里落到
+                // `HTTP $status：{json}` 分支，用户看到的是
+                // `HTTP 404: {"ok":false,"code":"invalid"}`——一句他不可能读懂的原始报文。
+                // 实测踩到（R036 设备验收）：拿一个已被消费的 token 点「开始配对」。
+                code != null -> refusalMessage(code)
                 else -> "HTTP $status：${trimmed.take(160)}"
             },
         )

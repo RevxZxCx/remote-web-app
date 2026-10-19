@@ -10,10 +10,13 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasScrollToNodeAction
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.Dp
@@ -268,6 +271,48 @@ class SessionDrawerRenderTest {
         compose.onNodeWithText("已归档 1").assertExists()
         compose.onNodeWithText("已归档 1").performClick()
         compose.onAllNodesWithText("重复归档会话").assertCountEquals(1)
+    }
+
+    @Test
+    fun `搜索框能输入并按标题过滤出命中项`() {
+        // 守的是「搜索真的接通了」：R033 时它是一个 `.semantics { disabled() }` 的假框，
+        // 标签写「暂未开放」。这条用例走完整链路——真的往 `BasicTextField` 里打字，
+        // 断言常规三段被搜索结果取代、命中项在、未命中的不在。
+        setDrawer(state())
+
+        // 常规视图先确认基线：三段都在。
+        compose.onNodeWithText("按工作区").assertExists()
+
+        // 首尾故意带空格：`searchSessions` 会 trim（内部空格不删——会话标题里的空格
+        // 是有意义的，不能当分隔符吃掉）。
+        compose.onNode(hasSetTextAction()).performTextInput(" 只在甲 ")
+        // 命中「只在甲工作区」；「按工作区」段标题不该再出现。
+        compose.onNodeWithText("只在甲工作区").assertExists()
+        compose.onAllNodesWithText("按工作区").assertCountEquals(0)
+        compose.onAllNodesWithText("共享会话").assertCountEquals(0)
+    }
+
+    @Test
+    fun `搜索没有命中时说明能搜什么`() {
+        setDrawer(state())
+        compose.onNode(hasSetTextAction()).performTextInput("不存在的关键词")
+
+        compose.onNodeWithText("没有会话名、工作区或模型匹配「不存在的关键词」。").assertExists()
+        // 必须说清楚不搜正文：这个部署的全文索引是关着的（服务端 openAt: never），
+        // 不说的话用户会以为「搜不到消息内容」是 App 的 bug。
+        compose.onNodeWithText("不搜消息正文", substring = true).assertExists()
+    }
+
+    @Test
+    fun `清空搜索后回到常规三段`() {
+        setDrawer(state())
+        compose.onNode(hasSetTextAction()).performTextInput("共享")
+        compose.onAllNodesWithText("按工作区").assertCountEquals(0)
+
+        compose.onNodeWithContentDescription("清除搜索").performClick()
+
+        compose.onNodeWithText("按工作区").assertExists()
+        compose.onNodeWithText("最近").assertExists()
     }
 
     @Test

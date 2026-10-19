@@ -13,6 +13,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,12 +26,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowRight
@@ -78,8 +81,10 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -89,6 +94,7 @@ import com.revxzxcx.remotewebapp.core.session.SessionGrouping
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.workspace.Workspace
 import com.revxzxcx.remotewebapp.ui.common.AppIconButton
+import com.revxzxcx.remotewebapp.ui.common.AppMark
 import com.revxzxcx.remotewebapp.ui.common.CacheNotice
 import com.revxzxcx.remotewebapp.ui.common.ConnectionIndicator
 import com.revxzxcx.remotewebapp.ui.common.GeneratingGlyph
@@ -575,6 +581,7 @@ private fun WorkspaceRow(
                             onOpenSession = onOpenSession,
                             now = now,
                             busy = it.summary.sessionId in busySessionIds,
+                            archivedInWorkspace = group.archivedCount,
                             onArchive = onArchive,
                             onUnarchive = onUnarchive,
                             onPin = onPin,
@@ -590,6 +597,7 @@ private fun WorkspaceRow(
                             onOpenSession = onOpenSession,
                             now = now,
                             busy = it.summary.sessionId in busySessionIds,
+                            archivedInWorkspace = group.archivedCount,
                             onArchive = onArchive,
                             onUnarchive = onUnarchive,
                             onPin = onPin,
@@ -605,6 +613,7 @@ private fun WorkspaceRow(
                             onOpenSession = onOpenSession,
                             now = now,
                             busy = it.summary.sessionId in busySessionIds,
+                            archivedInWorkspace = group.archivedCount,
                             onArchive = onArchive,
                             onUnarchive = onUnarchive,
                             onPin = onPin,
@@ -675,6 +684,8 @@ private fun SessionRowItem(
     onOpenSession: (SessionSummary) -> Unit,
     now: Long = System.currentTimeMillis(),
     busy: Boolean = false,
+    /** 同 [DrawerSessionRow]：只给「移入归档」确认框的上下文卡用。 */
+    archivedInWorkspace: Int? = null,
     onArchive: (String) -> Unit = {},
     onUnarchive: (String) -> Unit = {},
     onPin: (String) -> Unit = {},
@@ -775,6 +786,7 @@ private fun SessionRowItem(
             // 主区的长按菜单与抽屉走同一个组件，上下文头也要一致（R033 ②）。
             title = summary.displayName,
             subtitle = TimeText.relative(summary.updatedAt, now),
+            archivedInWorkspace = archivedInWorkspace,
         )
     }
 }
@@ -889,6 +901,34 @@ internal fun SessionDrawer(
             .sortedByDescending { it.updatedAt }
     }
 
+    // 每条会话所属工作区里已归档多少条（给「移入归档」确认框的上下文卡用）。
+    // 从 `groups` 直接读：那是唯一已经算好的地方，再自己 filter 一遍容易两处口径分叉。
+    // 同一会话可能出现在两个工作区，取先出现的那个——确认框只是要说个量级，
+    // 精确到「哪个工作区」这件事行副标题已经交代了。
+    val archivedCountBySession = remember(groups) {
+        buildMap {
+            groups.forEach { group ->
+                group.rows.forEach { row -> putIfAbsent(row.sessionId, group.archivedCount) }
+            }
+        }
+    }
+
+    // 搜索（R036）：输入框在抽屉头部，过滤在 [searchSessions] 里做——纯本地、零延迟。
+    // query 用 rememberSaveable：转屏后不该把已经敲进去的词清掉。
+    var query by rememberSaveable { mutableStateOf("") }
+    // key 里带上 snapshot 与 items：workspace/follow 与 session/list 是两条独立通道，
+    // 任一先到都要让结果跟着更新（否则刚到的会话在搜索里搜不到）。
+    val searchHits = remember(query, state.snapshot, state.sessions.items) {
+        searchSessions(
+            snapshot = state.snapshot,
+            sessions = state.sessions,
+            query = query,
+        )
+    }
+    // 搜索一开就退出归档视图：两个视图共用同一个 LazyColumn 与 listState，
+    // 「在归档视图里搜索」会让「返回会话列表」与搜索结果同屏出现，语义含糊。
+    val searching = query.isNotBlank()
+
     Column(modifier = Modifier.fillMaxSize()) {
         DrawerHead(
             state = state,
@@ -910,6 +950,8 @@ internal fun SessionDrawer(
             // （头部「归档 2」而底部根本没有入口，聚合视图也不可达）。
             archivedCount = archivedSessions.size,
             onRefreshSessions = onRefreshSessions,
+            query = query,
+            onQueryChange = { query = it },
         )
         HorizontalDivider(color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.08f))
 
@@ -955,8 +997,62 @@ internal fun SessionDrawer(
         // 一个他上次没看过的位置比回顶更难解释。
         LaunchedEffect(archivedOpen) { listState.requestScrollToItem(0) }
 
+        // 搜索时同样回顶：结果是全新的集合，沿用上一次的 index 会让用户停在一个
+        // 与本次输入无关的位置上（而且结果往往只有几条，index 会被钳到末项）。
+        LaunchedEffect(searching) { listState.requestScrollToItem(0) }
+
         LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-            if (archivedOpen) {
+            if (searching) {
+                // 搜索结果（R036）：跨工作区的平铺列表，命中项直接可点开。
+                //
+                // 搜索结果里**不**排除已归档会话：用户搜的是「我记得有这么个会话」，
+                // 它现在被归档了恰恰是更要紧的信息，把它藏起来等于搜不到。
+                // 归档态由行内的状态条 + 读屏的 stateDescription 表达。
+                item(key = "hdr-search") {
+                    DrawerSectionHeader(
+                        text = if (searchHits.isEmpty()) "没有匹配" else "搜索结果",
+                        count = searchHits.size,
+                    )
+                }
+                if (searchHits.isEmpty()) {
+                    item(key = "search-empty") {
+                        Column(
+                            Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                text = "没有会话名、工作区或模型匹配「$query」。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.65f),
+                            )
+                            // 说清楚能搜什么：全文搜索在这个部署里是关着的（服务端
+                            // `openAt: never`），不说的话用户会以为「搜不到消息正文」
+                            // 是 App 的 bug。
+                            Text(
+                                text = "这里只匹配会话标题、工作区名与模型名，不搜消息正文。",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.45f),
+                            )
+                        }
+                    }
+                }
+                items(searchHits, key = { "hit-${it.summary.sessionId}" }) { hit ->
+                    DrawerSessionRow(
+                        summary = hit.summary,
+                        subtitle = hit.workspace?.displayName,
+                        onClick = { onOpenSession(hit.summary, hit.workspace) },
+                        now = now,
+                        busy = hit.summary.sessionId in busySessionIds,
+                        archivedInWorkspace = archivedCountBySession[hit.summary.sessionId],
+                        archivedIds = archivedIds,
+                        pinnedIds = pinnedIds,
+                        onArchive = onArchive,
+                        onUnarchive = onUnarchive,
+                        onPin = onPin,
+                        onUnpin = onUnpin,
+                    )
+                }
+            } else if (archivedOpen) {
                 // 归档聚合视图（R033 ①）：取代上面的常规三段，只显示归档会话。
                 // 归档会话在主区是「工作区展开段」里的一个子段，抽屉里此前完全没有入口——
                 // 用户归档完就再也找不到它，只能去桌面端取消归档。
@@ -994,6 +1090,7 @@ internal fun SessionDrawer(
                         },
                         now = now,
                         busy = summary.sessionId in busySessionIds,
+                        archivedInWorkspace = archivedCountBySession[summary.sessionId],
                         archivedIds = archivedIds,
                         pinnedIds = pinnedIds,
                         onArchive = onArchive,
@@ -1012,6 +1109,7 @@ internal fun SessionDrawer(
                             onClick = { onOpenSession(pair.first, pair.second) },
                             now = now,
                             busy = pair.first.sessionId in busySessionIds,
+                            archivedInWorkspace = archivedCountBySession[pair.first.sessionId],
                             archivedIds = archivedIds,
                             pinnedIds = pinnedIds,
                             onArchive = onArchive,
@@ -1033,6 +1131,7 @@ internal fun SessionDrawer(
                             },
                             now = now,
                             busy = summary.sessionId in busySessionIds,
+                            archivedInWorkspace = archivedCountBySession[summary.sessionId],
                             archivedIds = archivedIds,
                             pinnedIds = pinnedIds,
                             onArchive = onArchive,
@@ -1069,6 +1168,7 @@ internal fun SessionDrawer(
                             onClick = { onOpenSession(row.summary, group.workspace) },
                             now = now,
                             busy = row.summary.sessionId in busySessionIds,
+                            archivedInWorkspace = group.archivedCount,
                             archivedIds = archivedIds,
                             pinnedIds = pinnedIds,
                             onArchive = onArchive,
@@ -1123,47 +1223,6 @@ internal fun SessionDrawer(
 }
 
 /**
- * 抽屉头部的应用标识（R033 ①）。
- *
- * 为什么不用 `painterResource(R.mipmap.ic_launcher)`：`mipmap-anydpi/ic_launcher.xml`
- * 是 R031 做的 `<adaptive-icon>`，`painterResource` 只认得 VectorDrawable 与位图，
- * 遇到 adaptive-icon 会直接抛
- * `IllegalArgumentException: Only VectorDrawables and rasterized asset types are supported`。
- * 这在真机上不会崩（`Image` 走的是 `BitmapPainter` 路径），但在 Robolectric 里
- * 每一条渲染层测试都会炸——`SessionDrawerRenderTest` 与 `SessionActionsMenuRenderTest`
- * 一共 6 条用例当场全红。用渐变方块 + 图标自绘，既保住视觉，也不给测试埋雷。
- *
- * 渐变的三个 stop 取自 R031 应用图标背景层的四角渐变色域
- * （左上 #8DDCFD → 右上/左下 #C4B9FB → 右下 #D3AEFE，这里取三点近似，
- * 因为 `Brush.linearGradient` 只画一条轴线，四角渐变的两个同色角本来就落在同一侧）。
- */
-@Composable
-private fun DrawerAppMark() {
-    Box(
-        modifier = Modifier
-            .size(30.dp)
-            .clip(RoundedCornerShape(9.dp))
-            .background(
-                Brush.linearGradient(
-                    listOf(
-                        Color(0xFF8DDCFD),
-                        Color(0xFFC4B9FB),
-                        Color(0xFFD3AEFE),
-                    ),
-                ),
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            imageVector = Icons.Default.List,
-            contentDescription = null,
-            modifier = Modifier.size(16.dp),
-            tint = Color(0xFF0B1420).copy(alpha = 0.72f),
-        )
-    }
-}
-
-/**
  * 抽屉头部（R033 ①）。
  *
  * 改造前这里是一个 `Surface` 铺满宽度、里面两行纯文字：「会话」+「共 N 条 · 顶层 M ·
@@ -1173,16 +1232,18 @@ private fun DrawerAppMark() {
  *  3. 唯一的动作是长按行——没有刷新入口（主区要下拉，抽屉里没手势）。
  *
  * 现在：30dp 应用图标 + 标题 + 一行状态副标题 + 刷新按钮；下面三枚统计胶囊把会话 /
- * 置顶 / 归档拆成可扫视的三块；再下面一行 34dp 的搜索占位。
+ * 置顶 / 归档拆成可扫视的三块；再下面一行 34dp 的搜索框。
  *
- * ⚠️ 搜索框是**纯视觉占位**，不接任何输入：`DshEndpoints.SESSION_SEARCH` 这个常量
- * 在工程里只有定义、没有任何实现，`session/search` 的 wire 参数形状从未实测过
- * （决策 D88：第三方 RPC 的 wire 形状必须逐端点实测，不能照着名字猜）。挂一个点了
- * 没反应的输入框比不挂更糟，所以这里只画一条「搜索」提示，等参数形状验证过再接。
+ * 搜索是**本地过滤**，不调 `session/search`：那个端点的 descriptor 确实存在
+ * （`request {query}` → `{items:[{sessionId,snippet}],hasMore}`），但这个部署的会话全文
+ * 索引 `openAt` 是 `never`，实测每次调用都返回
+ * `gateway/internal: session search failed: SessionQueryError: session search is disabled`。
+ * 桌面端 Web 侧边栏在同样配置下也只是匹配标题与工作区名，所以本地过滤与桌面端行为一致，
+ * 而且离线（缓存数据）可用。[searchSessions] 里有完整取证。
  *
- * ⚠️ 同理没有「新建会话」按钮：`DshEndpoints.SESSION_CREATE` 同样只有常量没有实现。
- *
- * 图标由 [DrawerAppMark] 自绘（理由见它的 KDoc）。
+ * ⚠️ 没有「新建会话」按钮：`DshEndpoints.SESSION_CREATE` 只有常量、没有实现，wire
+ * 形状从未实测（决策 D88）。
+ * 图标由 [com.revxzxcx.remotewebapp.ui.common.AppMark] 自绘（理由见它的 KDoc）。
  */
 @Composable
 private fun DrawerHead(
@@ -1192,6 +1253,8 @@ private fun DrawerHead(
     pinnedCount: Int,
     archivedCount: Int,
     onRefreshSessions: () -> Unit,
+    query: String,
+    onQueryChange: (String) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -1200,7 +1263,7 @@ private fun DrawerHead(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            DrawerAppMark()
+            AppMark()
             Spacer(Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -1241,31 +1304,80 @@ private fun DrawerHead(
             DrawerStatPill(value = archivedCount, unit = "归档", accent = MaterialTheme.colorScheme.tertiary)
         }
 
-        // 搜索占位：只有视觉，不接收输入（理由见上方 KDoc）。
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(34.dp)
-                .clip(pillShape)
-                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
-                .padding(horizontal = 12.dp)
-                // 它长得和真输入框一模一样却点不动：不声明的话，用户点下去毫无反馈会
-                // 归因成「App 卡了」，读屏也会把它当可聚焦的纯噪音。显式标成 disabled。
-                .semantics { disabled() },
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                imageVector = Icons.Default.Search,
-                contentDescription = null,
-                modifier = Modifier.size(15.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+        DrawerSearchField(query = query, onQueryChange = onQueryChange)
+    }
+}
+
+/**
+ * 抽屉里的搜索框（R036）。
+ *
+ * **只搜本地已有的会话摘要**：匹配会话标题、工作区名、模型名，不碰消息正文。
+ * 原因见 [searchSessions] 的 KDoc —— 这个部署的会话全文索引是关着的
+ * （`openAt: never`），`session/search` 必然报 `session search is disabled`；
+ * 桌面端 Web 侧边栏的搜索同样只匹配标题与工作区名。
+ *
+ * 用一个真的 `BasicTextField` 而不是「长得像输入框的占位行」：R033 时它是
+ * `.semantics { disabled() }` 的假框，标签写「暂未开放」——用户点它没反应，
+ * 只会归因成 App 卡了。现在能输入、能清空、有焦点态。
+ *
+ * 右侧的清除按钮只在有输入时出现：空框上放一个 × 是纯噪音。
+ */
+@Composable
+private fun DrawerSearchField(query: String, onQueryChange: (String) -> Unit) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val focused by interactionSource.collectIsFocusedAsState()
+    val borderColor = when {
+        focused -> MaterialTheme.colorScheme.primary
+        query.isNotEmpty() -> MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+        else -> Color.Transparent
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(34.dp)
+            .clip(pillShape)
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
+            .border(1.dp, borderColor, pillShape)
+            .padding(start = 12.dp, end = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Default.Search,
+            contentDescription = null,
+            modifier = Modifier.size(15.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+        )
+        Spacer(Modifier.width(8.dp))
+        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+            if (query.isEmpty()) {
+                Text(
+                    text = "搜索会话",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                )
+            }
+            BasicTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                interactionSource = interactionSource,
+                textStyle = TextStyle(
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                ),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
             )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = "搜索会话（暂未开放）",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-            )
+        }
+        if (query.isNotEmpty()) {
+            AppIconButton(onClick = { onQueryChange("") }, contentDescription = "清除搜索") {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                )
+            }
         }
     }
 }
@@ -1404,6 +1516,14 @@ private fun DrawerSessionRow(
     onClick: () -> Unit,
     now: Long = System.currentTimeMillis(),
     busy: Boolean = false,
+    /**
+     * 这条会话所属工作区里有多少条已归档。
+     *
+     * 只给「移入归档」的二次确认框用：它要在上下文卡里写「工作区 · 时间 · 已归档 N 条」，
+     * 让用户在按下确认前就知道这一行的归档不是孤立事件（旁边已经躺了几条）。
+     * 拿不到归属（工作区快照还没到）时传 null，卡片会自动少这一段而不显示「已归档 0 条」。
+     */
+    archivedInWorkspace: Int? = null,
     archivedIds: Set<String> = emptySet(),
     pinnedIds: Set<String> = emptySet(),
     onArchive: (String) -> Unit = {},
@@ -1524,6 +1644,7 @@ private fun DrawerSessionRow(
                 subtitle,
                 TimeText.relative(summary.updatedAt, now).ifBlank { null },
             ).joinToString(" · "),
+            archivedInWorkspace = archivedInWorkspace,
         )
     }
 }
