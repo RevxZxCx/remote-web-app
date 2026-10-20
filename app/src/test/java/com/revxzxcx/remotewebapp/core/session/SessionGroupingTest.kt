@@ -21,12 +21,14 @@ class SessionGroupingTest {
         running: Boolean = false,
         origin: String? = null,
         title: String = "",
+        blank: Boolean = false,
     ) = SessionSummary(
         sessionId = id,
         updatedAt = updatedAt,
         running = running,
         origin = origin,
         title = title,
+        blank = blank,
     )
 
     private fun workspace(id: String, vararg sessionIds: String) =
@@ -305,5 +307,63 @@ class SessionGroupingTest {
         val b = session("session-bbbbbbbbbbbb").displayName
         assertTrue(a != b)
         assertTrue(a.contains("未命名会话"))
+    }
+
+    // ---- R038：空会话（`blank = true`）不许出现在任何列表链上 ----
+    //
+    // 真机数据：125 条会话里 14 条是「建了但一句话没发过」的空会话
+    // （`sessionStats.turns = 0`、`turnOutline` 为空、`lastPromptAt` 为 null），
+    // 它们确实在 `workspace.sessionIds` 里，所以 App 之前把它们渲染成了
+    // 「未命名会话 xxxxxxxx」。桌面端侧栏不显示它们。
+
+    @Test
+    fun `空会话不进任何工作区分组`() {
+        val snapshot = WorkspaceSnapshot(items = listOf(workspace("bot", "real", "blank-1")))
+        val sessions = SessionListResult(
+            listOf(session("real", title = "真会话"), session("blank-1", blank = true)),
+        )
+
+        val group = SessionGrouping.group(snapshot, sessions).single()
+
+        assertEquals(listOf("real"), group.rows.map { it.sessionId })
+        // 关键：空会话**不能**记进 missingIds，否则工作区标题会挂一个红色的「读不到 1」——
+        // 那不是「读不到」，而是「不该显示」。
+        assertEquals(emptyList<String>(), group.missingIds)
+    }
+
+    @Test
+    fun `空会话不进最近会话`() {
+        val snapshot = WorkspaceSnapshot(items = listOf(workspace("bot", "real", "blank-1")))
+        val sessions = SessionListResult(listOf(session("real"), session("blank-1", blank = true)))
+
+        val recent = SessionGrouping.recentSessions(snapshot, sessions)
+
+        assertEquals(listOf("real"), recent.map { it.sessionId })
+    }
+
+    @Test
+    fun `空会话即使被置顶也不出现`() {
+        val snapshot = WorkspaceSnapshot(
+            items = listOf(workspace("bot", "blank-1")),
+            pinnedSessionIds = setOf("blank-1"),
+        )
+        val sessions = SessionListResult(listOf(session("blank-1", blank = true)))
+
+        assertEquals(emptyList<Any>(), SessionGrouping.pinnedSessions(snapshot, sessions))
+    }
+
+    @Test
+    fun `visible 排除子代理与空会话但保留原 items`() {
+        val result = SessionListResult(
+            listOf(
+                session("real"),
+                session("blank-1", blank = true),
+                session("sub", origin = SessionSummary.SUBAGENT_ORIGIN),
+            ),
+        )
+
+        assertEquals(listOf("real"), result.visible.map { it.sessionId })
+        // `items` 必须保持全量：按 id 打开聊天页仍要能找到那条会话。
+        assertEquals(3, result.items.size)
     }
 }

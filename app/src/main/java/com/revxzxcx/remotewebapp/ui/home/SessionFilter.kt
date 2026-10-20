@@ -67,6 +67,9 @@ internal fun searchSessions(
         // 打开的是一个子代理会话，且他从列表里无论如何也找不到它，只会认为是 bug。
         // 与 `SessionGrouping.recentSessions` 的 `topLevel` 口径保持一致。
         .filterNot { it.isSubagent }
+        // 同理排除空会话（R038）：建了但一句话没发过的会话在列表里不可见，搜索也不该
+        // 把它们翻出来——「搜到一条、列表里没有」比搜不到更让人困惑。
+        .filterNot { it.blank }
         .distinctBy { it.sessionId }
         .map { summary ->
             SearchHit(

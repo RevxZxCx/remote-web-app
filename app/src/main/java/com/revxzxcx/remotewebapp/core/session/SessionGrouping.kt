@@ -99,10 +99,13 @@ object SessionGrouping {
             // 重复的行会让 LazyColumn 的 key 冲突直接抛异常，所以在源头去重。
             for (id in workspace.sessionIds.distinct()) {
                 val summary = byId[id]
-                if (summary == null) {
-                    missing += id
-                } else {
-                    rows += SessionRow(summary, bucketOf(id, snapshot))
+                when {
+                    summary == null -> missing += id
+                    // 空会话（建了但一句话没发过）直接不列：它没有任何内容可看，桌面端侧栏
+                    // 也不显示。**不能记进 `missing`**——那不是「读不到」，而是「不该显示」，
+                    // 记进去会让工作区标题挂一个红色的「读不到 N」。
+                    summary.blank -> Unit
+                    else -> rows += SessionRow(summary, bucketOf(id, snapshot))
                 }
             }
             WorkspaceGroup(
@@ -133,6 +136,10 @@ object SessionGrouping {
      *
      * **排除置顶**：置顶会话在抽屉里有独立的一段，若同时出现在「最近」里，用户会看到
      * 同一条会话两次（R003）。
+     *
+     * **排除空会话**（`blank`）：建了但一句话没发过的会话没有内容可看，桌面端侧栏也不显示
+     * （R038，见 [SessionListResult.visible]）。它虽然会出现在 `workspace.sessionIds` 里，
+     * 但把它列成一行「未命名会话」只会让用户以为是坏数据。
      */
     fun recentSessions(
         snapshot: WorkspaceSnapshot,
@@ -142,6 +149,7 @@ object SessionGrouping {
         val topLevelIds = snapshot.items.flatMap { it.sessionIds }.toSet()
         return sessions.items
             .filter { it.sessionId in topLevelIds }
+            .filterNot { it.blank }
             .filter { it.sessionId !in snapshot.pinnedSessionIds }
             .filter { includeArchived || it.sessionId !in snapshot.archivedSessionIds }
             .distinctBy { it.sessionId }
@@ -154,6 +162,8 @@ object SessionGrouping {
      * 置顶集合是全局的，所以一条置顶会话可能属于任何工作区；UI 上需要显示它来自哪里，
      * 因此返回「会话 + 所属工作区」的配对（找不到归属时 workspace 为 null——
      * 会话被移出工作区但仍在置顶集合里的边界情况）。
+     *
+     * 空会话照旧排除（R038）：置顶一条空会话在语义上没意义，桌面端也不会让用户看到它。
      */
     fun pinnedSessions(
         snapshot: WorkspaceSnapshot,
@@ -161,7 +171,7 @@ object SessionGrouping {
     ): List<Pair<SessionSummary, Workspace?>> {
         val byId = sessions.items.associateBy { it.sessionId }
         return snapshot.pinnedSessionIds
-            .mapNotNull { id -> byId[id]?.let { it to snapshot.workspaceOf(id) } }
+            .mapNotNull { id -> byId[id]?.takeIf { it.blank.not() }?.let { it to snapshot.workspaceOf(id) } }
             .sortedByDescending { it.first.updatedAt }
     }
 }

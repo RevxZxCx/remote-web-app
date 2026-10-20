@@ -84,7 +84,34 @@ data class SessionListResult(
 ) {
     val isEmpty: Boolean get() = items.isEmpty()
 
-    /** 顶层会话（排除子代理），按最近活动降序——服务端已排好，这里再兜一次底。 */
+    /**
+     * 列表界面可以显示的那些会话（R038）。
+     *
+     * 排除两类：
+     *
+     * 1. **子代理会话**（[SessionSummary.isSubagent]）——它们不在任何
+     *    `workspace.sessionIds` 里，用户从列表点进去也无处可回（T009：47 条里 20 条）。
+     * 2. **空会话**（[SessionSummary.blank]）——`session/list` 会返回「建了但一句话没发过」
+     *    的会话：`sessionStats.turns == 0`、`turnOutline` 为空、`lastPromptAt == null`、
+     *    `title == null`。R038 实测本机 125 条里有 14 条是这种。
+     *
+     *    它们**不是**用户的对话：桌面端点「新建会话」会立刻建一个空会话，关掉那个页签后
+     *    它从侧栏消失，但记录仍在磁盘上（`sessionListMetadata.blank = true` 就是为这件事
+     *    留的持久化标记，schema 描述原文是「Whether the folded prefix contains no turn」）。
+     *    桌面端侧栏与 Web UI 都不列它们——客户端 bundle 里 `session.blank` 只出现在
+     *    `headerBlank` / `hero` / `conversationPhase` 这类「当前这个会话是空的」渲染分支，
+     *    没有一处把它放进列表。
+     *
+     *    App 之前没用这个字段，于是把这些会话全渲染成「未命名会话 xxxxxxxx」。用户的观感
+     *    正是「一堆我在桌面端根本找不到、点进去也什么都没有的对话」。
+     *
+     * 这里**不改变 [items]**：按 id 查单条会话（打开聊天页、`session/follow` 的摘要）仍要
+     * 能从全量里找到。过滤只发生在「列表该显示什么」这一层。
+     */
+    val visible: List<SessionSummary>
+        get() = items.filterNot { it.isSubagent || it.blank }
+
+    /** 列表可显示的会话，按最近活动降序——服务端已排好，这里再兜一次底。 */
     val topLevel: List<SessionSummary>
-        get() = items.filterNot { it.isSubagent }.sortedByDescending { it.updatedAt }
+        get() = visible.sortedByDescending { it.updatedAt }
 }

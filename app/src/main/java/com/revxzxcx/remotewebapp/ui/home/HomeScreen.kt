@@ -219,12 +219,12 @@ fun HomeScreen(
                                         // R028 ①：副标题不再重复胶囊里的「已连接」，
                                         // 改成两个只有这里有的事实（工作区数、会话数）。
                                         val workspaces = state.snapshot?.items?.size ?: 0
-                                        "缓存内容 · 工作区 $workspaces · 会话 ${state.sessions.items.size}"
+                                        "缓存内容 · 工作区 $workspaces · 会话 ${state.sessions.visible.size}"
                                     }
 
                                     else -> {
                                         val workspaces = state.snapshot?.items?.size ?: 0
-                                        "工作区 $workspaces · 会话 ${state.sessions.items.size}"
+                                        "工作区 $workspaces · 会话 ${state.sessions.visible.size}"
                                     }
                                 }
                                 Text(
@@ -894,9 +894,11 @@ internal fun SessionDrawer(
     // 整个抽屉打不开。同一份数据在 `recentSessions`（`distinctBy`）、`group()`
     // （`sessionIds.distinct()`）、`pinnedSessions`（`associateBy`）三处都防过，
     // 漏掉的只有 R033 新增的这条链。
+    // `filterNot { it.blank }`（R038）：归档聚合视图与其它三段同一口径，空会话不列。
     val archivedSessions = remember(archivedIds, state.sessions.items) {
         state.sessions.items
             .filter { it.sessionId in archivedIds }
+            .filterNot { it.blank }
             .distinctBy { it.sessionId }
             .sortedByDescending { it.updatedAt }
     }

@@ -184,4 +184,30 @@ class SessionFilterTest {
         assertEquals(1, hits.size)
         assertEquals(null, hits.single().workspace)
     }
+
+    @Test
+    fun `空会话不出现在搜索结果里`() {
+        // R038：空会话（建了但一句话没发过）在抽屉三段里都不显示。搜索若把它们翻出来，
+        // 用户会看到「搜到一条、列表里却没有」——比搜不到更困惑。
+        val sessions = SessionListResult(
+            listOf(
+                session("s1", "R033 抽屉美化"),
+                session("s2", "未命名会话 bbbbbbbb").copy(blank = true),
+            ),
+        )
+        val hits = searchSessions(snapshot("s1", "s2"), sessions, "R033")
+
+        assertEquals(listOf("s1"), hits.map { it.summary.sessionId })
+    }
+
+    @Test
+    fun `搜未命名二字也翻不出空会话`() {
+        // 兜底：空会话的 displayName 是「未命名会话 xxxxxxxx」，搜「未命名」本该命中，
+        // 但它必须已经被 blank 过滤挡在前面——这条用例专门守「过滤发生在匹配之前」。
+        val sessions = SessionListResult(
+            listOf(session("s1", "未命名会话 aaaaaaaa").copy(blank = true)),
+        )
+
+        assertEquals(emptyList<SearchHit>(), searchSessions(snapshot("s1"), sessions, "未命名"))
+    }
 }
