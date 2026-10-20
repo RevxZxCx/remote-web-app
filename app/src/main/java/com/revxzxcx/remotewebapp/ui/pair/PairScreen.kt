@@ -71,6 +71,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -1278,13 +1279,35 @@ internal fun ProbeResultCard(
 }
 
 /**
+ * 步骤序号里那个数字的排版样式。
+ *
+ * 必须自己钉死行高，不能靠主题继承：`Box(contentAlignment = Center)` 居中的是「行框」
+ * 而不是数字墨迹。主题里 `bodyLarge` 的行高是 24sp，远大于 9.5sp 的字号，行框上下留白
+ * 又不对称，数字会被压到圆心以下。1080×2400 / 480dpi 实测：圆框 y 1450–1500、墨迹
+ * y 1473–1493，圆心 1475 而墨迹中心 1483，**偏低 8px**；把行高收成与字号相同、再用
+ * `LineHeightStyle` 居中裁掉两端行距后，两者差 1px（字形末端的亚像素）。
+ *
+ * 单独提成常量是为了让渲染层测试能直接断言这几个字段——`StepList` 是 private，
+ * 从外面只能通过像素比对才知道有没有被改回「继承行高」，那条路在 Robolectric 下
+ * 没有真字体，办不到。
+ */
+internal val StepNumberStyle = TextStyle(
+    fontSize = 9.5.sp,
+    lineHeight = 9.5.sp,
+    lineHeightStyle = LineHeightStyle(
+        alignment = LineHeightStyle.Alignment.Center,
+        trim = LineHeightStyle.Trim.Both,
+    ),
+)
+
+/**
  * 带圆形数字序号的步骤清单（原型扫码支的 `.stepline`）。
  *
  * 为什么值得占垂直空间：扫码这条路的前置条件（二维码只能在桌面端生成）是 App 里唯一
  * 一处「做不到」的说明。写在页脚会被当成免责声明划过去，做成带序号的清单才会被读到。
  */
 @Composable
-private fun StepList(steps: List<String>) {
+internal fun StepList(steps: List<String>) {
     Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
         steps.forEachIndexed { index, text ->
             Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
@@ -1305,7 +1328,7 @@ private fun StepList(steps: List<String>) {
                 ) {
                     Text(
                         text = "${index + 1}",
-                        fontSize = 9.5.sp,
+                        style = StepNumberStyle,
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.primary,
                     )

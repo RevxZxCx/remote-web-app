@@ -20,6 +20,8 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.core.pairing.PairLinkParser
 import com.revxzxcx.remotewebapp.core.pairing.PairParse
@@ -443,5 +445,30 @@ class PairScreenRenderTest {
         assertTrue("服务器卡（$serverTop）应在设备 id 卡（$deviceTop）上方", serverTop < deviceTop)
         // 没探测过就没有探测结果卡。
         compose.onAllNodesWithText("地址可达").assertCountEquals(0)
+    }
+
+    @Test
+    fun `步骤序号的行高被钉死，不会继承主题那一档`() {
+        // 回归守卫：数字一旦退回「继承 bodyLarge 的 24sp 行高」，Box 居中的就会是行框
+        // 而不是字形，数字偏低 8px（1080×2400 / 480dpi 实测）。
+        assertEquals(9.5.sp, StepNumberStyle.fontSize)
+        assertEquals(9.5.sp, StepNumberStyle.lineHeight)
+        val style = StepNumberStyle.lineHeightStyle
+        assertTrue("必须显式设置 LineHeightStyle，否则两端行距不会被裁掉", style != null)
+        assertEquals(LineHeightStyle.Alignment.Center, style?.alignment)
+        assertEquals(LineHeightStyle.Trim.Both, style?.trim)
+    }
+
+    @Test
+    fun `步骤清单的两个序号都渲染出来`() {
+        compose.setContent {
+            MaterialTheme {
+                StepList(listOf("第一件事", "第二件事"))
+            }
+        }
+        compose.onNodeWithText("1").assertExists()
+        compose.onNodeWithText("2").assertExists()
+        compose.onNodeWithText("第一件事").assertExists()
+        compose.onNodeWithText("第二件事").assertExists()
     }
 }
