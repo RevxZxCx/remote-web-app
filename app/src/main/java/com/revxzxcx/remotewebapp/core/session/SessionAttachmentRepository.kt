@@ -93,10 +93,9 @@ class SessionAttachmentRepository(private val client: TypertClient) {
     /**
      * 读一个附件的字节。
      *
-     * @param sessionId 会话 id；wire 键名就是 `sessionId`，值与 `workspaceFileScopeId`
-     *   传 sessionId 是同一套约定（`endpoints.json:81-85` 的 `readAttachment` 第一个形参）。
-     *   注意**不要**把 wire 键写成 `workspaceFileScopeId`——服务端 `assertExactArguments`
-     *   会直接以 `gateway/arguments-invalid` 拒掉。
+     * @param sessionId 会话 id。wire 形状是 `{request: {sessionId, attachmentId}}`
+     *   ——**不是**扁平的两个参数。值与 `workspaceFileScopeId` 传 sessionId 是同一套约定
+     *   （`endpoints.json` 的 `readAttachment` 第一个形参）。
      * @param attachmentId 内容块里的 `attachmentId`。
      * @throws com.revxzxcx.remotewebapp.core.protocol.TypertException 附件不存在或已被清理。
      */
@@ -106,8 +105,16 @@ class SessionAttachmentRepository(private val client: TypertClient) {
         val payload = client.call(
             endpoint = "session/attachment",
             args = buildJsonObject {
-                put("sessionId", sessionId)
-                put("attachmentId", attachmentId)
+                // ⚠️ 必须包一层 `request`。descriptor 只有一个形参 `request`
+                // （`{request: {sessionId, attachmentId}}`），扁平传参会过不了
+                // `assertExactArguments`：实测回
+                // `gateway/arguments-invalid: session/attachment: args fields do not match
+                //  the descriptor: missing "request"; unexpected "sessionId", "attachmentId"`。
+                // 这正是 R039 用户报的「发图片报错」的根因（R040 修复）。
+                put("request", buildJsonObject {
+                    put("sessionId", sessionId)
+                    put("attachmentId", attachmentId)
+                })
             },
             serializer = AttachmentPayload.serializer(),
         )

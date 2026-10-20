@@ -138,6 +138,84 @@ class DshCache private constructor(
         dao.putMeta(CacheMappers.meta(ownerId, CacheKeys.SESSIONS_CACHED_AT, System.currentTimeMillis().toString()))
     }
 
+    /**
+     * 单条会话摘要的就地覆盖（`api-session/added` / `api-session/status` 的落盘）。
+     *
+     * ## 为什么必须与 [writeSessions] 分开（审查 P1）
+     *
+     * [writeSessions] 是**权威全量**语义：先 `deleteSessions` 再整表插入，随后
+     * `deleteOrphanMessages` / `deleteOrphanDrafts` 把所有「会话表里已经没有」的消息与
+     * 草稿一起删掉。拿它写增量是灾难——冷启动时 `session/list`（2.6s）还没回来，
+     * 桌面端恰好新建了一个会话，此刻内存里只有 1 条，整表替换后**其余全部会话的
+     * 缓存消息与全部草稿会被当成孤儿清掉**，而且不可恢复。
+     *
+     * 这里只做逐行 upsert，不删任何东西、也不碰 `SESSIONS_CACHED_AT`
+     * （那个时间戳是 [readSessions] 判断「有没有一份完整快照」的依据，
+     * 增量不能把半份列表伪装成完整快照）。
+     */
+    suspend fun upsertSession(ownerId: String, session: SessionSummary) = guard("upsertSession") {
+        dao.putSessions(listOf(CacheMappers.toEntity(ownerId, session)))
+    }
+
+    /** 会话被销毁（`api-session/removed`）时从缓存里摘掉；连带清它的消息与草稿。 */
+    suspend fun deleteSession(ownerId: String, sessionId: String) = guard("deleteSession") {
+        dao.deleteSession(ownerId, sessionId)
+        dao.deleteOrphanMessages(ownerId)
+        dao.deleteOrphanDrafts(ownerId)
+    }
+
+    // ------------------------------------------------------------------ drafts
+
+    /**
+     * 读回某会话上次没发出去的草稿（用户 m17042 第 2 条）。
+     *
+     * `null` 与空串在这里**合并成 `null`**：调用方只关心「要不要往输入框里放东西」，
+     * 而空白草稿本来就不入库（见 [writeDraft]）。区分「没有草稿」与「草稿是空串」
+     * 对 UI 没有任何用，只会多一条判空路径。
+     */
+    suspend fun readDraft(ownerId: String, sessionId: String): String? = guard("readDraft") {
+        dao.draft(ownerId, sessionId)?.takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * 保存输入框草稿。
+     *
+     * 三条规则，每条都对应一个具体的坏结果：
+     * 1. **空白草稿删除行**而不是存空串——否则用户清空输入框后，库里留着一行
+     *    `text = ""`，`readDraft` 还得再判一次空，且草稿表会随「打过字又删掉」的会话增长；
+     * 2. **超长截断到 [DRAFT_MAX_CHARS]**——草稿表没有「保留最近 N 条」的裁剪机制（它
+     *    每个会话只有一行，本来不会增长），但单行长度不受限。粘贴一整篇文档进输入框
+     *    再退出，会把这个上限之外的内容永久写进明文 SQLite。截断比「整条丢弃」好：
+     *    用户回来还能看到开头，知道他曾经想写什么；
+     * 3. **写失败不报错**——继承 [guard] 的约定，缓存是优化不是正确性依赖。
+     */
+    suspend fun writeDraft(ownerId: String, sessionId: String, text: String) = guard("writeDraft") {
+        if (sessionId.isBlank()) return@guard Unit
+        val trimmed = text.take(DRAFT_MAX_CHARS)
+        if (trimmed.isBlank()) {
+            dao.deleteDraft(ownerId, sessionId)
+        } else {
+            dao.putDraft(
+                CachedDraft(
+                    ownerId = ownerId,
+                    sessionId = sessionId,
+                    text = trimmed,
+                    updatedAt = System.currentTimeMillis(),
+                ),
+            )
+        }
+    }
+
+    /**
+     * 删掉某会话的草稿（消息真的发出去了 / 用户主动清空）。
+     *
+     * 与 [writeDraft] 传空串等价，单独开一个入口是因为调用点的意图不同：
+     * 「发送成功要清掉」不该读起来像「写一个空草稿」。
+     */
+    suspend fun clearDraft(ownerId: String, sessionId: String) = guard("clearDraft") {
+        dao.deleteDraft(ownerId, sessionId)
+    }
+
     // ------------------------------------------------------------------ messages
 
     /** 读回某会话的缓存历史。 */
@@ -260,6 +338,15 @@ class DshCache private constructor(
          * 更早的历史在用户真的往上翻时走 `session/page`（那时一定有网）。
          */
         const val MESSAGE_CACHE_LIMIT: Int = 600
+
+        /**
+         * 单条草稿的字符上限。
+         *
+         * 4000 是「一屏输入框放不下、但一次认真写下的任务描述一定装得下」的量级：
+         * 输入框最大 160dp 高（约 6 行），4000 字远超它能显示的内容，够用户回来接着写；
+         * 而粘贴整篇几十页文档再退出，不会被永久写进明文 SQLite。
+         */
+        const val DRAFT_MAX_CHARS: Int = 4_000
 
         /** 用已经打开的数据库建一个缓存门面。 */
         fun create(dao: CacheDao): DshCache = DshCache(dao)

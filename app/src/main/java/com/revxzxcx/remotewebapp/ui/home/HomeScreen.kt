@@ -94,6 +94,7 @@ import com.revxzxcx.remotewebapp.core.session.SessionGrouping
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.workspace.Workspace
 import com.revxzxcx.remotewebapp.ui.common.AppIconButton
+import com.revxzxcx.remotewebapp.ui.common.SingleLineMarqueeText
 import com.revxzxcx.remotewebapp.ui.common.AppMark
 import com.revxzxcx.remotewebapp.ui.common.CacheNotice
 import com.revxzxcx.remotewebapp.ui.common.ConnectionIndicator
@@ -734,16 +735,17 @@ private fun SessionRowItem(
                 ),
         )
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(
+            // R039 第 6 条：同上（主区列表）。
+            SingleLineMarqueeText(
                 text = summary.displayName,
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                color = if (row.isArchived) {
-                    MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
-                } else {
-                    MaterialTheme.colorScheme.onBackground
-                },
+                modifier = Modifier.fillMaxWidth(),
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    color = if (row.isArchived) {
+                        MaterialTheme.colorScheme.onBackground.copy(alpha = 0.62f)
+                    } else {
+                        MaterialTheme.colorScheme.onBackground
+                    },
+                ),
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 summary.lastModel?.let { model ->
@@ -1579,14 +1581,19 @@ private fun DrawerSessionRow(
                 .clearAndSetSemantics {},
         )
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
+            // R039 第 6 条：会话名单行截断 + 溢出时横向滚动。抽屉宽 318dp，
+            // 长会话名（「App公网配对 Connection Reset 问题修复」）用省略号会被切掉区分点，
+            // 而尾部往往正是区分两条会话的地方。
+            SingleLineMarqueeText(
                 text = summary.displayName,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = if (pinned) FontWeight.Medium else FontWeight.Normal,
-                // 归档行标题 0.5 → 0.62：11~13sp 正文的 AA 下限，同时仍能看出「退后」。
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = if (archived) 0.62f else 1f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth(),
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontWeight = if (pinned) FontWeight.Medium else FontWeight.Normal,
+                    // 归档行标题 0.5 → 0.62：11~13sp 正文的 AA 下限，同时仍能看出「退后」。
+                    color = MaterialTheme.colorScheme.onBackground.copy(
+                        alpha = if (archived) 0.62f else 1f,
+                    ),
+                ),
             )
             Text(
                 text = listOfNotNull(

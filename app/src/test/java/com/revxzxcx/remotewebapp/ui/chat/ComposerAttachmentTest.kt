@@ -62,6 +62,7 @@ class ComposerAttachmentTest {
         attachNotice: String? = null,
         onRemove: (Int) -> Unit = {},
         onSend: () -> Unit = {},
+        onStop: () -> Unit = {},
     ) {
         compose.setContent {
             Composer(
@@ -74,6 +75,7 @@ class ComposerAttachmentTest {
                 permissionChip = {},
                 onDraftChange = {},
                 onSend = onSend,
+                onStop = onStop,
                 onRemoveAttachment = onRemove,
                 onAttachImage = { _, _, _, _ -> null },
                 onAttachFile = { _, _ -> },
@@ -212,5 +214,64 @@ class ComposerAttachmentTest {
         setComposer(attachNotice = "这张图片有 1.0 MB，超过单张上限 500 B。")
         compose.onNodeWithText("这张图片有 1.0 MB，超过单张上限 500 B。").assertIsDisplayed()
         compose.onNodeWithText("知道了").assertIsDisplayed()
+    }
+
+    // ── R039 第 5 条（用户 m17042）：停止入口从顶栏的 × 搬到发送键。
+    //
+    // 这一改动的全部风险都在**判据**上：多一个条件或少一个条件，用户就会在想排队
+    // 发消息时点成中止。四条用例各守一个边界：
+    // ① 进行中 + 空输入 → 停止；② 进行中 + 有草稿 → 仍是发送（排队）；
+    // ③ 进行中 + 挂着附件 → 仍是发送（附件的意图就是把它们发出去）；
+    // ④ 发送在途 → 不变成停止（否则一次误触会在请求已经飞出去之后再补一刀）。
+    //
+    // 断言用 contentDescription 而不是图标形态：读屏用户听到的就是这个字符串，
+    // 它也把「图标换了但语义没换」这类回归一并钉住。
+
+    @Test
+    fun `生成中且输入框为空时发送键变成停止键`() {
+        var stops = 0
+        var sends = 0
+        setComposer(generating = true, draft = "", onStop = { stops++ }, onSend = { sends++ })
+        compose.onNodeWithContentDescription("停止生成").assertIsEnabled()
+        compose.onNodeWithContentDescription("发送按钮").assertDoesNotExist()
+        compose.onNodeWithContentDescription("停止生成").performClick()
+        compose.waitForIdle()
+        assertEquals(1, stops)
+        assertEquals(0, sends)
+    }
+
+    @Test
+    fun `生成中输入框有草稿时仍是发送键并排队`() {
+        var stops = 0
+        var sends = 0
+        setComposer(generating = true, draft = "排队一句", onStop = { stops++ }, onSend = { sends++ })
+        compose.onNodeWithContentDescription("停止生成").assertDoesNotExist()
+        compose.onNodeWithContentDescription("发送按钮").assertIsEnabled()
+        compose.onNodeWithContentDescription("发送按钮").performClick()
+        compose.waitForIdle()
+        assertEquals(1, sends)
+        assertEquals(0, stops)
+    }
+
+    @Test
+    fun `生成中挂着附件时仍是发送键`() {
+        setComposer(generating = true, draft = "", pending = listOf(image))
+        compose.onNodeWithContentDescription("停止生成").assertDoesNotExist()
+        compose.onNodeWithContentDescription("发送按钮").assertIsEnabled()
+    }
+
+    @Test
+    fun `发送在途时不会变成停止键`() {
+        // 请求已经飞出去了，此时再给一个「停止」会让人以为能撤回这一条。
+        setComposer(generating = true, sending = true, draft = "")
+        compose.onNodeWithContentDescription("停止生成").assertDoesNotExist()
+        compose.onNodeWithContentDescription("发送按钮").assertIsNotEnabled()
+    }
+
+    @Test
+    fun `没有生成时输入框为空仍然不可点`() {
+        setComposer(generating = false, draft = "")
+        compose.onNodeWithContentDescription("停止生成").assertDoesNotExist()
+        compose.onNodeWithContentDescription("发送按钮").assertIsNotEnabled()
     }
 }

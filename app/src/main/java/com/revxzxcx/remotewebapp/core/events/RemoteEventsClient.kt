@@ -13,10 +13,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -104,6 +106,35 @@ class RemoteEventsClient(
 
     /** 单调递增的提问到达计数；UI 观察到变化就去重读一次投影。 */
     val questionSignal: StateFlow<Long> = _questionSignal.asStateFlow()
+
+    /**
+     * 会话列表相关转发事件的队列。
+     *
+     * 与 [approvals] / [questions] 一样挂**应用级**：会话列表页随时会被销毁重建（切到
+     * 聊天页再回来），如果订阅随页面走，那这段期间的新建/运行态变化就永久丢了——
+     * 而 `session/list` 是全量重拉（1.78 MB），不能靠它补。
+     *
+     * ## 为什么是 Channel 而不是 StateFlow（审查 P1）
+     *
+     * 早先这里用 `MutableStateFlow<SessionNotification?>`「只留最新一条」，理由是
+     * 「三条增量操作本身幂等，折叠中间值不丢信息」。**那个理由不成立**：
+     * 幂等的前提是每条都**单独应用过**。`api-session/added` 紧跟
+     * `api-session/status(X, …)` 时，若只剩后者，`patchRunning` 找不到 id 就原样返回，
+     * 那条新会话**永远不会出现**；反过来两个会话近乎同时 `status(true)`/`status(false)`，
+     * 丢掉任一条就有一个「进行中」小柱永久卡住。这正是用户报的两个现象本身。
+     *
+     * 容量 [SESSION_NOTIFICATION_BUFFER]。超出时丢**最旧**的：那时消费方（`HomeViewModel`）
+     * 要么正忙要么已经不在了；后者下次进来会走一次全量 `session/list` 自愈，
+     * 而 `Channel` 有界保证不会因为没人收就无限涨。
+     */
+    private val _sessionNotifications = kotlinx.coroutines.channels.Channel<SessionNotification>(
+        capacity = SESSION_NOTIFICATION_BUFFER,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
+    )
+
+    /** 每一条会话转发事件，按到达顺序逐条送达；**不折叠**（理由见 [_sessionNotifications]）。 */
+    val sessionNotifications: kotlinx.coroutines.flow.Flow<SessionNotification> =
+        _sessionNotifications.receiveAsFlow()
 
     private var job: Job? = null
 
@@ -267,9 +298,16 @@ class RemoteEventsClient(
             }
 
             "emit" -> {
-                // 本期只接 waterfall；emit 全部忽略。留这个分支是为了让「刻意不接」
-                // 在代码里可见，而不是看起来像漏了。
                 _stats.update { it.copy(emits = it.emits + 1) }
+                // 会话列表相关的五条（`api-session/…`）是本 App 唯一的增量来源：
+                // `session/list` 是全量 unary（实测 1.78 MB），不能拿它轮询。
+                val notification = SessionNotification.parse(
+                    event = obj.text("event"),
+                    args = obj["args"] as? JsonArray,
+                )
+                // `trySend` 不会挂起（`handle` 跑在收帧线程上），缓冲满时由
+                // `DROP_OLDEST` 决定丢谁，语义见 [_sessionNotifications]。
+                if (notification != null) _sessionNotifications.trySend(notification)
             }
 
             "waterfall" -> {
@@ -605,6 +643,14 @@ class RemoteEventsClient(
          * 64 条足够；再大就是无界增长，与审批次数成正比。
          */
         const val HANDLED_RING = 64
+
+        /**
+         * 会话转发事件的缓冲深度。
+         *
+         * 64 条的余量足够覆盖「列表页正在重建、消费方还没开始收」这一段；再多就是
+         * 让一次突发把内存顶起来，而超出部分本来也能靠下次全量 `session/list` 自愈。
+         */
+        const val SESSION_NOTIFICATION_BUFFER = 64
     }
 
     private fun backoffMillis(attempt: Long): Long =

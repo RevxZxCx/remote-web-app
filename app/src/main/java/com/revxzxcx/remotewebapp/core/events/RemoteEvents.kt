@@ -111,8 +111,15 @@ sealed interface RemoteEventFrame {
     /** 服务端撤回了某个待回答请求（模型自己放弃了、轮次结束了…）。 */
     data class Cancelled(val eventId: String) : RemoteEventFrame
 
-    /** 一条只读转发事件。 */
-    data class Emit(val event: String, val args: JsonObject?) : RemoteEventFrame
+    /**
+     * 一条只读转发事件。
+     *
+     * `args` 是**数组**：Host 侧 `ctx.emit(name, a, b)` 的参数表摊平后原样转发。
+     * 曾经这里写的是 `JsonObject?`，因为 waterfall 的 `request` 是对象而顺手对齐了——
+     * 结果是一个永远不会被构造的类型（`handle` 里 emit 分支直接忽略），
+     * 谁照着它去解析都会取不到东西。
+     */
+    data class Emit(val event: String, val args: JsonArray?) : RemoteEventFrame
 
     /** 一条需要回答的转发事件。 */
     data class Waterfall(
@@ -121,6 +128,76 @@ sealed interface RemoteEventFrame {
         val agentId: String?,
         val request: JsonObject?,
     ) : RemoteEventFrame
+}
+
+/**
+ * 会话列表相关的转发事件（`emit` 型）。
+ *
+ * ## 为什么需要它
+ * 会话列表原来只在**订阅建立那一刻**拉一次 `session/list`（unary，实测 1.78 MB、2.6s）。
+ * 于是桌面端新建的会话在手机上永远不出现，会话跑完了手机上那颗「进行中」小柱也一直转
+ * （R039 用户报的两个现象）。整表轮询不可行——1.78 MB 的响应没人愿意每几秒拉一次。
+ *
+ * `API_REMOTE_FORWARDED_EVENTS`（asar 里逐条列过）中这五条由 Host 在会话生命周期上主动推，
+ * 每条都声明了 `resources.session`，带得动增量。
+ *
+ * ## 参数形状（`$events` 探针实测）
+ * 帧是 `{"type":"emit","event":"api-session/added","args":[…]}`，`args` 是数组：
+ * - `api-session/added` → `[summary]`，`summary` 与 `session/list` 的条目**同形状**
+ *   （实测含 `sessionId`/`updatedAt`/`running`/`blank`/`cwd`/`projections` 全套）；
+ * - `api-session/removed` / `status` / `activity` / `error` → `[sessionId, …]`。
+ *
+ * ## 为什么 `activity` 也要接
+ * 它是**唯一**能覆盖「标题变了 / 排序位置变了」的信号：标题在
+ * `projections.values.title` 里，而白名单没有单独的标题事件。所以收到 `activity` 时
+ * 必须重拉一次全量，否则列表里的名字会一直停在旧值。
+ */
+sealed interface SessionNotification {
+
+    /** 会话被创建、或 agent 可用性变化。`summary` 与 `session/list` 的条目同形状。 */
+    data class Added(val summary: JsonObject) : SessionNotification
+
+    /** 会话被销毁（页签关掉且持久化层回收）。 */
+    data class Removed(val sessionId: String) : SessionNotification
+
+    /** 运行态翻转：`running = true` 表示这一轮正在跑。 */
+    data class Status(val sessionId: String, val running: Boolean) : SessionNotification
+
+    /** 会话有新活动（`updatedAt` 变化）：标题与排位可能一起变，需要重拉全量。 */
+    data class Activity(val sessionId: String, val updatedAt: Long) : SessionNotification
+
+    companion object {
+        /**
+         * 把一帧 `emit` 翻译成 [SessionNotification]；不关心的 `event` 返回 null。
+         *
+         * 宽容解析：`args` 缺项、类型不符一律返回 null 而不是抛异常。理由与本工程其它
+         * 解析器一致——列表少更新一次远好过因为一个字段让整条流过不去。
+         */
+        fun parse(event: String?, args: JsonArray?): SessionNotification? {
+            if (event == null || args == null) return null
+            return when (event) {
+                "api-session/added" -> (args.firstOrNull() as? JsonObject)?.let(::Added)
+                "api-session/removed" -> idOf(args)?.let(::Removed)
+                "api-session/status" -> {
+                    val id = idOf(args) ?: return null
+                    val running = (args.getOrNull(1) as? JsonPrimitive)
+                        ?.takeIf { it.isString.not() || it.content in setOf("true", "false") }
+                        ?.content?.toBooleanStrictOrNull() ?: return null
+                    Status(id, running)
+                }
+                "api-session/activity" -> {
+                    val id = idOf(args) ?: return null
+                    val at = (args.getOrNull(1) as? JsonPrimitive)?.content?.toLongOrNull() ?: return null
+                    Activity(id, at)
+                }
+                else -> null
+            }
+        }
+
+        private fun idOf(args: JsonArray): String? =
+            (args.firstOrNull() as? JsonPrimitive)?.takeIf { it.isString }?.content
+                ?.takeIf { it.isNotBlank() }
+    }
 }
 
 /** 对 waterfall 的回答结果。 */

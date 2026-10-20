@@ -98,6 +98,37 @@ data class CachedMeta(
     val value: String,
 )
 
+/**
+ * 未发出的输入框草稿（用户 m17042 第 2 条：退出会话 / 关掉 App 之后不该丢）。
+ *
+ * ## 为什么单独一张表而不是塞进 [CachedMeta]
+ *
+ * `meta` 的键是自由字符串，塞 `draft:<sessionId>` 也能跑，但那样**没有任何东西能约束它的
+ * 生命周期**：会话被删掉之后那条草稿会永远留在库里（`deleteOrphanMessages` 只清
+ * `messages`）。单独一张表之后，「会话没了 → 草稿跟着没」可以在
+ * `CacheDao.replaceSessions` 的同一个事务里用一句 SQL 表达，和其他孤儿数据的清理
+ * 走同一条路径。
+ *
+ * ## 为什么存整段原文而不是增量
+ *
+ * 输入框是**整体替换**语义（Compose 的 `onValueChange` 给的是新全文），存增量既没有
+ * 收益也没有可靠的落点——光标位置、选区、IME 组合态都不该被持久化（恢复一段旧选区会
+ * 让用户下一次点进来时莫名其妙选中半句话）。
+ */
+@Entity(
+    tableName = "drafts",
+    primaryKeys = ["ownerId", "sessionId"],
+    indices = [Index("ownerId")],
+)
+data class CachedDraft(
+    val ownerId: String,
+    val sessionId: String,
+    /** 草稿全文。空白草稿不入库（见 `DshCache.writeDraft`）。 */
+    val text: String,
+    /** 最后写入时间，调试页用来判断「这条草稿有多旧」。 */
+    val updatedAt: Long,
+)
+
 /** [CachedMeta.key] 的取值。 */
 object CacheKeys {
     const val ARCHIVED_SESSIONS: String = "archivedSessionIds"

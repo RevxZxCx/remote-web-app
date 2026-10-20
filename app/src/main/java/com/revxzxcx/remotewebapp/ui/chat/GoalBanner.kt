@@ -201,21 +201,9 @@ internal fun GoalBanner(
                     .background(accent.copy(alpha = if (goal.phase == GoalPhase.ACTIVE) barAlpha else 0.55f)),
             )
 
-            // 目标图标（圆环靶心）。
-            Box(
-                modifier = Modifier
-                    .size(26.dp)
-                    .clip(CircleShape)
-                    .background(accent.copy(alpha = 0.14f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = GoalIcon,
-                    contentDescription = null,
-                    tint = accent,
-                    modifier = Modifier.size(15.dp),
-                )
-            }
+            // 目标图标（圆环靶心）——用户 m17042 第 4 条：这颗大圆是目标状态的视觉主体，
+            // 进行中时必须自己呼吸，而不是只有左边 2dp 竖线和整条横幅在动。
+            GoalOrb(color = accent, pulsing = goal.phase == GoalPhase.ACTIVE)
 
             if (editing) {
                 // 行内编辑：单行输入 + ✓ / ×（用户 m45632：与排队编辑同一套交互）。
@@ -228,8 +216,8 @@ internal fun GoalBanner(
             } else {
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        PhaseDot(accent, pulse = goal.phase == GoalPhase.ACTIVE)
-                        Spacer(Modifier.width(5.dp))
+                        // 用户 m17042 第 4 条：这里原本还有一颗 5dp 的 PhaseDot，与左侧
+                        // 大圆表达的是同一件事，叠在一起是多余的——已删除。
                         Text(
                             text = goal.label,
                             style = MaterialTheme.typography.labelSmall,
@@ -292,43 +280,103 @@ internal fun GoalBanner(
     }
 }
 
-/** 阶段色圆点（5dp）。 */
+/**
+ * 目标圆的几何常量。
+ *
+ * 抽成常量而不是散在绘制代码里，是因为测试要按同一组数字断言（见
+ * `GoalOrbGeometryTest` 的「实心圆占满 26/34」）。
+ */
+private const val GOAL_ORB_BOX_DP = 34f
+private const val GOAL_ORB_DISC_DP = 26f
+
+/** 呼吸环在某一帧的半径与不透明度。 */
+internal data class GoalOrbRing(val radius: Float, val alpha: Float)
+
+/**
+ * 计算呼吸环的半径与不透明度（纯函数，供 `Canvas` 与单测共用）。
+ *
+ * @param progress 0→1 的循环进度。
+ * @param discRadius 实心圆半径。
+ * @param maxRadius 可用格子半径。
+ *
+ * 三条性质都被 `GoalOrbGeometryTest` 钉住，因为它们各自对应一个会毁掉观感的错法：
+ * 1. `progress == 0` 时半径**正好等于** `discRadius` —— 环必须从实心圆边缘出发，
+ *    早一点会看到圆外凭空冒出一条线，晚一点则起点处闪一下；
+ * 2. `progress == 1` 时半径**正好等于** `maxRadius`、alpha 为 0 —— 环必须恰好消失在
+ *    格子边缘，否则会被 `Canvas` 的 bounds 硬切出一道直边；
+ * 3. alpha 必须随 progress **线性**降到 0 —— 提前降到 0 会让环消失在半途，看着像卡顿。
+ */
+internal fun goalOrbRing(progress: Float, discRadius: Float, maxRadius: Float): GoalOrbRing {
+    val p = progress.coerceIn(0f, 1f)
+    return GoalOrbRing(
+        radius = discRadius + (maxRadius - discRadius) * p,
+        alpha = 0.55f * (1f - p),
+    )
+}
+
+/**
+ * 目标状态圆（横幅左侧 34dp 格内的 26dp 圆，顶栏收起态的同一个圆）。
+ *
+ * ## 为什么用 `Canvas` 而不是两个叠起来的 `Box`
+ *
+ * 呼吸效果需要**半径与 alpha 同步变化**：外环从实心圆的边缘向外扩散、同时淡出。
+ * 用 `graphicsLayer { scaleX/scaleY }` 放大一个 1dp 描边的圆环，会把描边一起拉粗，
+ * 视觉上像「环在变厚」而不是「环在扩散」。
+ *
+ * ## 为什么占 34dp 而圆只有 26dp
+ *
+ * 外环要扩散到实心圆之外，而 `Canvas` 的绘制会被自己的 bounds 裁掉。横幅左侧的竖线
+ * 本来就是 34dp 高，所以这 34dp 格子不改变行高；顶栏 [GoalChip] 的触控区是 40dp，
+ * 塞得下。
+ * 实心圆严格保持原来的 26dp：这颗圆是目标状态的视觉主体，不因为加动效就变小。
+ *
+ * ## 呼吸节奏
+ *
+ * 2600ms 一轮，与横幅整体的淡呼吸（`goalPulse`）同周期同 easing：两处如果各跑各的，
+ * 看久了会像两个独立的东西在闪。静态相位（暂停/受阻/完成）只画实心圆，不跑动画。
+ */
 @Composable
-private fun PhaseDot(color: Color, pulse: Boolean = false) {
-    // 用户 m04197 第 3 条：收起态（顶栏 [GoalChip]）的小圆圈有扩散动效，展开态这颗
-    // 却是静止的 5dp 圆点——同一件事的两种表达，用户一眼看出不对称：「目标收起后，
-    // 如果在运行，小圆圈应该有扩散动效，但是目标展开的时候小圆圈也应该对应运行方式
-    // 展示动效」。
-    //
-    // 这里给**运行中**的目标补上同一套语言：圆心不动，一圈与 accent 同色的细环从
-    // 1.0× 扩散到 1.9× 同时淡出，1.6s 一轮。非 ACTIVE 相位仍只画实心点。
-    //
-    // 用 `Canvas` 而不是两个叠起来的 `Box`：需要半径与 alpha 同步变化，而
-    // `graphicsLayer { scaleX }` 会把 1dp 描边一起放大成粗环。
-    // 外框固定 11dp，各相位布局宽度一致，避免相位变化时后面文字左右跳。
-    val progress = if (pulse) {
-        rememberInfiniteTransition(label = "goalDotPulse")
+private fun GoalOrb(
+    color: Color,
+    pulsing: Boolean,
+    modifier: Modifier = Modifier,
+    iconSize: Dp = 15.dp,
+) {
+    val progress = if (pulsing) {
+        rememberInfiniteTransition(label = "goalOrbPulse")
             .animateFloat(
                 initialValue = 0f,
                 targetValue = 1f,
-                animationSpec = infiniteRepeatable(tween(1600, easing = LinearEasing)),
-                label = "goalDotProgress",
+                animationSpec = infiniteRepeatable(tween(2600, easing = LinearEasing)),
+                label = "goalOrbProgress",
             )
             .value
     } else {
         0f
     }
-    Canvas(modifier = Modifier.size(11.dp)) {
-        val maxRadius = size.minDimension / 2f
-        if (pulse) {
-            drawCircle(
-                color = color.copy(alpha = 0.45f * (1f - progress)),
-                radius = maxRadius * (0.45f + 0.5f * progress),
-                center = center,
-                style = Stroke(width = 1.dp.toPx()),
-            )
+
+    Box(modifier = modifier.size(GOAL_ORB_BOX_DP.dp), contentAlignment = Alignment.Center) {
+        Canvas(Modifier.matchParentSize()) {
+            val maxRadius = size.minDimension / 2f
+            // 实心圆半径占满 26 / 34 的格子，保持原来的视觉尺寸。
+            val discRadius = maxRadius * (GOAL_ORB_DISC_DP / GOAL_ORB_BOX_DP)
+            if (pulsing) {
+                val ring = goalOrbRing(progress, discRadius, maxRadius)
+                drawCircle(
+                    color = color.copy(alpha = ring.alpha),
+                    radius = ring.radius,
+                    center = center,
+                    style = Stroke(width = 1.2.dp.toPx()),
+                )
+            }
+            drawCircle(color = color.copy(alpha = 0.14f), radius = discRadius, center = center)
         }
-        drawCircle(color = color, radius = maxRadius * 0.45f, center = center)
+        Icon(
+            imageVector = GoalIcon,
+            contentDescription = null,
+            tint = color,
+            modifier = Modifier.size(iconSize),
+        )
     }
 }
 
@@ -454,30 +502,12 @@ internal fun GoalChip(
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        if (goal.phase == GoalPhase.ACTIVE) {
-            val transition = rememberInfiniteTransition(label = "goalChipPulse")
-            val p by transition.animateFloat(
-                initialValue = 0.55f,
-                targetValue = 1f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(2600, easing = LinearEasing),
-                    repeatMode = androidx.compose.animation.core.RepeatMode.Reverse,
-                ),
-                label = "goalChipAlpha",
-            )
-            Box(
-                Modifier
-                    .size(26.dp)
-                    .graphicsLayer { alpha = p }
-                    .clip(CircleShape)
-                    .background(accent.copy(alpha = 0.18f)),
-            )
-        }
-        Icon(
-            imageVector = GoalIcon,
-            contentDescription = null,
-            tint = accent,
-            modifier = Modifier.size(17.dp),
+        // 用户 m17042 第 4 条：收起态与展开态必须是**同一个圆**的两种展示，不能一个是
+        // 「26dp 圆整体明暗闪烁」、另一个是「外环扩散」。统一交给 [GoalOrb]。
+        GoalOrb(
+            color = accent,
+            pulsing = goal.phase == GoalPhase.ACTIVE,
+            iconSize = 17.dp,
         )
     }
 }

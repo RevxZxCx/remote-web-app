@@ -239,6 +239,45 @@ class ChatViewModel(
     private var changesJob: Job? = null
     private var cacheJob: Job? = null
 
+    /**
+     * 草稿落盘的协程（用户 m17042 第 2 条）。
+     *
+     * 每次 `onDraftChange` 都取消并重排一个 [DRAFT_SAVE_DEBOUNCE_MS] 后的写入：输入框
+     * 每敲一个键都会回调一次，直接写库等于把 Room 的事务频率绑在打字速度上。
+     * 只保留**最后一个**待写入的任务即可，中间态没有落盘价值。
+     */
+    private var draftJob: Job? = null
+
+    /**
+     * 读回磁盘草稿的协程。
+     *
+     * 与 [draftJob] 分开：这个只跑一次、且必须在第一次用户输入**之前**或之后都能安全完成
+     * ——它自己会用 `isEmpty()` 判据放弃覆盖。共用一个字段会让「用户立刻开始打字」取消掉
+     * 还没读完的恢复任务，结果是把恢复整个取消掉（而本来只是该让路）。
+     */
+    private var draftRestoreJob: Job? = null
+
+    /**
+     * 「内存里已经是这个值、但磁盘上可能还没有」的草稿文本。
+     *
+     * [onDraftChange] 每敲一个键就更新它，去抖写入真正落盘后清空，[send] 成功后也清空。
+     * [onCleared] 靠它做最后一次同步式的补救写入——那是唯一能在 ViewModel 被销毁前
+     * 抢救未落盘草稿的时机。
+     */
+    private var pendingDraft: String? = null
+
+    /**
+     * 只用于「离开页面时把未落盘草稿补写一次」的独立作用域。
+     *
+     * 不能复用 [viewModelScope]：`onCleared()` 里它已经被取消了，往里 launch 等于什么
+     * 都不做（这正是审查指出的 P1——用户打完字 700ms 内按返回，草稿一次都没落盘）。
+     * 挂 `NonCancellable` 是为了让这次补写不受任何父作用域取消影响；它是**一次性**的
+     * 小写入，不持有 Activity/Context，写完自己结束。
+     */
+    private val draftFlushScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.NonCancellable + kotlinx.coroutines.Dispatchers.IO,
+    )
+
     /** 投影一次性首读 / 失败回补的协程（`session/projections`）。 */
     private var projectionJob: Job? = null
 
@@ -292,6 +331,7 @@ class ChatViewModel(
 
     init {
         warmStart()
+        restoreDraft()
         start()
         watchChanges()
         watchQuestions()
@@ -325,9 +365,51 @@ class ChatViewModel(
         }
     }
 
-    /** 更新输入框。 */
+    /**
+     * 冷启动读回上次没发出去的草稿（用户 m17042 第 2 条：退出会话 / 关掉 App 不许丢）。
+     *
+     * ## 为什么必须在 `init` 里、且**不覆盖**已有输入
+     *
+     * ViewModel 是随会话页创建的，所以「进页面」就是这里。但它也可能被 `viewModels` 复用
+     * （同一个 scoped owner 下重新显示页面），此时内存里的 `_draft` 已经是用户正在打的内容，
+     * 从磁盘读回来的旧值**不能**盖掉它——那会把用户刚敲的字吞掉。判据用
+     * `isEmpty()` 而不是「是否已经 restore 过」：内存里非空就说明它比磁盘新。
+     *
+     * ## 失败不提示
+     *
+     * [DshCache] 已经把异常折成 `null`；这里读不到草稿就当没有，绝不因此冒一个错误条——
+     * 「草稿没恢复」是小事，为它打断用户更糟。
+     */
+    private fun restoreDraft() {
+        val store = cache ?: return
+        if (ownerId.isBlank()) return
+        draftRestoreJob = viewModelScope.launch {
+            val saved = store.readDraft(ownerId, sessionId) ?: return@launch
+            if (_draft.value.isEmpty()) _draft.value = saved
+        }
+    }
+
+    /**
+     * 更新输入框，并把内容排队落盘。
+     *
+     * 内存里的值**立刻**更新（输入框必须跟手），磁盘写入去抖
+     * [DRAFT_SAVE_DEBOUNCE_MS]。`send()` 成功后会把草稿清空并清掉磁盘上的行
+     * （见那里的 `clearDraft`），所以这里不需要处理「已发出但还没落盘」的竞态：
+     * 发送路径自己 `cancel` 掉待写入任务。
+     */
     fun onDraftChange(text: String) {
         _draft.value = text
+        pendingDraft = text
+        val store = cache ?: return
+        if (ownerId.isBlank()) return
+        draftJob?.cancel()
+        draftJob = viewModelScope.launch {
+            delay(DRAFT_SAVE_DEBOUNCE_MS)
+            store.writeDraft(ownerId, sessionId, text)
+            // 只有「落盘的还是最新那一段」才算写清账；这中间用户又敲了字的话，
+            // `pendingDraft` 已经换成新值，不能清（否则 onCleared 会漏掉新内容）。
+            if (pendingDraft == text) pendingDraft = null
+        }
     }
 
     /** 手动重连（点错误条上的「重试」）。 */
@@ -419,7 +501,22 @@ class ChatViewModel(
                     clientTimeZone = java.util.TimeZone.getDefault().id,
                     requestId = requestId,
                 )
-                _draft.value = ""
+                // 只在输入框里仍然是「刚发出去的那一段」时才清。
+                // 发送是网络往返，输入框全程可用：用户完全可能在这期间开始写下一句，
+                // 无条件清空会把新内容从内存抹掉、cancel 掉它的待写任务、再删掉磁盘行，
+                // 三件事一起做，用户刚打的字就彻底没了（审查 P2）。
+                if (_draft.value.trim() == text) {
+                    _draft.value = ""
+                    pendingDraft = null
+                    // 草稿已经变成一条真消息，磁盘上那份必须一起清掉（用户 m17042 第 2 条）。
+                    // 先取消待写入的任务再删行：否则「刚打完字就点发送」时，那个已经排好的
+                    // 去抖写入会在 700ms 后把刚发出去的文字重新写回草稿表——下次进会话
+                    // 输入框里会莫名其妙又出现一遍已经发过的内容。
+                    draftJob?.cancel()
+                    cache?.let { store ->
+                        if (ownerId.isNotBlank()) store.clearDraft(ownerId, sessionId)
+                    }
+                }
                 _pending.value = emptyList()
                 _attachNotice.value = null
                 _state.value = _state.value.copy(error = null, sendError = null)
@@ -1449,12 +1546,32 @@ class ChatViewModel(
             ?: (cause.message ?: cause.javaClass.simpleName)
     }
 
+    /**
+     * 把「还在内存里、没来得及落盘」的草稿补写一次。
+     *
+     * 用户最典型的失败场景就是「打完字直接按返回」——那时 `onDraftChange` 排的去抖写入
+     * 还没到点，`onCleared()` 一 `cancel` 就永远丢了。这里用独立作用域补写，不跟随
+     * ViewModel 生命周期取消（见 [draftFlushScope] 的 KDoc）。
+     *
+     * 副作用是可能多写一次已在盘上的内容：`writeDraft` 是幂等覆盖，代价可以忽略。
+     */
+    private fun flushPendingDraft() {
+        val text = pendingDraft ?: return
+        pendingDraft = null
+        val store = cache ?: return
+        if (ownerId.isBlank()) return
+        draftFlushScope.launch { store.writeDraft(ownerId, sessionId, text) }
+    }
+
     override fun onCleared() {
+        flushPendingDraft()
         streamJob?.cancel()
         pageJob?.cancel()
         sendJob?.cancel()
         changesJob?.cancel()
         cacheJob?.cancel()
+        draftJob?.cancel()
+        draftRestoreJob?.cancel()
         catalogJob?.cancel()
         modelJob?.cancel()
         attachJob?.cancel()
@@ -1488,6 +1605,15 @@ class ChatViewModel(
          * 反映到手机上，而每秒最多一次 unary RPC 的代价可以忽略。
          */
         private const val QUESTION_REFRESH_MS = 2_500L
+
+        /**
+         * 草稿去抖窗口（毫秒）。
+         *
+         * 700ms 是「连续打字时不会每个键都写一次库、而停手后几乎立刻落盘」的折中。
+         * 再短（200ms）等于按打字速度写 SQLite；再长（2s）则用户「打完字立刻按 Home 键
+         * 走人」时可能还没写进去——那是这个功能最典型的失败场景。
+         */
+        private const val DRAFT_SAVE_DEBOUNCE_MS = 700L
 
         fun factory(
             connection: DshConnection,

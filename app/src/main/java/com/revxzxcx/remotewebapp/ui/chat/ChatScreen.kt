@@ -124,6 +124,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
@@ -150,6 +151,7 @@ import com.revxzxcx.remotewebapp.core.session.message
 import com.revxzxcx.remotewebapp.core.session.visibleAssistantBlocks
 import com.revxzxcx.remotewebapp.ui.common.CacheNotice
 import com.revxzxcx.remotewebapp.ui.common.AppIconButton
+import com.revxzxcx.remotewebapp.ui.common.SingleLineMarqueeText
 import com.revxzxcx.remotewebapp.ui.common.ConnectionBanner
 import com.revxzxcx.remotewebapp.ui.common.GeneratingGlyph
 import com.revxzxcx.remotewebapp.ImeInsets
@@ -230,6 +232,10 @@ fun ChatScreen(
     // 像素高：胶囊、排队条、任务面板的高低都不固定，写死任何一个数字都会在两个用例里
     // 出错（没有胶囊时多出一块空白 / 展开任务面板时最后一条被盖住）。
     var dockHeightPx by remember { mutableIntStateOf(0) }
+    // R039 第 5 条：「折叠栏」把消息区整块搁置成一句占位，再点一次复原。
+    // 与上面几个一样用 `remember`（不做跨进程记忆）：用户要的是「先搁置」这一下动作，
+    // 不是一种需要记住的偏好。
+    var conversationCollapsed by remember { mutableStateOf(false) }
     var goalCollapsed by remember { mutableStateOf(false) }
     var goalEditing by remember { mutableStateOf(false) }
     var showDeleteGoal by remember { mutableStateOf(false) }
@@ -360,14 +366,25 @@ fun ChatScreen(
         topBar = {
             TopAppBar(
                 title = {
+                    // ── R039 第 6 条（用户 m17042）：标题与 cwd 单行截断 + 可滚动。
+                    //
+                    // 原来两行都自由换行：会话名一长，顶栏从两行变三行，下面的消息区整体
+                    // 下移；cwd 更长（`F:/bot/remote-web-app/app/src/main/java/...`），
+                    // 会折成两到三行把标题挤扁。改成单行后顶栏高度**恒定**，元素位置不再
+                    // 随会话名长度跳动。
+                    //
+                    // 用 [SingleLineMarqueeText] 而不是 `maxLines = 1 + Ellipsis`：路径与标题
+                    // 的区分度都在尾部，省略号恰好吃掉那一段（详见该函数的 KDoc）。
                     Column {
-                        Text(
+                        SingleLineMarqueeText(
                             text = state.title?.takeIf { it.isNotBlank() } ?: title,
+                            modifier = Modifier.fillMaxWidth(),
                             style = MaterialTheme.typography.titleMedium,
                         )
                         state.cwd?.let {
-                            Text(
+                            SingleLineMarqueeText(
                                 text = it,
+                                modifier = Modifier.fillMaxWidth(),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -389,13 +406,19 @@ fun ChatScreen(
                     if (goal != null && goalCollapsed && dockVisible(imeVisible, editing = goalEditing)) {
                         GoalChip(goal = goal, onClick = { goalCollapsed = false })
                     }
-                    if (state.generating) {
-                        AppIconButton(
-                            onClick = viewModel::cancel,
-                            contentDescription = "中止生成",
-                        ) {
-                            Icon(Icons.Default.Close, contentDescription = null)
-                        }
+                    // ── R039 第 5 条（用户 m17042）：顶栏原来在生成中长出一个 ×「中止生成」。
+                    // 用户判为「不符合操作逻辑」，并给出正确交互：「对话进行中且输入框为空时，
+                    // 发送键变停止键」。所以顶栏这一格**永久**交给「折叠对话栏」，
+                    // 中止动作移到发送键（见 [ComposerSendButton]），两处不再争同一位置。
+                    //
+                    // 为什么是「折叠」而不是「关闭」：这个页面是 App 里唯一的内容屏，
+                    // 退出（返回）已经在左上角，右上角再放一个「×」会让两个动作看起来一样重。
+                    // 折叠是**可逆且不丢上下文**的：消息、目标、草稿全部原地保留，只是先搁置。
+                    AppIconButton(
+                        onClick = { conversationCollapsed = !conversationCollapsed },
+                        contentDescription = if (conversationCollapsed) "展开对话" else "折叠对话",
+                    ) {
+                        Icon(PanelCollapseIcon, contentDescription = null)
                     }
                 },
             )
@@ -463,7 +486,7 @@ fun ChatScreen(
                 // 会把消息区压到只剩一两行。
                 // 行内编辑时**不能**隐藏（否则输入框随横幅一起销毁）：这是「输入法让位」的
                 // 唯一例外（用户 m45632 明确要求「正在行内编辑的那一行不隐藏」）。
-                if (dockVisible(imeVisible, editing = goalEditing)) {
+                if (!conversationCollapsed && dockVisible(imeVisible, editing = goalEditing)) {
                     state.goal?.let { goal ->
                         Box(modifier = Modifier.padding(bottom = 8.dp)) {
                             GoalBanner(
@@ -493,6 +516,12 @@ fun ChatScreen(
 
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     when {
+                        // ── R039 第 5 条：折叠后消息区整块搁置。
+                        // 只盖住消息区，输入区仍在（用户要「先搁置」，不是「退出」）——
+                        // 把输入框一起收掉会让人以为这一页废了，而且草稿虽已持久化，
+                        // 突然消失仍是一次视觉跳变。
+                        conversationCollapsed -> ConversationCollapsedPlaceholder()
+
                         state.loading && state.items.isEmpty() -> Box(
                             modifier = Modifier.fillMaxSize(),
                             contentAlignment = Alignment.Center,
@@ -787,6 +816,7 @@ fun ChatScreen(
                         },
                         onDraftChange = viewModel::onDraftChange,
                         onSend = viewModel::send,
+                        onStop = viewModel::cancel,
                         onRemoveAttachment = viewModel::removeAttachment,
                         onAttachImage = { bytes, mediaType, name, measure ->
                             // 返回值仍保留给调用方判断「加没加上」，提示已由 ViewModel 落到
@@ -1117,6 +1147,15 @@ internal fun Composer(
     permissionChip: @Composable () -> Unit,
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit,
+    /**
+     * 停止当前轮（R039 第 5 条）。
+     *
+     * 入口从顶栏的「×」搬到了发送键：**对话进行中且输入框为空时**，发送键变成停止键。
+     * 用户 m17042 原话：「停止对话的正确交互是『对话进行中且输入框为空时，发送键变停止键』」。
+     * 判据里必须带「输入框为空」——有草稿时那一格仍是「发送」（消息排到当前轮之后），
+     * 否则用户想排队发消息却点成了中止。
+     */
+    onStop: () -> Unit,
     onRemoveAttachment: (Int) -> Unit,
     onAttachImage: (ByteArray, String, String?, ImageMeasure) -> String?,
     onAttachFile: (ByteArray, String?) -> Unit,
@@ -1337,8 +1376,10 @@ internal fun Composer(
                             ComposerSendButton(
                                 draft = draft,
                                 sending = sending,
+                                generating = generating,
                                 pending = pending,
                                 onSend = onSend,
+                                onStop = onStop,
                                 onAttachNotice = onAttachNotice,
                             )
                         }
@@ -1384,8 +1425,10 @@ internal fun Composer(
                         ComposerSendButton(
                             draft = draft,
                             sending = sending,
+                            generating = generating,
                             pending = pending,
                             onSend = onSend,
+                            onStop = onStop,
                             onAttachNotice = onAttachNotice,
                         )
                     }
@@ -1508,6 +1551,36 @@ private fun ComposerField(
     )
 }
 
+@Composable
+internal fun ConversationCollapsedPlaceholder(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier.fillMaxSize().padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                PanelCollapseIcon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                modifier = Modifier.size(28.dp),
+            )
+            Text(
+                text = "对话已折叠",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(top = 10.dp),
+            )
+            Text(
+                text = "消息与目标都还在，点右上角展开。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+    }
+}
+
 /**
  * R028 ④：发送键（圆形 + ↑）。与 `＋` 同尺寸、同形状，因此在底排里并排时天然对齐。
  *
@@ -1523,16 +1596,24 @@ private fun ComposerField(
 private fun ComposerSendButton(
     draft: String,
     sending: Boolean,
+    generating: Boolean,
     pending: List<PromptAttachment>,
     onSend: () -> Unit,
+    onStop: () -> Unit,
     onAttachNotice: (String?) -> Unit,
 ) {
+    // R039 第 5 条：进行中且**输入框为空**时，这一格是「停止」而不是「发送」。
+    // 带附件时不算空——用户已经挂好了东西，意图显然是把它们发出去（会排队）。
+    val stopMode = generating && !sending && draft.isBlank() && pending.isEmpty()
     val canSend = (draft.isNotBlank() || pending.isNotEmpty()) && !sending
+    val enabled = stopMode || canSend
     val sendTint by animateColorAsState(
-        targetValue = if (canSend) {
-            MaterialTheme.colorScheme.primary
-        } else {
-            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.18f)
+        targetValue = when {
+            // 停止态与发送态同色：那一格始终是「此刻最该点的动作」，换色会让人以为
+            // 它变成了次要按钮或被禁用。区分靠形状（方块 vs 上箭头），不靠颜色。
+            stopMode -> MaterialTheme.colorScheme.primary
+            canSend -> MaterialTheme.colorScheme.primary
+            else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.18f)
         },
         // 必须显式给出类型实参：`tween(Motion.FAST)` 没有别的约束，Kotlin 会把 T 推成 Int，
         // 于是 `AnimationSpec<Color>` 一个候选都不匹配。
@@ -1544,9 +1625,13 @@ private fun ComposerSendButton(
             .size(40.dp)
             .clip(CircleShape)
             .background(sendTint)
-            .semantics { contentDescription = "发送按钮" }
-            .clickable(enabled = canSend) {
-                if (canSend) {
+            // 键的身份随形态变（R039 第 5 条）：读屏用户听到的必须是此刻真会发生的动作，
+            // 而不是一个固定的「发送按钮」。
+            .semantics { contentDescription = if (stopMode) "停止生成" else "发送按钮" }
+            .clickable(enabled = enabled) {
+                if (stopMode) {
+                    onStop()
+                } else if (canSend) {
                     onSend()
                 } else {
                     // 空草稿 / 上传中。给一句当场可懂的理由，而不是静默吞掉。
@@ -1565,6 +1650,15 @@ private fun ComposerSendButton(
                 modifier = Modifier.size(IconSizes.composer),
                 strokeWidth = 2.dp,
                 color = MaterialTheme.colorScheme.surface,
+            )
+        } else if (stopMode) {
+            // 方块而不是 ×：× 在顶栏已经表达过「关掉这一页」，而这里是「停这一轮」，
+            // 两者不是同一个动作（见 [StopIcon] 的 KDoc）。
+            Icon(
+                imageVector = StopIcon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.surface,
+                modifier = Modifier.size(IconSizes.composer),
             )
         } else {
             Icon(

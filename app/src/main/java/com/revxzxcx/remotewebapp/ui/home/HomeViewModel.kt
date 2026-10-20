@@ -7,12 +7,15 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.revxzxcx.remotewebapp.core.cache.DshCache
 import com.revxzxcx.remotewebapp.core.connection.DshConnection
+import com.revxzxcx.remotewebapp.core.events.SessionNotification
 import com.revxzxcx.remotewebapp.core.protocol.CarrierState
 import com.revxzxcx.remotewebapp.core.protocol.MuxStats
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
 import com.revxzxcx.remotewebapp.core.session.SessionActionRepository
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
+import com.revxzxcx.remotewebapp.core.session.SessionListParser
 import com.revxzxcx.remotewebapp.core.session.SessionListResult
+import com.revxzxcx.remotewebapp.core.session.SessionListUpdates
 import com.revxzxcx.remotewebapp.core.session.SessionRepository
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.workspace.Workspace
@@ -28,11 +31,13 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
 
 /**
  * 工作区页的状态。
@@ -182,9 +187,34 @@ class HomeViewModel(
     private var job: Job? = null
     private var sessionJob: Job? = null
 
+    /** 订阅 `$events` 里 `api-session/…` 的协程；与连接同生共死。 */
+    private var notificationsJob: Job? = null
+
+    /** 去抖后的「重拉全量」协程（见 [scheduleSessionsRefresh]）。 */
+    private var refreshJob: Job? = null
+
+    /**
+     * 去抖窗口内是否又来过 `activity`。
+     *
+     * 置位后由 [scheduleSessionsRefresh] 在本轮结束后补拉一次，避免「窗口内被折叠掉的消息
+     * 要等下一次无关事件才更新」（审查 P3）。
+     */
+    private var refreshDeferred = false
+
+    /**
+     * [loadSessions] 因「上一次还在飞」而被跳过时置位；那次拉取结束后补拉一次。
+     *
+     * 与 [refreshDeferred] 分开：那个管的是去抖窗口，这个管的是在飞窗口，两处的触发点不同。
+     */
+    private var sessionsRefreshPending = false
+
+    /** 复用它解析 `api-session/added` 推来的摘要（与 `session/list` 同形状）。 */
+    private val listParser = SessionListParser()
+
     init {
         warmStart()
         start()
+        observeSessionNotifications()
     }
 
     /** 手动重连（下拉刷新 / 点「重试」）。 */
@@ -315,6 +345,128 @@ class HomeViewModel(
         }
     }
 
+    /**
+     * 订阅 `$events` 里 `api-session/…` 的增量，落到会话列表上。
+     *
+     * ## 为什么必须有这条链路（R039 用户报的两个现象）
+     * 1. **桌面端新建的会话在手机上永远不出现**：列表原来只在订阅建立那一刻拉一次
+     *    `session/list`，之后再没有任何刷新触发点。用户在工作区里看到的是
+     *    「读不到 N」——因为 `workspace.sessionIds` 里已经有这个 id，
+     *    而摘要表里没有它（[SessionGrouping] 会把它记进 `missingIds`）。
+     * 2. **会话跑完了「进行中」小柱还在转**：`running` 只在全量重拉时更新。
+     *
+     * ## 为什么不是「定时全量重拉」
+     * `session/list` 实测 125 条 / **1.78 MB** / 2.6 s。轮询它是拿手机流量换一个
+     * 本来就有推送的信号。而 `api-session/added` 推来的 `summary` 与 `session/list`
+     * 的条目**同形状**（探针实测含 projections 全套），可以直接复用
+     * [SessionListParser.summaryOf] 解析——增量已经够用了。
+     *
+     * ## 四条事件各管一件事
+     * - `added`：新建 / agent 创建或销毁（带完整摘要，标题也在里面）→ 直接 upsert；
+     * - `status`：`(sessionId, running)` → 就地打补丁，这是「小柱」的唯一更新源；
+     * - `removed`：会话真的被销毁 → 移出；
+     * - `activity`：用户发了新消息（Host 只在 `user/message` 且 `source.kind == "user"`
+     *   时发它）→ 去抖后重拉一次全量。理由：`activity` 只给 `updatedAt`，而排序与
+     *   标题可能一起变，光靠它无法就地改；它出现的频率恰好是「人打了一句话」，
+     *   去抖后重拉的开销可以接受。
+     */
+    private fun observeSessionNotifications() {
+        notificationsJob = viewModelScope.launch {
+            connection.remoteEvents.sessionNotifications
+                .filterNotNull()
+                .collect { notification ->
+                    when (notification) {
+                        is SessionNotification.Added -> applyAddedSummary(notification.summary)
+                        is SessionNotification.Status ->
+                            applyRunning(notification.sessionId, notification.running)
+                        is SessionNotification.Removed -> applyRemoved(notification.sessionId)
+                        is SessionNotification.Activity -> scheduleSessionsRefresh()
+                    }
+                }
+        }
+    }
+
+    /** `api-session/added`：整条摘要插入或原位替换。 */
+    private fun applyAddedSummary(summary: JsonObject) {
+        // 解析失败绝不改状态：宁可少一条，也不要往列表里塞一条 sessionId 残缺的假会话。
+        val parsed = listParser.summaryOf(summary) ?: return
+        applySessions(SessionListUpdates.upsert(_state.value.sessions.items, parsed))
+        cacheIncrementally { it.upsertSession(ownerId, parsed) }
+    }
+
+    /** `api-session/status`：只翻运行态。 */
+    private fun applyRunning(sessionId: String, running: Boolean) {
+        val items = SessionListUpdates.patchRunning(_state.value.sessions.items, sessionId, running)
+        applySessions(items)
+        // 落盘只写这一条：`patchRunning` 在未知 id 上会原样返回，那时找不到条目就不写。
+        items.firstOrNull { it.sessionId == sessionId }
+            ?.let { patched -> cacheIncrementally { it.upsertSession(ownerId, patched) } }
+    }
+
+    /** `api-session/removed`：会话被销毁。归档**不走这里**（见 [SessionListUpdates.remove]）。 */
+    private fun applyRemoved(sessionId: String) {
+        applySessions(SessionListUpdates.remove(_state.value.sessions.items, sessionId))
+        cacheIncrementally { it.deleteSession(ownerId, sessionId) }
+    }
+
+    /**
+     * 把一条增量落进缓存（逐行 upsert / 单条删除）。
+     *
+     * **绝不能复用 [DshCache.writeSessions]**：那是权威全量语义（整表替换 + 清孤儿），
+     * 拿它写增量会在冷启动早期把「还没拉回来的会话」的消息与草稿当成孤儿删光（审查 P1）。
+     */
+    private fun cacheIncrementally(block: suspend (DshCache) -> Unit) {
+        val store = cache ?: return
+        if (ownerId.isBlank()) return
+        viewModelScope.launch { block(store) }
+    }
+
+    /**
+     * 把一份新的会话摘要列表落进状态，并**同一次**重算三份派生列表。
+     *
+     * 必须走 [withDerived]：`groups` / `recent` / `pinned` 都是构造属性，不参与自动派生。
+     * 只改 `sessions` 而不重算它们，就会出现「摘要更新了、分组还是旧的」——
+     * 表现正是用户报的「会话跑完了还在转」（`WorkspaceGroup.hasRunning` 是 `groups`
+     * 里的字段，抽屉/工作区标题读的都是它）。
+     */
+    private fun applySessions(items: List<SessionSummary>) {
+        val current = _state.value
+        val result = SessionListResult(items = items)
+        if (result == current.sessions) return
+        _state.value = current
+            .copy(sessions = result, sessionsError = null)
+            .withDerived(current.snapshot, result)
+        // 这里**不写缓存**。缓存写入分两条互不相同的路径：
+        // - 全量：只有 [loadSessions] 拿到权威 `session/list` 时才 `writeSessions`；
+        // - 增量：各调用点走 [cacheIncrementally]。
+        // 早先在这里统一调 `writeSessions`，等于把增量当权威全量整表替换（审查 P1）。
+    }
+
+    /**
+     * 去抖地重拉一次全量会话列表。
+     *
+     * 去抖而不是每次都拉：一轮工具调用会连着产生多条 `activity`，每条都拉 1.78 MB
+     * 是灾难。窗口内只保留最后一次。
+     */
+    private fun scheduleSessionsRefresh() {
+        if (refreshJob?.isActive == true) {
+            // 窗口内又来了一条 `activity`：把「结束之后还要再拉一次」记下来。
+            // 只节流不补拉的话，窗口关掉之后发生的消息要等下一次无关事件才会更新
+            // （审查 P3：一次 `session/list` 要 2.6s，用户在这期间发的消息会永远落后）。
+            refreshDeferred = true
+            return
+        }
+        refreshJob = viewModelScope.launch {
+            delay(SESSIONS_REFRESH_DEBOUNCE_MS)
+            loadSessions()
+            if (refreshDeferred) {
+                refreshDeferred = false
+                // 递归一次即可：`loadSessions` 自己会再判在飞，不会叠加。
+                scheduleSessionsRefresh()
+            }
+        }
+    }
+
     private fun start() {
         job = viewModelScope.launch {
             // 每次订阅（含手动 retry 后重启）只补一次会话摘要。用局部变量而不是读
@@ -411,7 +563,12 @@ class HomeViewModel(
      * 失败**不清空**已加载的会话，只把错误文案挂到 `sessionsError`；工作区列表继续可用。
      */
     private fun loadSessions() {
-        if (sessionJob?.isActive == true) return
+        if (sessionJob?.isActive == true) {
+            // 上一次还在飞（2.6s）：这次请求被丢掉，但必须留个记号让它结束后补拉，
+            // 否则这段时间内的变化没有任何后续事件会再触发一次（审查 P3）。
+            sessionsRefreshPending = true
+            return
+        }
         sessionJob = viewModelScope.launch {
             _state.value = _state.value.copy(sessionsLoading = true, sessionsError = null)
             try {
@@ -446,6 +603,13 @@ class HomeViewModel(
                 if (_state.value.sessionsLoading) {
                     _state.value = _state.value.copy(sessionsLoading = false)
                 }
+                // 在飞期间被跳过的那次刷新，在这里补上（审查 P3）。放在 finally 而不是
+                // 成功分支：失败时更需要重试一次，而 `retryWhen` 只重连工作区流、
+                // 不会自动重拉会话列表。
+                if (sessionsRefreshPending) {
+                    sessionsRefreshPending = false
+                    loadSessions()
+                }
             }
         }
     }
@@ -460,11 +624,23 @@ class HomeViewModel(
     override fun onCleared() {
         job?.cancel()
         sessionJob?.cancel()
+        notificationsJob?.cancel()
+        refreshJob?.cancel()
         super.onCleared()
     }
 
     companion object {
         private const val MAX_BACKOFF_MS = 30_000L
+
+        /**
+         * `api-session/activity` 之后等多久才重拉全量。
+         *
+         * 1.5 s 的取法：`activity` 在用户按下发送的那一刻就来，而这一轮的标题要到
+         * 模型跑完才落库；窗口太短等于没等到，太长会让列表看起来发钝。取 1.5 s 是
+         * 「用户已经打完字、界面该有反应」的下限，真要拿到新标题还得靠轮次结束时
+         * Host 再发的 `added`（`agent/disposed` 会带全量摘要）。
+         */
+        private const val SESSIONS_REFRESH_DEBOUNCE_MS = 1_500L
 
         fun factory(
             connection: DshConnection,

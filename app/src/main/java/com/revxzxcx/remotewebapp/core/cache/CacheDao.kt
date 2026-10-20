@@ -50,11 +50,21 @@ interface CacheDao {
     @Query("DELETE FROM sessions WHERE ownerId = :ownerId")
     suspend fun deleteSessions(ownerId: String)
 
-    /** `session/list` 是权威全量（实测无游标、无分页），所以整体替换。 */
+    @Query("DELETE FROM sessions WHERE ownerId = :ownerId AND sessionId = :sessionId")
+    suspend fun deleteSession(ownerId: String, sessionId: String)
+
+    /**
+     * `session/list` 是权威全量（实测无游标、无分页），所以整体替换。
+     *
+     * 同时清掉「会话已经不存在」的草稿：与 `messages` 一样，`drafts` 与 `sessions` 之间
+     * 没有外键（主键组合不同），不在这里清就会永久留库。放在同一个 `@Transaction` 里是因为
+     * 「会话列表刚被权威替换」正是唯一正确的清理时机——单独暴露只会多一条漏调的路径。
+     */
     @Transaction
     suspend fun replaceSessions(ownerId: String, rows: List<CachedSession>) {
         deleteSessions(ownerId)
         if (rows.isNotEmpty()) putSessions(rows)
+        deleteOrphanDrafts(ownerId)
     }
 
     // ---------------------------------------------------------------- messages
@@ -103,6 +113,27 @@ interface CacheDao {
     )
     suspend fun deleteOrphanMessages(ownerId: String)
 
+    // ---------------------------------------------------------------- drafts
+
+    @Query("SELECT text FROM drafts WHERE ownerId = :ownerId AND sessionId = :sessionId")
+    suspend fun draft(ownerId: String, sessionId: String): String?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun putDraft(row: CachedDraft)
+
+    @Query("DELETE FROM drafts WHERE ownerId = :ownerId AND sessionId = :sessionId")
+    suspend fun deleteDraft(ownerId: String, sessionId: String)
+
+    /** 同 [deleteOrphanMessages]：会话没了，草稿也该没。 */
+    @Query(
+        "DELETE FROM drafts WHERE ownerId = :ownerId AND sessionId NOT IN " +
+            "(SELECT sessionId FROM sessions WHERE ownerId = :ownerId)",
+    )
+    suspend fun deleteOrphanDrafts(ownerId: String)
+
+    @Query("DELETE FROM drafts WHERE ownerId != :ownerId")
+    suspend fun deleteOtherDrafts(ownerId: String)
+
     // ---------------------------------------------------------------- meta
 
     @Query("SELECT value FROM meta WHERE ownerId = :ownerId AND key = :key")
@@ -148,6 +179,7 @@ interface CacheDao {
         deleteOtherWorkspaces(ownerId)
         deleteOtherSessions(ownerId)
         deleteOtherMessages(ownerId)
+        deleteOtherDrafts(ownerId)
         deleteOtherMeta(ownerId)
     }
 }

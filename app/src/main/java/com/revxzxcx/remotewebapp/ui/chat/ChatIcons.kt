@@ -160,3 +160,61 @@ internal val SteerIcon: ImageVector = ImageVector.Builder(
         close()
     }
 }.build()
+
+/**
+ * 折叠对话栏（用户 m17042 第 5 条：「标题栏的 × 不符合操作逻辑，要换成折叠栏按钮」）。
+ *
+ * 字形：一条横栏 + 一个向下的箭头——「把这一栏收下去」。与 `chevron_down` 的区别是
+ * 多那条横栏：单独一个箭头在顶栏里会被读成「下拉菜单」，加一条栏才表达「收起整个对话区」。
+ */
+internal val PanelCollapseIcon: ImageVector = ImageVector.Builder(
+    name = "PanelCollapse",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        // 横栏
+        moveTo(4f, 5f)
+        horizontalLineTo(20f)
+        verticalLineTo(7.3f)
+        horizontalLineTo(4f)
+        close()
+        // 向下的折角
+        moveTo(6.4f, 10.6f)
+        lineTo(8f, 9f)
+        lineTo(12f, 13f)
+        lineTo(16f, 9f)
+        lineTo(17.6f, 10.6f)
+        lineTo(12f, 16.2f)
+        close()
+    }
+}.build()
+
+/**
+ * 停止生成（Material `stop`：圆角方块）。
+ *
+ * 为什么是方块而不是 × 或 ■ 字符：方块在圆形按钮里是「停止」的通用字形，且它是实心块，
+ * 40dp 按钮上任何字号下都清晰；用文字字符会随字体度量漂移（见 R037 的教训）。
+ */
+internal val StopIcon: ImageVector = ImageVector.Builder(
+    name = "StopSquare",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(8f, 7f)
+        horizontalLineTo(16f)
+        curveTo(16.55f, 7f, 17f, 7.45f, 17f, 8f)
+        verticalLineTo(16f)
+        curveTo(17f, 16.55f, 16.55f, 17f, 16f, 17f)
+        horizontalLineTo(8f)
+        curveTo(7.45f, 17f, 7f, 16.55f, 7f, 16f)
+        verticalLineTo(8f)
+        curveTo(7f, 7.45f, 7.45f, 7f, 8f, 7f)
+        close()
+    }
+}.build()

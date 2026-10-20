@@ -20,8 +20,14 @@ import androidx.room.RoomDatabase
         CachedSession::class,
         CachedMessage::class,
         CachedMeta::class,
+        CachedDraft::class,
     ],
-    version = 1,
+    // 改实体**必须**同时改这个数字：Room 会把 schema 哈希写进 room_master_table，
+    // 哈希对不上就抛 `IllegalStateException: Room cannot verify the data integrity`，
+    // 而不是「自动帮你重建成新 schema」。R039 加 `drafts` 表时漏了这一步，
+    // 结果 `DshCache.guard` 把打开失败的异常吃成 null，草稿写入静默失效——单测全绿、
+    // 真机一次都没落库（见决策 D127）。
+    version = 2,
     exportSchema = false,
 )
 abstract class DshDatabase : RoomDatabase() {

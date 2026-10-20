@@ -60,11 +60,22 @@ class DshCacheTest {
         }
 
         override suspend fun putSessions(rows: List<CachedSession>) {
-            check(); sessions += rows
+            check()
+            // 必须与真实 DAO 的 `@Insert(onConflict = REPLACE)` 同语义：同主键覆盖。
+            // 早先只写 `sessions += rows`，会让「upsert 覆盖旧行」这类用例变成
+            // 「假 DAO 允许重复」，测试自己骗自己（本轮变异验证抓到的）。
+            rows.forEach { row ->
+                sessions.removeAll { it.ownerId == row.ownerId && it.sessionId == row.sessionId }
+                sessions += row
+            }
         }
 
         override suspend fun deleteSessions(ownerId: String) {
             check(); sessions.removeAll { it.ownerId == ownerId }
+        }
+
+        override suspend fun deleteSession(ownerId: String, sessionId: String) {
+            check(); sessions.removeAll { it.ownerId == ownerId && it.sessionId == sessionId }
         }
 
         override suspend fun minSeq(ownerId: String, sessionId: String): Long? {
@@ -104,6 +115,34 @@ class DshCacheTest {
             check()
             val alive = sessions.map { it.sessionId }.toSet()
             messages.removeAll { it.ownerId == ownerId && it.sessionId !in alive }
+        }
+
+        // ------------------------------------------------------------ drafts
+
+        val drafts = mutableMapOf<String, CachedDraft>()
+
+        override suspend fun draft(ownerId: String, sessionId: String): String? {
+            check(); return drafts["$ownerId/$sessionId"]?.text
+        }
+
+        override suspend fun putDraft(row: CachedDraft) {
+            check(); drafts["${row.ownerId}/${row.sessionId}"] = row
+        }
+
+        override suspend fun deleteDraft(ownerId: String, sessionId: String) {
+            check(); drafts.remove("$ownerId/$sessionId")
+        }
+
+        override suspend fun deleteOrphanDrafts(ownerId: String) {
+            check()
+            val alive = sessions.filter { it.ownerId == ownerId }.map { it.sessionId }.toSet()
+            drafts.keys.removeAll { key ->
+                key.startsWith("$ownerId/") && key.removePrefix("$ownerId/") !in alive
+            }
+        }
+
+        override suspend fun deleteOtherDrafts(ownerId: String) {
+            check(); drafts.keys.removeAll { !it.startsWith("$ownerId/") }
         }
 
         override suspend fun meta(ownerId: String, key: String): String? {
@@ -502,4 +541,205 @@ class DshCacheTest {
         assertNotNull("CancellationException 必须上抛而不是折成 null", thrown)
         assertTrue("取消不该被报告成缓存故障", !reported)
     }
+
+    // ------------------------------------------------------------------ drafts
+
+    @Test
+    fun `草稿写进去能原样读回来`() = runBlocking {
+        val cache = DshCache.create(FakeDao())
+
+        cache.writeDraft("own", "s-1", "帮我改一下首页的标题栏")
+
+        assertEquals("帮我改一下首页的标题栏", cache.readDraft("own", "s-1"))
+    }
+
+    @Test
+    fun `没有草稿时读到 null`() = runBlocking {
+        assertNull(DshCache.create(FakeDao()).readDraft("own", "s-1"))
+    }
+
+    @Test
+    fun `两张会话的草稿互不干扰`() = runBlocking {
+        // 用户 m17042 第 2 条的原话是「退出会话草稿就丢」——按会话分开存是这个功能的
+        // 全部意义：如果共用一行，切一个有内容的会话就会把另一个的草稿顶掉。
+        val cache = DshCache.create(FakeDao())
+
+        cache.writeDraft("own", "s-1", "第一段")
+        cache.writeDraft("own", "s-2", "第二段")
+
+        assertEquals("第一段", cache.readDraft("own", "s-1"))
+        assertEquals("第二段", cache.readDraft("own", "s-2"))
+    }
+
+    @Test
+    fun `不同设备分区的草稿互相看不见`() = runBlocking {
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+
+        cache.writeDraft("own-a", "s-1", "旧设备的草稿")
+
+        assertNull(cache.readDraft("own-b", "s-1"))
+    }
+
+    @Test
+    fun `清空输入框会把草稿行删掉而不是留一个空串`() = runBlocking {
+        // 留空串的话，`readDraft` 还得再判一次空白，且草稿表会随「打过字又删掉」的会话增长。
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        cache.writeDraft("own", "s-1", "写了一半")
+
+        cache.writeDraft("own", "s-1", "   ")
+
+        assertNull(cache.readDraft("own", "s-1"))
+        assertTrue("空白草稿不该在库里留行", dao.drafts.isEmpty())
+    }
+
+    @Test
+    fun `超长草稿被截断到上限`() = runBlocking {
+        // 粘贴一整篇文档再退出，不该把任意长度的明文永久写进 SQLite。
+        val cache = DshCache.create(FakeDao())
+        val huge = "字".repeat(DshCache.DRAFT_MAX_CHARS + 500)
+
+        cache.writeDraft("own", "s-1", huge)
+
+        val back = cache.readDraft("own", "s-1")
+        assertEquals(DshCache.DRAFT_MAX_CHARS, back?.length)
+    }
+
+    @Test
+    fun `恰好等于上限的草稿不被截断`() = runBlocking {
+        // 边界：截断发生在 `take(limit)`，等于上限时必须是完整保留。
+        val cache = DshCache.create(FakeDao())
+        val exact = "a".repeat(DshCache.DRAFT_MAX_CHARS)
+
+        cache.writeDraft("own", "s-1", exact)
+
+        assertEquals(DshCache.DRAFT_MAX_CHARS, cache.readDraft("own", "s-1")?.length)
+    }
+
+    @Test
+    fun `会话列表替换后孤儿草稿被清掉`() = runBlocking {
+        // 会话被删掉后草稿不能永久留库——与 `messages` 的孤儿清理同一条路径。
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        cache.writeSessions("own", listOf(SessionSummary(sessionId = "s-1", updatedAt = 1L)))
+        cache.writeDraft("own", "s-1", "会话还在时的草稿")
+        cache.writeDraft("own", "s-2", "会话已经不在了")
+
+        // `s-2` 从未出现在会话表里；一次权威替换之后它的草稿必须消失。
+        cache.writeSessions("own", listOf(SessionSummary(sessionId = "s-1", updatedAt = 2L)))
+
+        assertNull("孤儿草稿必须被清掉", cache.readDraft("own", "s-2"))
+        assertEquals("活着的会话草稿必须保留", "会话还在时的草稿", cache.readDraft("own", "s-1"))
+    }
+
+    @Test
+    fun `换设备时其它分区的草稿一起清掉`() = runBlocking {
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        cache.writeDraft("own-old", "s-1", "上一台桌面端的草稿")
+        cache.writeDraft("own-new", "s-1", "这一台的草稿")
+
+        cache.pruneOtherOwners("own-new")
+
+        assertTrue("别的分区的草稿必须被删", dao.drafts.keys.none { it.startsWith("own-old/") })
+        assertEquals("这一台的草稿必须留着", "这一台的草稿", cache.readDraft("own-new", "s-1"))
+    }
+
+    @Test
+    fun `草稿读不出来时当作没有草稿`() = runBlocking {
+        // 磁盘故障不该让聊天页崩：草稿是优化，不是正确性依赖。
+        val dao = FakeDao().apply { failWith = RuntimeException("磁盘满了") }
+        assertNull(DshCache.create(dao).readDraft("own", "s-1"))
+    }
+
+    @Test
+    fun `写草稿失败不抛异常`() = runBlocking {
+        val dao = FakeDao().apply { failWith = RuntimeException("磁盘满了") }
+        // 只要求不抛：`guard` 的契约就是缓存故障静默。
+        // 末尾显式 `assertNull` 而不是裸调用：`guard` 的返回类型是 `Unit?`，
+        // 让 lambda 以它结尾会让 `runBlocking` 推断出 `Unit?`，JUnit4 直接判
+        // 「should be void」并把整个类标成 initializationError（一条都跑不起来）。
+        assertNull(DshCache.create(dao).writeDraft("own", "s-1", "内容"))
+    }
+
+    @Test
+    fun `空 sessionId 不写草稿`() = runBlocking {
+        // 理论入口只会有真实 sessionId，但空串会把所有「无主草稿」写进同一行，
+        // 之后任何一个拿不到 sessionId 的路径都会读到别人的内容。
+        val dao = FakeDao()
+        DshCache.create(dao).writeDraft("own", "", "内容")
+
+        assertTrue(dao.drafts.isEmpty())
+    }
+
+    // ------------------------------------------------ 增量写入（审查 P1 的回归）
+
+    @Test
+    fun `upsertSession 只写这一条，不删其它会话的草稿与缓存`() = runBlocking {
+        // 这是审查 P1-2 的直接回归：早先增量走的是 `writeSessions`（整表替换 + 清孤儿），
+        // 冷启动早期会把「还没拉回来的会话」的消息与草稿当成孤儿删光。
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        cache.writeSessions("own", listOf(session("a"), session("b")))
+        cache.writeDraft("own", "a", "a 的草稿")
+        cache.writeDraft("own", "b", "b 的草稿")
+
+        cache.upsertSession("own", session("c"))
+
+        assertEquals(setOf("a", "b", "c"), dao.sessions.map { it.sessionId }.toSet())
+        assertEquals("a 的草稿", cache.readDraft("own", "a"))
+        assertEquals("b 的草稿", cache.readDraft("own", "b"))
+    }
+
+    @Test
+    fun `upsertSession 会覆盖同 id 的旧行`() = runBlocking {
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        cache.writeSessions("own", listOf(session("a", title = "旧标题")))
+        cache.upsertSession("own", session("a", title = "新标题"))
+
+        assertEquals(1, dao.sessions.count { it.sessionId == "a" })
+        assertEquals("新标题", dao.sessions.first { it.sessionId == "a" }.title)
+    }
+
+    @Test
+    fun `upsertSession 不写会话列表的时间戳`() = runBlocking {
+        // `SESSIONS_CACHED_AT` 是 `readSessions` 判断「有没有一份完整快照」的依据。
+        // 增量把它写掉，半份列表就会被当成完整快照喂给首页。
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        cache.upsertSession("own", session("a"))
+
+        assertNull(cache.readSessions("own"))
+    }
+
+    @Test
+    fun `deleteSession 只摘这一条并清掉它的草稿`() = runBlocking {
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        cache.writeSessions("own", listOf(session("a"), session("b")))
+        cache.writeDraft("own", "a", "a 的草稿")
+        cache.writeDraft("own", "b", "b 的草稿")
+
+        cache.deleteSession("own", "a")
+
+        assertEquals(listOf("b"), dao.sessions.map { it.sessionId })
+        assertNull(cache.readDraft("own", "a"))
+        assertEquals("b 的草稿", cache.readDraft("own", "b"))
+    }
+
+    private fun session(id: String, title: String = "会话 $id") = SessionSummary(
+        sessionId = id,
+        title = title,
+        updatedAt = 1_000L,
+        agentAvailable = true,
+        running = false,
+        blank = false,
+        parentSessionId = null,
+        origin = null,
+        cwd = null,
+        lastPromptAt = null,
+        lastModel = null,
+    )
 }
