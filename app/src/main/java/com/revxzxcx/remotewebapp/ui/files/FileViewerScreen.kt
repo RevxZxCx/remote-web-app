@@ -156,6 +156,23 @@ fun FileViewerScreen(
                 ) { Text(message) }
             }
 
+            // HTML 的「渲染 / 源码」两个页签（R040）。与 diff 页签不会同时出现：
+            // diff 来自改动卡片、HTML 渲染来自当前全文，两条入口互斥。
+            if (state.kind == FileKind.HTML && !state.canShowDiff) {
+                TabRow(selectedTabIndex = if (state.tab == FileTab.RENDER) 0 else 1) {
+                    Tab(
+                        selected = state.tab == FileTab.RENDER,
+                        onClick = { viewModel.selectTab(FileTab.RENDER) },
+                        text = { Text("渲染") },
+                    )
+                    Tab(
+                        selected = state.tab == FileTab.CONTENT,
+                        onClick = { viewModel.selectTab(FileTab.CONTENT) },
+                        text = { Text("源码") },
+                    )
+                }
+            }
+
             if (state.canShowDiff) {
                 TabRow(selectedTabIndex = state.tab.ordinal) {
                     Tab(
@@ -173,6 +190,21 @@ fun FileViewerScreen(
 
             if (state.tab == FileTab.DIFF) {
                 DiffPane(state, onRetry = viewModel::retry)
+                return@Column
+            }
+
+            // HTML 渲染页：WebView 自己管加载态与错误态（[HtmlPane] 内部分支），
+            // 不跟下面的「分页文本」逻辑混在一起——那是源码页的事。
+            if (state.tab == FileTab.RENDER) {
+                HtmlPane(
+                    html = state.html,
+                    path = state.target.path,
+                    loading = state.htmlLoading,
+                    error = state.htmlError,
+                    notice = state.htmlNotice,
+                    readAsset = viewModel::readHtmlAsset,
+                    onRetry = viewModel::retry,
+                )
                 return@Column
             }
 

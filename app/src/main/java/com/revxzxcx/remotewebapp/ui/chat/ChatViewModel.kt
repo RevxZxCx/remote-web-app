@@ -19,7 +19,16 @@ import com.revxzxcx.remotewebapp.core.session.ChatFrame
 import com.revxzxcx.remotewebapp.core.session.ChatItem
 import com.revxzxcx.remotewebapp.core.session.ChatReducer
 import com.revxzxcx.remotewebapp.core.session.ChatRepository
+import com.revxzxcx.remotewebapp.core.files.WorkspaceFileListing
+import com.revxzxcx.remotewebapp.core.files.WorkspaceFileRepository
 import com.revxzxcx.remotewebapp.core.session.ChatUiState
+import com.revxzxcx.remotewebapp.core.session.CONTEXT_PROJECTION_KEYS
+import com.revxzxcx.remotewebapp.core.session.ContextInsights
+import com.revxzxcx.remotewebapp.core.session.ContextInsightsParser
+import com.revxzxcx.remotewebapp.core.session.contextInsightsOf
+import com.revxzxcx.remotewebapp.core.session.mergeContextValue
+import com.revxzxcx.remotewebapp.core.session.rebuildContextValues
+import com.revxzxcx.remotewebapp.core.session.replayPendingContext
 import com.revxzxcx.remotewebapp.core.session.FileUploadRepository
 import com.revxzxcx.remotewebapp.core.session.ImageLimits
 import com.revxzxcx.remotewebapp.core.session.ImageMeasure
@@ -88,6 +97,13 @@ class ChatViewModel(
 
     /** 提问与权限投影的读取（`session/projections` + `session/control` + `userQuestions/answer`）。 */
     private val projections = SessionProjectionRepository(connection)
+
+    /**
+     * 侧栏「文件」页签的数据源。
+     *
+     * 只读：服务端 `workspaceFiles` 族没有写接口（决策 D15），App 里也不提供编辑。
+     */
+    private val fileRepository = WorkspaceFileRepository(connection)
 
     /**
      * 附件读取（需求 FR-5 的「图片」）。
@@ -229,6 +245,80 @@ class ChatViewModel(
      */
     private val _permission = MutableStateFlow<PermissionSnapshot?>(null)
     val permission: StateFlow<PermissionSnapshot?> = _permission.asStateFlow()
+
+    /**
+     * 「对话详情」侧边栏的上下文遥测。
+     *
+     * ## 三态而不是一个可空值
+     * 侧边栏刚打开时不能显示一排 0（那是「会话为空」的观感），必须能区分：
+     *  - [contextLoading] 为真 → 转圈；
+     *  - [contextError] 非空 → 说清读失败，给重试；
+     *  - [context] 为 null 且不 loading 不 error → 服务端确实没给这些投影（老版本桌面端）。
+     *
+     * ## 数据从哪来
+     * **打开抽屉时读一次** `session/projections`（一次 ≈88 KB，descriptor 不支持只取
+     * 指定键，所以不能轮询——3s 一次就是 30 KB/s），之后靠 `session/control` 那条
+     * **已经在跑**的投影流打补丁，零额外流量。关掉抽屉不取消订阅：那条流本来是提问/
+     * 权限在用，多记六个键不增开销；再打开时直接用累积值立即出图，不用等第二次往返。
+     */
+    private val _context = MutableStateFlow<ContextInsights?>(null)
+    val context: StateFlow<ContextInsights?> = _context.asStateFlow()
+
+    private val _contextLoading = MutableStateFlow(false)
+    val contextLoading: StateFlow<Boolean> = _contextLoading.asStateFlow()
+
+    private val _contextError = MutableStateFlow<String?>(null)
+    val contextError: StateFlow<String?> = _contextError.asStateFlow()
+
+    /**
+     * 侧边栏的投影累加器。
+     *
+     * `session/control` 的增量帧一次只给**一个键**，而 [ContextInsightsParser] 要同时看到
+     * 六个键才能定档位（七段 / 三段 / 无）。所以这里维护「已知的最新值集合」，
+     * 每来一帧合并一次再整块解析。
+     *
+     * 只放六个键，绝不把 `contextHeaders`（70 KB）之类塞进来——那样一次会话跑下来
+     * 这个对象会涨到几 MB 并常驻。
+     */
+    private val contextValues = java.util.concurrent.atomic.AtomicReference(
+        kotlinx.serialization.json.JsonObject(emptyMap()),
+    )
+
+    /** 侧边栏读上下文的重入守卫（与 [projectionJob] 分开：那个是提问的）。 */
+    private var contextJob: Job? = null
+
+    /**
+     * 刷新在飞期间收到的增量帧。
+     *
+     * 早先这些帧被直接丢掉（`if (contextJob?.isActive == true) return`）：全量读在
+     * 快照生成后、回包前到达的那一帧就永久消失，侧栏要等**下一次**变更才追上。
+     * 现在先攒着，全量读落地时用 [replayPendingContext] 盖上去（R040 审查 P2）。
+     *
+     * 只在主线程读写（`viewModelScope` 默认 Main.immediate），不需要并发容器。
+     */
+    private var pendingContext = kotlinx.serialization.json.JsonObject(emptyMap())
+
+    // ── 侧边栏「文件」页签 ────────────────────────────────────────────────
+    //
+    // 放在 ChatViewModel 里而不是新建一个 VM：文件浏览器要的两样东西（会话 id 与
+    // `sessionId` 推出来的工作区根）都已经在这里，另起一个 VM 就得把 connection 穿过
+    // ChatScreen 再传一遍。文件列表与上下文遥测同属「这个会话的侧栏」，生命周期一致。
+
+    private val _files = MutableStateFlow<WorkspaceFileListing?>(null)
+    private val _filesPath = MutableStateFlow("")
+    private val _filesLoading = MutableStateFlow(false)
+    private val _filesError = MutableStateFlow<String?>(null)
+
+    /** 当前目录的文件列表；null 表示还没列过。 */
+    val files = _files
+    /** 当前所在目录（相对工作区根，根是空串）。 */
+    val filesPath = _filesPath
+    /** 侧栏是否正在列目录。 */
+    val filesLoading = _filesLoading
+    /** 列目录失败的原因（null 表示没有错误）。 */
+    val filesError = _filesError
+
+    private var filesJob: Job? = null
 
     private var pageJob: Job? = null
     private var sendJob: Job? = null
@@ -780,6 +870,15 @@ class ChatViewModel(
                                         _permission.value?.preset,
                                     )
                                 }
+
+                                // ── R040：上下文遥测的六个键走同一条流，零额外流量。
+                                // 服务端在投影变化时推增量帧（`SessionControlController` 构造
+                                // 时订阅了 `sessionProjections.onChanged`），所以这里不必轮询
+                                // 那个 88 KB 的全量读。
+                                in CONTEXT_PROJECTION_KEYS -> applyContextProjection(
+                                    frame.key,
+                                    frame.value,
+                                )
                             }
                         }
 
@@ -788,6 +887,17 @@ class ChatViewModel(
                             val values = (frame.projections[sessionId] as? JsonObject)
                                 ?.get("values") as? JsonObject
                             if (values != null) {
+                                // baseline 里也带着上下文六个键（如果桌面端当前选中的就是这个
+                                // 会话），直接吸收能省掉一次 88 KB 的 unary 读。
+                                var merged = contextValues.get()
+                                CONTEXT_PROJECTION_KEYS.forEach { key ->
+                                    val incoming = values[key]
+                                    if (incoming != null) merged = mergeContextValue(merged, key, incoming)
+                                }
+                                if (merged !== contextValues.get()) {
+                                    contextValues.set(merged)
+                                    _context.value = contextInsightsOf(merged)
+                                }
                                 userQuestionsOf(values)?.let { applyQuestions(it) }
                                 permissionOf(values)?.let { found ->
                                     _permission.value = found
@@ -853,6 +963,106 @@ class ChatViewModel(
                 _state.value = ChatReducer.applyPermissionProjection(_state.value, found.preset)
             }
         }
+    }
+
+    /**
+     * 读一次上下文投影，写进 [_context]。
+     *
+     * 由侧边栏打开时调用（[refreshContext]）。失败**不清空**已有数据：一次抖动就让整个
+     * 面板变成错误页，比留着上一次的数字更糟——数字旧一点总比没有强，何况错误条会说
+     * 明它可能过期。
+     *
+     * 重入守卫用 [contextJob] 而不是复用 [projectionJob]：那个正在读提问/权限，两者
+     * 撞在一起会让侧边栏一直转圈（提问刷新是生成中每 2.5s 一次的）。
+     */
+    fun refreshContext() {
+        if (contextJob?.isActive == true) return
+        _contextLoading.value = true
+        _contextError.value = null
+        contextJob = viewModelScope.launch {
+            try {
+                val values = projections.readValues(sessionId)
+                if (values == null) {
+                    // 服务端整体回 null：会话不存在（被删 / 换了设备）。这不是错误，
+                    // 是没有数据——保留上次的数字，但把错误条清掉。
+                    _context.value = null
+                    return@launch
+                }
+                // 全量读是**权威快照**，必须从空开始重建，不能并进旧累加器：
+                // 插件在运行期被卸载 / 某个投影被卸载时，服务端只是**不再给出**那个键，
+                // 并不会发一次 null。沿用旧值会让档位永远停在 DETAILED，侧栏一直显示
+                // 早已不存在的数据（审查 P1）。增量帧那条路才需要合并。
+                val rebuilt = replayPendingContext(
+                    rebuildContextValues(values),
+                    pendingContext.also { pendingContext = kotlinx.serialization.json.JsonObject(emptyMap()) },
+                )
+                contextValues.set(rebuilt)
+                _context.value = contextInsightsOf(rebuilt)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Exception) {
+                _contextError.value = describe(cause)
+                // 读失败时攒下的帧没有快照可盖，留着会让下一次成功读取用上更旧的值。
+                pendingContext = kotlinx.serialization.json.JsonObject(emptyMap())
+            } finally {
+                _contextLoading.value = false
+            }
+        }
+    }
+
+    /**
+     * 把一条 `session/control` 投影增量并进侧边栏的数据。
+     *
+     * 六个键之外的帧在这里被 [mergeContextValue] 直接忽略，所以调用方不必自己过滤。
+     */
+    private fun applyContextProjection(key: String, value: kotlinx.serialization.json.JsonElement?) {
+        if (key !in CONTEXT_PROJECTION_KEYS) return
+        if (contextJob?.isActive == true) {
+            // 攒起来，别丢：全量读回包后 [replayPendingContext] 会把它们盖上去。
+            pendingContext = mergeContextValue(pendingContext, key, value)
+            return
+        }
+        val merged = mergeContextValue(contextValues.get(), key, value)
+        if (merged === contextValues.get()) return
+        contextValues.set(merged)
+        _context.value = contextInsightsOf(merged)
+    }
+
+    /**
+     * 列一个目录，供侧栏「文件」页签显示。
+     *
+     * 根目录传**空串**而不是 `.`：`workspaceFiles/list` 服务端对空串报
+     * `path is required`，必须给 `.` 才表示根。这个转换放在这里做一次，界面层
+     * 只管「上级目录是哪个字符串」。
+     *
+     * 路径一律相对会话 cwd（服务端拿 `workspaceFileScopeId` 推导出的基准就是它），
+     * 界面上显示的是 `.` 的相对路径，不出现 Windows 盘符。
+     */
+    fun openFiles(path: String) {
+        filesJob?.cancel()
+        _filesPath.value = path
+        _filesLoading.value = true
+        _filesError.value = null
+        filesJob = viewModelScope.launch {
+            try {
+                val listing = fileRepository.list(sessionId, path.ifEmpty { "." })
+                _files.value = listing
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Exception) {
+                _filesError.value = describe(cause)
+            } finally {
+                _filesLoading.value = false
+            }
+        }
+    }
+
+    /** 从当前目录往上退一级；已经在根时什么都不做（避免把 `.` 再拼成 `..`）。 */
+    fun filesUp() {
+        val current = _filesPath.value
+        if (current.isEmpty()) return
+        val parent = current.substringBeforeLast('/', "")
+        openFiles(parent)
     }
 
     /**
@@ -1577,6 +1787,8 @@ class ChatViewModel(
         attachJob?.cancel()
         queueJob?.cancel()
         projectionJob?.cancel()
+        contextJob?.cancel()
+        filesJob?.cancel()
         questionPollJob?.cancel()
         controlJob?.cancel()
         answerJob?.cancel()

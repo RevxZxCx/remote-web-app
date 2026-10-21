@@ -19,14 +19,25 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** 文件查看页的两个标签页。 */
 enum class FileTab {
     /** 本轮 diff（只有从改动卡片进来才有）。 */
     DIFF,
 
-    /** 当前全文。 */
+    /** 当前全文（HTML 文件时是源码）。 */
     CONTENT,
+
+    /**
+     * HTML 渲染结果（R040）。
+     *
+     * 只有 [FileKind.HTML] 用得上：默认进这一页，因为它比源码有用得多；源码退居第二个
+     * 页签。不叫 `PREVIEW` 是因为 Markdown 也有预览、而那个是复用 [CONTENT] 渲染的，
+     * 名字分开才不至于以后混起来。
+     */
+    RENDER,
 }
 
 /**
@@ -68,6 +79,19 @@ data class FileViewerState(
     val bytes: Long? = null,
     /** 图片 / PDF 的原始字节。 */
     val media: ByteArray? = null,
+    /**
+     * HTML 文件拼好的整段源码（[FileTab.RENDER] 用）。
+     *
+     * 与 [lines] 分开存：`lines` 是分页追加的阅读流，`html` 必须是一次性完整字符串
+     * —— WebView 拿到半截 HTML 只会渲染出错位的结果，而且无法「续读」。
+     */
+    val html: String? = null,
+    /** HTML 渲染内容的加载状态。 */
+    val htmlLoading: Boolean = false,
+    /** HTML 加载失败的说明；与 [error] 分开，源码页仍可独立工作。 */
+    val htmlError: String? = null,
+    /** HTML 超过单次可读行数上限时的提示（只渲染了前一部分）。 */
+    val htmlNotice: String? = null,
     /** 「在电脑上打开」的进行状态与结果。 */
     val openingOnDesktop: Boolean = false,
     /** 一次性提示（Snackbar 用，消费后清空）。 */
@@ -159,8 +183,12 @@ class FileViewerViewModel(
         _state.value = FileViewerState(
             target = target,
             kind = FileKind.of(target.path),
-            // 从改动卡片进来默认看 diff；否则直接看全文。
-            tab = if (target.hasDiff) FileTab.DIFF else FileTab.CONTENT,
+            // 从改动卡片进来默认看 diff；HTML 默认看渲染；其余直接看全文。
+            tab = when {
+                target.hasDiff -> FileTab.DIFF
+                FileKind.of(target.path) == FileKind.HTML -> FileTab.RENDER
+                else -> FileTab.CONTENT
+            },
         )
         if (target.hasDiff) loadDiff()
         loadContent()
@@ -239,6 +267,11 @@ class FileViewerViewModel(
         // [open] 之前没有目标（初始状态的 path 是空串），不能拿它去请求。
         if (target.path.isEmpty()) return
         when (_state.value.kind) {
+            FileKind.HTML -> {
+                loadHtml()
+                // 源码页也要能看：顺手把同样的页填进 lines，省一次往返。
+            }
+
             FileKind.IMAGE -> loadMedia()
             // PDF 只取 stat（R005 P3）：App 里没有 PDF 渲染器，整块下载（最大 32 MiB）
             // 只为了显示一行「暂不支持预览」，纯属浪费。大小从 `stat` 就够。
@@ -340,6 +373,116 @@ class FileViewerViewModel(
     }
 
     /**
+     * 读整份 HTML 给 WebView（R040）。
+     *
+     * 与 [loadPage] 的分页阅读是两件事：WebView 必须一次拿到完整文档，半截 HTML 会渲染
+     * 出错位结果、也没法「续读」。所以这里循环取页直到 `eof`，但设上限——一个 3 万行的
+     * HTML 拼起来是几 MB 的字符串，同时再交给 WebView 解析，低端机会直接 OOM。
+     * 截断时通过 [FileViewerState.htmlNotice] 明说，而不是安静地只渲染一半。
+     *
+     * 源码页由 [loadContent] 一并填好（同样的读取，不用第二次往返）。
+     */
+    private fun loadHtml() {
+        bodyJob?.cancel()
+        val generation = ++bodyGeneration
+        _state.value = _state.value.copy(
+            html = null,
+            htmlLoading = true,
+            htmlError = null,
+            htmlNotice = null,
+            lines = emptyList(),
+            startLine = 1,
+            eof = true,
+            error = null,
+            loading = true,
+        )
+        bodyJob = viewModelScope.launch {
+            try {
+                val builder = StringBuilder()
+                var offset = WorkspaceFileRepository.MIN_OFFSET
+                var pages = 0
+                var reachedEnd = false
+                var truncated = false
+                var startLine = 1
+                val collected = ArrayList<String>()
+                while (true) {
+                    val page = files.read(sessionId, target.path, offset = offset)
+                    if (generation != bodyGeneration) return@launch
+                    if (pages == 0) startLine = page.offset
+                    if (builder.isNotEmpty()) builder.append('\n')
+                    builder.append(page.text)
+                    collected += splitPageLines(page.text)
+                    pages++
+                    offset = page.offset + page.lines
+                    reachedEnd = page.eof || page.lines <= 0
+                    if (reachedEnd) break
+                    if (pages >= MAX_HTML_PAGES || builder.length >= MAX_HTML_CHARS) {
+                        truncated = true
+                        break
+                    }
+                }
+                _state.value = _state.value.copy(
+                    html = builder.toString(),
+                    htmlLoading = false,
+                    htmlError = null,
+                    htmlNotice = if (truncated) {
+                        "文件较大，只渲染了前 $pages 页（约 ${builder.length / 1024} KB）。"
+                    } else {
+                        null
+                    },
+                    lines = collected,
+                    startLine = startLine,
+                    eof = reachedEnd,
+                    loading = false,
+                    bytes = builder.length.toLong(),
+                )
+            } catch (e: CancellationException) {
+                if (generation == bodyGeneration) {
+                    _state.value = _state.value.copy(htmlLoading = false, loading = false)
+                }
+                throw e
+            } catch (e: Exception) {
+                if (generation != bodyGeneration) return@launch
+                val message = describeFileFailure(e)
+                _state.value = _state.value.copy(
+                    htmlLoading = false,
+                    htmlError = message,
+                    loading = false,
+                    error = message,
+                )
+            }
+        }
+    }
+
+    /**
+     * 给 WebView 读一个相对资源（图片 / CSS / 字体）。
+     *
+     * **会阻塞**：`shouldInterceptRequest` 跑在 WebView 的后台线程上，返回类型是同步的，
+     * 没有别的写法。用 `runBlocking` + 短超时兜底 —— 桌面端掉线时不能让 WebView 的
+     * 加载线程被一个请求永久挂住（那会连带后续所有资源一起卡死）。
+     *
+     * 失败一律返回 null（= 这个资源取不到），不抛：页面上一个图裂了不该让整页变成
+     * 「打不开」。文字类资源直接按 UTF-8 编回字节，二进制原样返回。
+     */
+    fun readHtmlAsset(relativePath: String): ByteArray? = runCatching {
+        runBlocking {
+            withTimeoutOrNull(ASSET_READ_TIMEOUT_MS) {
+                when (FileKind.of(relativePath)) {
+                    FileKind.IMAGE, FileKind.PDF, FileKind.BINARY -> {
+                        val result = files.readBytes(sessionId, relativePath)
+                        (result as? FileBytes.Multipart)?.data
+                    }
+
+                    else -> {
+                        val page = files.read(sessionId, relativePath, limit = WorkspaceFileRepository.MAX_LIMIT)
+                        page.text.toByteArray(Charsets.UTF_8)
+                    }
+                }
+            }
+        }
+    }.getOrNull()
+
+    /**
      * PDF 只看 `stat`（R005 P3）：不下载整块字节。
      *
      * [FileViewerScreen] 对 PDF 只渲染一行「暂不支持预览」，`stat` 给出的
@@ -411,6 +554,18 @@ class FileViewerViewModel(
     }
 
     companion object {
+        /**
+         * HTML 最多拼几页。5000 行/页 × 4 页 = 2 万行，已超过程序类文件的实际规模，
+         * 而上限的意义是挡住「几 MB 的单文件 HTML 一次性塞进 WebView」。
+         */
+        private const val MAX_HTML_PAGES = 4
+
+        /** 拼出来的 HTML 字符数上限，约 2 MB。 */
+        private const val MAX_HTML_CHARS = 2_000_000
+
+        /** 单个相对资源的最长等待。桌面端掉线时 3 秒就够判断了。 */
+        private const val ASSET_READ_TIMEOUT_MS = 3_000L
+
         fun factory(
             connection: DshConnection,
             sessionId: String,

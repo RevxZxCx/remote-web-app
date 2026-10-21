@@ -171,6 +171,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.ui.text.TextStyle
 import com.revxzxcx.remotewebapp.ui.theme.LocalStatusRunning
 
@@ -232,10 +233,16 @@ fun ChatScreen(
     // 像素高：胶囊、排队条、任务面板的高低都不固定，写死任何一个数字都会在两个用例里
     // 出错（没有胶囊时多出一块空白 / 展开任务面板时最后一条被盖住）。
     var dockHeightPx by remember { mutableIntStateOf(0) }
-    // R039 第 5 条：「折叠栏」把消息区整块搁置成一句占位，再点一次复原。
-    // 与上面几个一样用 `remember`（不做跨进程记忆）：用户要的是「先搁置」这一下动作，
-    // 不是一种需要记住的偏好。
-    var conversationCollapsed by remember { mutableStateOf(false) }
+    // ── R040：右侧「对话详情」侧边栏（用户 m21625 / m22479）。
+    //
+    // 这里曾经是 R039 的 `conversationCollapsed`——那个理解是错的：用户要折的是
+    // **信息侧栏**，不是对话本身。区别很实在：折叠对话会把消息区换成一块占位符，
+    // 而侧栏是盖上来一层，消息、滚动位置、输入框全都不动。
+    //
+    // 用 `remember` 而非 saveable：侧栏是「现在看一眼」的动作，不是偏好；
+    // 进程重建后自动弹出一个抽屉会打断用户。
+    var sidebarOpen by remember { mutableStateOf(false) }
+    var sidebarTab by remember { mutableStateOf(DetailTab.SESSION) }
     var goalCollapsed by remember { mutableStateOf(false) }
     var goalEditing by remember { mutableStateOf(false) }
     var showDeleteGoal by remember { mutableStateOf(false) }
@@ -362,6 +369,14 @@ fun ChatScreen(
         )
     }
 
+    val contextInsights by viewModel.context.collectAsState()
+    val contextLoading by viewModel.contextLoading.collectAsState()
+    val contextError by viewModel.contextError.collectAsState()
+    val fileListing by viewModel.files.collectAsState()
+    val filesPath by viewModel.filesPath.collectAsState()
+    val filesLoading by viewModel.filesLoading.collectAsState()
+    val filesError by viewModel.filesError.collectAsState()
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -408,17 +423,24 @@ fun ChatScreen(
                     }
                     // ── R039 第 5 条（用户 m17042）：顶栏原来在生成中长出一个 ×「中止生成」。
                     // 用户判为「不符合操作逻辑」，并给出正确交互：「对话进行中且输入框为空时，
-                    // 发送键变停止键」。所以顶栏这一格**永久**交给「折叠对话栏」，
-                    // 中止动作移到发送键（见 [ComposerSendButton]），两处不再争同一位置。
+                    // 发送键变停止键」。所以顶栏这一格**永久**让给别的功能，中止动作移到
+                    // 发送键（见 [ComposerSendButton]），两处不再争同一位置。
                     //
-                    // 为什么是「折叠」而不是「关闭」：这个页面是 App 里唯一的内容屏，
-                    // 退出（返回）已经在左上角，右上角再放一个「×」会让两个动作看起来一样重。
-                    // 折叠是**可逆且不丢上下文**的：消息、目标、草稿全部原地保留，只是先搁置。
+                    // ── R040（用户 m21625）：这一格是**三条横线**，点开「对话详情」侧栏。
+                    // 用户明确纠正过 R039 的误读：「不是折叠对话，是折叠对话详细信息的侧边栏，
+                    // 图标要用三条横线」。所以用 `Icons.Default.Menu`（Material 里就是三条横线），
+                    // 而不是自绘的 `PanelCollapseIcon`。
                     AppIconButton(
-                        onClick = { conversationCollapsed = !conversationCollapsed },
-                        contentDescription = if (conversationCollapsed) "展开对话" else "折叠对话",
+                        onClick = {
+                            sidebarOpen = !sidebarOpen
+                            // 每次打开都重读一次：会话可能刚跑了新的一轮，而增量帧
+                            // 只在投影真的变化时才推，用户关着侧栏期间错过的那几帧
+                            // 不会自动补（`session/control` 的重连才会补 baseline）。
+                            if (sidebarOpen) viewModel.refreshContext()
+                        },
+                        contentDescription = if (sidebarOpen) "关闭对话详情" else "打开对话详情",
                     ) {
-                        Icon(PanelCollapseIcon, contentDescription = null)
+                        Icon(Icons.Default.Menu, contentDescription = null)
                     }
                 },
             )
@@ -486,7 +508,7 @@ fun ChatScreen(
                 // 会把消息区压到只剩一两行。
                 // 行内编辑时**不能**隐藏（否则输入框随横幅一起销毁）：这是「输入法让位」的
                 // 唯一例外（用户 m45632 明确要求「正在行内编辑的那一行不隐藏」）。
-                if (!conversationCollapsed && dockVisible(imeVisible, editing = goalEditing)) {
+                if (dockVisible(imeVisible, editing = goalEditing)) {
                     state.goal?.let { goal ->
                         Box(modifier = Modifier.padding(bottom = 8.dp)) {
                             GoalBanner(
@@ -516,12 +538,6 @@ fun ChatScreen(
 
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     when {
-                        // ── R039 第 5 条：折叠后消息区整块搁置。
-                        // 只盖住消息区，输入区仍在（用户要「先搁置」，不是「退出」）——
-                        // 把输入框一起收掉会让人以为这一页废了，而且草稿虽已持久化，
-                        // 突然消失仍是一次视觉跳变。
-                        conversationCollapsed -> ConversationCollapsedPlaceholder()
-
                         state.loading && state.items.isEmpty() -> Box(
                             modifier = Modifier.fillMaxSize(),
                             contentAlignment = Alignment.Center,
@@ -831,6 +847,60 @@ fun ChatScreen(
                         onAttachNotice = { viewModel.setAttachNotice(it) },
                     )
             }
+
+        // ── R040：右侧「对话详情」侧栏。
+        // 盖在消息区与 dock 之上，但**不遮住顶栏**——顶栏那个三条横线按钮要能再点一次
+        // 关掉它，否则用户只能靠返回键（那会退出会话，比关侧栏重得多）。
+        if (sidebarOpen) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .align(Alignment.TopEnd)
+                    .padding(top = 0.dp),
+            ) {
+                // 遮罩：点它关侧栏。用 `clickable` 而不是 `pointerInput`，因为这里需要
+                // 涟漪之外的可点语义（读屏要能读到「关闭侧栏」）。
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.42f))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = { sidebarOpen = false },
+                        )
+                        .semantics { contentDescription = "关闭侧栏" },
+                )
+                DetailSidebar(
+                    tab = sidebarTab,
+                    onTabChange = { tab ->
+                        sidebarTab = tab
+                        // 切到文件页签时才第一次列目录：详情页签的用户不关心文件，
+                        // 提前拉一次 `F:\bot` 的 826 项没有意义。
+                        if (tab == DetailTab.FILES && viewModel.files.value == null) {
+                            viewModel.openFiles("")
+                        }
+                    },
+                    insights = contextInsights,
+                    loading = contextLoading,
+                    error = contextError,
+                    onClose = { sidebarOpen = false },
+                    onRetry = viewModel::refreshContext,
+                    files = fileListing,
+                    filesPath = filesPath,
+                    filesLoading = filesLoading,
+                    filesError = filesError,
+                    onOpenDirectory = viewModel::openFiles,
+                    onOpenFile = { path, name ->
+                        // 复用已有的文件页（md 渲染 / 代码高亮 / 图片 / 分页都在那里），
+                        // 不在侧栏里再写一套。
+                        onOpenFile(FileTarget(path = path, display = name))
+                    },
+                    onFilesUp = viewModel::filesUp,
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                )
+            }
+        }
         }
     }
     // 模型选择器。放在 Scaffold 外面：AlertDialog 需要覆盖在整个页面之上，
@@ -1549,36 +1619,6 @@ private fun ComposerField(
             errorIndicatorColor = Color.Transparent,
         ),
     )
-}
-
-@Composable
-internal fun ConversationCollapsedPlaceholder(modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier.fillMaxSize().padding(24.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(
-                PanelCollapseIcon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                modifier = Modifier.size(28.dp),
-            )
-            Text(
-                text = "对话已折叠",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.padding(top = 10.dp),
-            )
-            Text(
-                text = "消息与目标都还在，点右上角展开。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-        }
-    }
 }
 
 /**

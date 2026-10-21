@@ -161,36 +161,6 @@ internal val SteerIcon: ImageVector = ImageVector.Builder(
     }
 }.build()
 
-/**
- * 折叠对话栏（用户 m17042 第 5 条：「标题栏的 × 不符合操作逻辑，要换成折叠栏按钮」）。
- *
- * 字形：一条横栏 + 一个向下的箭头——「把这一栏收下去」。与 `chevron_down` 的区别是
- * 多那条横栏：单独一个箭头在顶栏里会被读成「下拉菜单」，加一条栏才表达「收起整个对话区」。
- */
-internal val PanelCollapseIcon: ImageVector = ImageVector.Builder(
-    name = "PanelCollapse",
-    defaultWidth = 24.dp,
-    defaultHeight = 24.dp,
-    viewportWidth = 24f,
-    viewportHeight = 24f,
-).apply {
-    path(fill = SolidColor(Color.Black)) {
-        // 横栏
-        moveTo(4f, 5f)
-        horizontalLineTo(20f)
-        verticalLineTo(7.3f)
-        horizontalLineTo(4f)
-        close()
-        // 向下的折角
-        moveTo(6.4f, 10.6f)
-        lineTo(8f, 9f)
-        lineTo(12f, 13f)
-        lineTo(16f, 9f)
-        lineTo(17.6f, 10.6f)
-        lineTo(12f, 16.2f)
-        close()
-    }
-}.build()
 
 /**
  * 停止生成（Material `stop`：圆角方块）。
@@ -215,6 +185,76 @@ internal val StopIcon: ImageVector = ImageVector.Builder(
         curveTo(7.45f, 17f, 7f, 16.55f, 7f, 16f)
         verticalLineTo(8f)
         curveTo(7f, 7.45f, 7.45f, 7f, 8f, 7f)
+        close()
+    }
+}.build()
+
+/**
+ * 右向箭头（侧栏「关闭」）。
+ *
+ * 自绘而不是 `Icons.Filled.KeyboardArrowRight`：后者在 `material-icons-core` 里是
+ * 一个带外框感的粗箭头，与顶栏其它细线图标不是同一套笔画粗细；这里用与
+ * [ChevronDownIcon] 同一条折线旋转 90°得到，族内一致。
+ */
+internal val ChevronRightIcon: ImageVector = ImageVector.Builder(
+    name = "ChevronRight",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(9.3f, 5.3f)
+        lineTo(16f, 12f)
+        lineTo(9.3f, 18.7f)
+        lineTo(7.9f, 17.3f)
+        lineTo(13.2f, 12f)
+        lineTo(7.9f, 6.7f)
+        close()
+    }
+}.build()
+
+/** 文件夹（侧栏文件列表里的一级目录）。`material-icons-core` 的 49 枚里没有文件夹。 */
+internal val FolderIcon: ImageVector = ImageVector.Builder(
+    name = "Folder",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(3f, 6.2f)
+        curveTo(3f, 5.54f, 3.54f, 5f, 4.2f, 5f)
+        horizontalLineTo(9f)
+        lineTo(11f, 7f)
+        horizontalLineTo(19.8f)
+        curveTo(20.46f, 7f, 21f, 7.54f, 21f, 8.2f)
+        verticalLineTo(17.8f)
+        curveTo(21f, 18.46f, 20.46f, 19f, 19.8f, 19f)
+        horizontalLineTo(4.2f)
+        curveTo(3.54f, 19f, 3f, 18.46f, 3f, 17.8f)
+        close()
+    }
+}.build()
+
+/** 文件（侧栏文件列表里的普通条目）。 */
+internal val FileIcon: ImageVector = ImageVector.Builder(
+    name = "File",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(6f, 3f)
+        horizontalLineTo(14.2f)
+        lineTo(19f, 7.8f)
+        verticalLineTo(21f)
+        horizontalLineTo(6f)
+        close()
+        moveTo(13.4f, 4.9f)
+        verticalLineTo(8.6f)
+        horizontalLineTo(17.1f)
         close()
     }
 }.build()

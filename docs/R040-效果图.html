@@ -1,0 +1,1270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>R040 效果图 · 对话详情侧边栏（双视图）</title>
+<style>
+:root{
+  --primary:#5AA2FF; --onPrimary:#04121F;
+  --background:#0B1420; --onBackground:#E6EFFA;
+  --surface:#111C2B; --onSurface:#E6EFFA;
+  --surfaceVariant:#1A2942; --onSurfaceVariant:#9BB0C8;
+  --outline:#31485F; --outlineVariant:#22334A;
+  --tertiary:#F2C14E; --running:#4ADE80; --error:#FF8A80;
+  --r-xs:6px; --r-sm:10px; --r-md:14px; --r-lg:20px; --r-xl:28px; --r-pill:999px;
+  --t-fast:140ms; --t-med:240ms; --t-slow:360ms;
+  --ease:cubic-bezier(.2,0,0,1);
+  /* 七段语义色 · 照抄 dsh-context 插件 */
+  --c-system:#615FFF; --c-tools:#FE9A00; --c-user:#00C950; --c-inject:#AD46FF;
+  --c-skill:#FF6900; --c-assistant:#2B7FFF; --c-tool:#00BBA7;
+  /* 降级三段 */
+  --c-message:#2B7FFF;
+  /* 耗时圆环：照抄 dsh-context lib/client.js 的 ds 调色板 */
+  --c-ttft:#2B7FFF; --c-reason:#8E51FF; --c-text:#F6339A;
+  --c-toolarg:#FE9A00; --c-toolsx:#00BBA7; --c-other:#90A1B9;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:#060B12;color:var(--onBackground);
+  font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:13px;line-height:1.6;padding:28px 24px 80px;
+}
+.wrap{max-width:1640px;margin:0 auto}
+h1{font-size:19px;font-weight:600;letter-spacing:.2px}
+.sub{color:var(--onSurfaceVariant);font-size:12px;margin-top:6px;line-height:1.8}
+.sub code{font-family:ui-monospace,monospace;font-size:11px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+section{margin-top:40px}
+h2{font-size:14px;font-weight:600;color:var(--primary);display:flex;align-items:center;gap:8px}
+h2 .n{width:20px;height:20px;border-radius:50%;background:rgba(90,162,255,.14);
+  border:1px solid rgba(90,162,255,.4);font-size:11px;display:flex;
+  align-items:center;justify-content:center;color:var(--primary);flex:0 0 20px}
+.note{color:var(--onSurfaceVariant);font-size:11.5px;line-height:1.85;margin-top:8px}
+.note b{color:var(--onSurface);font-weight:600}
+.note code{font-family:ui-monospace,monospace;font-size:10.5px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+.row{display:flex;gap:26px;align-items:flex-start;flex-wrap:wrap;margin-top:16px}
+
+/* ---------- 手机壳 ---------- */
+.phone{
+  width:360px;flex:0 0 360px;background:var(--background);
+  border-radius:22px;border:1px solid var(--outlineVariant);
+  overflow:hidden;box-shadow:0 22px 60px rgba(0,0,0,.6);
+  display:flex;flex-direction:column;min-height:640px;position:relative;
+}
+.status{height:26px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 13px;font-size:9.5px;color:var(--onSurfaceVariant);letter-spacing:.3px;flex:0 0 auto}
+.topbar{height:46px;display:flex;align-items:center;gap:8px;padding:0 6px 0 4px;
+  border-bottom:1px solid var(--outlineVariant);flex:0 0 auto}
+.tb-back{width:32px;height:32px;display:flex;align-items:center;justify-content:center;
+  color:var(--onSurface);font-size:17px}
+.tb-mid{flex:1;min-width:0}
+.tb-t1{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb-t2{font-size:9.5px;color:var(--onSurfaceVariant);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;margin-top:1px;font-family:ui-monospace,monospace}
+.tb-btn{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;color:var(--onSurface)}
+.tb-btn.on{background:rgba(90,162,255,.16);color:var(--primary)}
+
+/* ---------- 消息区 ---------- */
+.msgs{flex:1;padding:11px 12px;display:flex;flex-direction:column;gap:9px;overflow:hidden}
+.m-user{align-self:flex-end;max-width:82%;background:rgba(90,162,255,.18);
+  border:1px solid rgba(90,162,255,.28);border-radius:14px 14px 4px 14px;
+  padding:7px 10px;font-size:11px;line-height:1.6}
+.m-ai{font-size:11px;line-height:1.7;color:var(--onSurface)}
+.m-meta{font-size:9px;color:var(--onSurfaceVariant);margin-top:5px;opacity:.8}
+.toolrow{display:flex;align-items:center;gap:7px;height:30px;padding:0 9px;
+  background:var(--surface);border:1px solid var(--outlineVariant);
+  border-radius:var(--r-sm);font-size:10px;color:var(--onSurfaceVariant)}
+.toolrow .tag{margin-left:auto;font-size:9px;padding:1.5px 6px;border-radius:var(--r-pill);
+  border:1px solid rgba(74,222,128,.4);color:var(--running)}
+
+/* ---------- 抽屉 ---------- */
+.sheet{position:absolute;top:0;right:0;bottom:0;width:300px;background:var(--surface);
+  border-left:1px solid var(--outline);box-shadow:-16px 0 48px rgba(0,0,0,.62);
+  display:flex;flex-direction:column}
+.scrim{position:absolute;inset:0;background:rgba(4,8,14,.5)}
+.sh-head{flex:0 0 auto;padding:10px 12px 0;display:flex;align-items:center;gap:8px}
+.sh-title{font-size:13px;font-weight:600;flex:1}
+.sh-close{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;color:var(--onSurfaceVariant);font-size:15px}
+/* 顶部导航（两格互斥） */
+.sh-tabs{display:flex;gap:3px;padding:3px;margin:9px 12px 0;
+  background:var(--surfaceVariant);border:1px solid var(--outlineVariant);
+  border-radius:var(--r-pill);flex:0 0 auto}
+.shtab{flex:1;height:30px;display:flex;align-items:center;justify-content:center;gap:5px;
+  font-size:11.5px;color:var(--onSurfaceVariant);border-radius:var(--r-pill)}
+.shtab svg{width:13px;height:13px;flex:0 0 13px}
+.shtab.on{background:var(--surface);color:var(--primary);font-weight:600;
+  box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.sh-body{flex:1;padding:11px 12px 14px}
+.sh-body::-webkit-scrollbar{width:0}
+
+/* ---------- 上下文卡 ---------- */
+.ctxb{border:1px solid var(--outlineVariant);border-radius:var(--r-md);
+  background:var(--background);padding:11px 12px}
+.ctxb .lbl{font-size:9.5px;color:var(--onSurfaceVariant);letter-spacing:.4px;
+  display:flex;align-items:center;gap:5px}
+.ctxb .lbl .plug{font-size:8.5px;padding:1px 5px;border-radius:var(--r-pill);
+  border:1px solid rgba(90,162,255,.45);color:var(--primary);letter-spacing:0}
+.ctxb .big{font-size:23px;font-weight:600;line-height:1.2;margin-top:3px;
+  font-variant-numeric:tabular-nums;letter-spacing:-.4px}
+.ctxb .big small{font-size:11px;font-weight:400;color:var(--onSurfaceVariant);letter-spacing:0}
+.bar{height:6px;border-radius:var(--r-pill);background:var(--surfaceVariant);
+  overflow:hidden;margin-top:9px}
+.bar i{display:block;height:100%;width:15.7%;border-radius:var(--r-pill);
+  background:linear-gradient(90deg,var(--primary),#8DC2FF)}
+.barrow{display:flex;align-items:center;justify-content:space-between;
+  font-size:10px;color:var(--onSurfaceVariant);margin-top:6px;
+  font-variant-numeric:tabular-nums}
+.barrow .pct{color:var(--primary);font-weight:600}
+.barmini{display:flex;align-items:center;justify-content:space-between;
+  font-size:10px;color:var(--onSurfaceVariant);margin-top:8px;
+  font-variant-numeric:tabular-nums}
+.barmini b{color:var(--onSurface);font-weight:600}
+
+/* ---------- 插件式堆叠上下文条 ---------- */
+.strip{margin-top:10px}
+.strip-cap{display:flex;align-items:center;justify-content:space-between;
+  font-size:9px;color:var(--onSurfaceVariant);margin-bottom:5px}
+.strip-cap b{color:var(--onSurface);font-weight:600}
+.stripbar{display:flex;width:100%;height:10px;border-radius:5px;overflow:hidden;
+  background:rgba(115,115,115,.18);position:relative}
+.stripbar .sg{height:100%;transition:filter var(--t-fast) var(--ease)}
+.stripbar .free{flex:1;background:none}
+.stripaxis{position:relative;height:13px;margin-top:4px;font-size:8.5px;
+  color:var(--onSurfaceVariant);font-variant-numeric:tabular-nums}
+.stripaxis span{position:absolute;transform:translateX(-50%);white-space:nowrap}
+.stripaxis span:first-child{transform:none}
+.stripaxis span:last-child{transform:translateX(-100%)}
+.legend7{display:flex;flex-wrap:wrap;gap:3px 8px;margin-top:7px}
+.lg7{display:inline-flex;align-items:center;gap:4px;font-size:8.5px;
+  color:var(--onSurfaceVariant);font-variant-numeric:tabular-nums}
+.lg7 i{width:6px;height:6px;border-radius:2px;flex:0 0 6px}
+
+/* ---------- 圆环 ---------- */
+.grp{margin-top:12px}
+.grp-h{font-size:10px;font-weight:600;color:var(--onSurface);margin-bottom:5px;
+  display:flex;align-items:center;gap:5px}
+.grp-h em{font-style:normal;font-size:9px;font-weight:400;color:var(--onSurfaceVariant)}
+.donutbox{display:flex;align-items:center;gap:13px;margin-top:7px}
+.dwrap{position:relative;flex:0 0 112px;width:112px;height:112px}
+.donut{display:block;width:112px;height:112px;overflow:visible}
+.dtrack{fill:none;stroke:rgba(115,115,115,.18);stroke-width:4}
+.dseg{fill:none;stroke-width:4;cursor:pointer;
+  transition:stroke-width var(--t-fast) var(--ease),opacity var(--t-fast) var(--ease)}
+.donut.dim .dseg{opacity:.3}
+.donut.dim .dseg.on{opacity:1;stroke-width:6.4}
+.dcenter{position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;pointer-events:none;text-align:center;padding:0 20px}
+.dcenter b{font-size:12.5px;font-weight:600;line-height:1.15;
+  font-variant-numeric:tabular-nums;letter-spacing:-.2px;white-space:nowrap}
+.dcenter span{font-size:8px;color:var(--onSurfaceVariant);margin-top:1px;line-height:1.2}
+.dsel{display:none;align-items:center;gap:5px;margin-top:6px;padding:5px 7px;
+  background:var(--surfaceVariant);border:1px solid var(--outlineVariant);
+  border-radius:var(--r-xs);font-size:9.5px;font-variant-numeric:tabular-nums}
+.dsel.show{display:flex}
+.dsel i{width:6px;height:6px;border-radius:2px;flex:0 0 6px}
+.dsel .nm{font-weight:600;color:var(--onSurface)}
+.dsel .vv{color:var(--onSurfaceVariant);margin-left:auto}
+.dlegend{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.dleg{display:flex;align-items:center;gap:5px;width:100%;height:15px;padding:0 3px;
+  border:0;background:none;border-radius:var(--r-xs);cursor:pointer;
+  font-size:9px;color:var(--onSurfaceVariant);font-family:inherit;text-align:left;
+  transition:background var(--t-fast) var(--ease)}
+.dleg:hover,.dleg.on{background:var(--surfaceVariant)}
+.dleg.on{color:var(--onSurface)}
+.dleg i{width:6px;height:6px;border-radius:2px;flex:0 0 6px}
+.dleg .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dleg b{font-weight:600;font-variant-numeric:tabular-nums;color:var(--onSurface)}
+.dleg .pc{width:32px;text-align:right;font-variant-numeric:tabular-nums;opacity:.8}
+.dtotal{display:flex;align-items:baseline;justify-content:space-between;margin-top:8px;
+  padding-top:6px;border-top:1px solid var(--outlineVariant);font-size:10px}
+.dtotal span:first-child{color:var(--onSurfaceVariant)}
+.dtotal span:last-child{font-weight:600;font-family:ui-monospace,monospace;
+  font-variant-numeric:tabular-nums}
+.dhintline{font-size:8.5px;color:var(--onSurfaceVariant);opacity:.75;margin-top:7px;
+  line-height:1.5}
+
+/* ---------- 数据行 / 卡片 ---------- */
+.card{border:1px solid var(--outlineVariant);border-radius:var(--r-md);
+  background:var(--background);padding:10px 11px;margin-top:11px}
+.card-h{font-size:10px;font-weight:600;color:var(--onSurface);margin-bottom:7px;
+  display:flex;align-items:center;gap:5px}
+.card-h em{font-style:normal;font-size:9px;font-weight:400;color:var(--onSurfaceVariant);
+  margin-left:auto}
+.card-h .plug{font-size:8.5px;padding:1px 5px;border-radius:var(--r-pill);
+  border:1px solid rgba(90,162,255,.45);color:var(--primary);margin-left:auto}
+.kv{display:flex;align-items:baseline;justify-content:space-between;
+  font-size:10.5px;padding:2.5px 0;font-variant-numeric:tabular-nums}
+.kv span:first-child{color:var(--onSurfaceVariant)}
+.kv span:last-child{font-family:ui-monospace,monospace;font-size:10.5px}
+.kv.tot{border-top:1px solid var(--outlineVariant);margin-top:4px;padding-top:6px;font-weight:600}
+.kv.tot span:first-child{color:var(--onSurface)}
+.kv.tot span:last-child{color:var(--primary)}
+.two{display:flex;gap:8px}
+.two>.card{flex:1;min-width:0;margin-top:11px}
+.chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:9px}
+.chip{font-size:9px;padding:2.5px 6.5px;border-radius:var(--r-pill);
+  background:var(--surfaceVariant);color:var(--onSurfaceVariant);
+  border:1px solid var(--outlineVariant);font-variant-numeric:tabular-nums}
+.chip b{color:var(--onSurface);font-weight:600}
+.chip.plug{border-color:rgba(90,162,255,.45);color:var(--primary)}
+.chip.plug b{color:var(--primary)}
+
+/* ---------- 提示条 ---------- */
+.tip{border:1px solid rgba(242,193,78,.42);background:rgba(242,193,78,.08);
+  border-radius:var(--r-md);padding:10px 11px;margin-top:11px}
+.tip-h{display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:600;
+  color:var(--tertiary)}
+.tip-b{font-size:10px;line-height:1.65;color:var(--onSurfaceVariant);margin-top:5px}
+.tip-b code{font-family:ui-monospace,monospace;font-size:9.5px;color:var(--tertiary)}
+.tip-btn{display:flex;align-items:center;justify-content:center;gap:5px;
+  height:32px;margin-top:8px;border-radius:var(--r-pill);
+  border:1px solid rgba(242,193,78,.5);color:var(--tertiary);font-size:10.5px;
+  font-weight:600;background:rgba(242,193,78,.06)}
+
+/* ---------- 文件区 ---------- */
+.crumb{display:flex;align-items:center;gap:4px;font-size:9px;color:var(--onSurfaceVariant);
+  font-family:ui-monospace,monospace;margin-bottom:7px;padding:4px 7px;
+  background:var(--surfaceVariant);border-radius:var(--r-xs);white-space:nowrap;overflow:hidden}
+.crumb b{color:var(--primary);font-weight:500}
+.frow{display:flex;align-items:center;gap:8px;height:34px;padding:0 6px;
+  border-radius:var(--r-sm);font-size:11px}
+.frow+.frow{margin-top:1px}
+.frow .ico{width:15px;text-align:center;color:var(--onSurfaceVariant);font-size:12px;flex:0 0 15px}
+.frow .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.frow .sz{font-size:9px;color:var(--onSurfaceVariant);font-family:ui-monospace,monospace}
+.frow.dir .nm{color:var(--primary)}
+.frow.git{color:var(--onSurfaceVariant)}
+.frow.up{color:var(--onSurfaceVariant);font-size:10px}
+.fhead{display:flex;align-items:center;gap:7px;margin:0 0 8px}
+.fhead .t{font-size:10px;font-weight:600;color:var(--onSurface);white-space:nowrap}
+.fhead .line{flex:1;height:1px;background:linear-gradient(90deg,var(--outlineVariant),transparent)}
+.fhead .c{font-size:9px;color:var(--onSurfaceVariant)}
+
+/* ---------- 预览页 ---------- */
+.pv-body{flex:1;overflow-y:auto;padding:12px 13px}
+.md h3{font-size:13px;font-weight:600;margin:12px 0 6px}
+.md h3:first-child{margin-top:0}
+.md p{font-size:10.5px;line-height:1.75;color:var(--onSurfaceVariant);margin:6px 0}
+.md code{font-family:ui-monospace,monospace;font-size:10px;background:var(--surfaceVariant);
+  padding:1px 4px;border-radius:3px;color:var(--primary)}
+.md pre{background:var(--background);border:1px solid var(--outlineVariant);
+  border-radius:var(--r-sm);padding:8px 9px;margin:7px 0;overflow-x:auto}
+.md pre code{background:none;padding:0;color:var(--onSurface);font-size:9.5px;line-height:1.65}
+.md ul{margin:6px 0 6px 15px}
+.md li{font-size:10.5px;line-height:1.7;color:var(--onSurfaceVariant)}
+.tabs{display:flex;gap:3px;padding:3px;background:var(--surfaceVariant);
+  border-radius:var(--r-pill);margin-bottom:9px}
+.tab{flex:1;height:24px;display:flex;align-items:center;justify-content:center;
+  font-size:10px;border-radius:var(--r-pill);color:var(--onSurfaceVariant)}
+.tab.on{background:var(--surface);color:var(--primary);font-weight:600}
+.webview{background:#fff;border-radius:var(--r-sm);overflow:hidden;
+  border:1px solid var(--outlineVariant);height:196px;padding:10px;color:#1a2330}
+.webview .wh{font-size:13px;font-weight:700;color:#123}
+.webview .wp{font-size:9.5px;color:#566;line-height:1.6;margin-top:5px}
+.webview .wbox{margin-top:8px;border:1px solid #dfe6ee;border-radius:6px;
+  padding:7px;background:#f6f9fc}
+.webview .wbtn{display:inline-block;margin-top:7px;background:#1F6FEB;color:#fff;
+  font-size:9px;padding:4px 10px;border-radius:12px}
+.wvbar{display:flex;align-items:center;gap:5px;font-size:9px;
+  color:var(--onSurfaceVariant);margin-top:7px}
+.wvbar .dot{width:5px;height:5px;border-radius:50%;background:var(--running)}
+
+/* ---------- 标注 ---------- */
+.spec{flex:1;min-width:330px;max-width:680px;font-size:11.5px;line-height:1.85;
+  color:var(--onSurfaceVariant)}
+.spec h4{font-size:11.5px;color:var(--onSurface);margin:14px 0 5px;font-weight:600}
+.spec h4:first-child{margin-top:0}
+.spec ul{margin-left:15px}
+.spec li{margin:3px 0}
+.spec code{font-family:ui-monospace,monospace;font-size:10.5px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+.spec b{color:var(--onSurface);font-weight:600}
+.warn{border-left:2px solid var(--tertiary);padding:8px 11px;background:rgba(242,193,78,.07);
+  border-radius:0 var(--r-sm) var(--r-sm) 0;margin:10px 0;font-size:11px;color:var(--tertiary)}
+.warn b{color:var(--tertiary)}
+.ok{border-left:2px solid var(--running);padding:8px 11px;background:rgba(74,222,128,.06);
+  border-radius:0 var(--r-sm) var(--r-sm) 0;margin:10px 0;font-size:11px;color:var(--running)}
+.bad{border-left:2px solid var(--error);padding:8px 11px;background:rgba(255,138,128,.07);
+  border-radius:0 var(--r-sm) var(--r-sm) 0;margin:10px 0;font-size:11px;color:var(--error)}
+table.t{width:100%;border-collapse:collapse;margin-top:10px;font-size:10.5px}
+table.t th,table.t td{border:1px solid var(--outlineVariant);padding:5px 8px;text-align:left}
+table.t th{background:var(--surfaceVariant);color:var(--onSurface);font-weight:600}
+table.t td{color:var(--onSurfaceVariant)}
+table.t code{font-size:10px;background:none;padding:0}
+table.t .yes{color:var(--running);font-weight:600}
+table.t .no{color:var(--error);font-weight:600}
+
+/* ---------- 亮色 ---------- */
+.light{color:var(--onBackground);--background:#F4F7FB;--onBackground:#182430;--surface:#FFFFFF;--onSurface:#182430;
+  --surfaceVariant:#E9EFF7;--onSurfaceVariant:#45586D;--outline:#B9C8D9;
+  --outlineVariant:#DCE5EF;--primary:#1F6FEB;--onPrimary:#FFFFFF;
+  --tertiary:#C08A12;--running:#15803D;--error:#B3261E}
+.light .phone{box-shadow:0 16px 44px rgba(24,36,48,.14)}
+.light .sheet{box-shadow:-12px 0 40px rgba(24,36,48,.16)}
+.light .shtab.on{box-shadow:0 1px 3px rgba(24,36,48,.14)}
+.light .webview{background:#fff}
+.cap{font-size:10px;color:var(--onSurfaceVariant);margin-top:9px;text-align:center}
+.cap b{color:var(--onSurface);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>R040 效果图 · 对话详情侧边栏（顶部导航双视图）</h1>
+<div class="sub">
+按你这一轮的三条要求重画：<b>①</b> 顶栏 <code>☰</code> 打开右抽屉后，<b>顶部有导航</b>——「会话详情」与「文件」两个选项，<b>一个功能占一个视图</b>，不再是一路往下堆；<b>②</b> 装了上下文洞察插件时<b>多显示</b>：插件格式的<b>堆叠上下文条</b>、<b>费用</b>与<b>耗时圆环</b>；<b>③</b> 没装插件时按降级方式显示，并用<b>醒目文案</b>提示可以装插件看详细信息。<br>
+下面所有数字都取自真实会话 <code>session-ad282b0d</code>（<code>F:/dsh-plugin/model-filter</code>），不是编的。
+</div>
+
+<!-- ============================================================ 1 -->
+<section>
+<h2><span class="n">1</span>顶部导航 · 一个功能一个视图</h2>
+<div class="note">
+抽屉顶部是两格互斥导航（与配对页分段控件同一套语感）：<b>会话详情</b> 与 <b>文件</b>。切换时只换身体，头部与导航不动，<b>不再需要一路往下滚才能看到文件区</b>——那是上一版最大的问题。
+</div>
+<div class="row">
+
+  <!-- 会话详情 tab -->
+  <div>
+  <div class="phone" data-fixed="1" style="height:815px">
+    <div class="status"><span>21:02</span><span>&#9679;&#9679;&#9679; &#9650; &#9646;</span></div>
+    <div class="topbar">
+      <div class="tb-back">&#8592;</div>
+      <div class="tb-mid"><div class="tb-t1">侧边栏的布局需要进行修改</div>
+        <div class="tb-t2">F:\dsh-plugin\model-filter</div></div>
+      <div class="tb-btn on">&#9776;</div>
+    </div>
+    <div class="msgs">
+      <div class="m-user">侧边栏的布局需要进行修改，顶部应该有导航选项</div>
+      <div class="toolrow"><span>&#128295;</span><span>执行了命令</span><span class="tag">完成</span></div>
+      <div class="m-ai">收到，顶部加两格导航，详情与文件各占一个视图…</div>
+    </div>
+    <div class="scrim" style="right:300px"></div>
+    <div class="sheet">
+      <div class="sh-head">
+        <div class="sh-title">对话详情</div>
+        <div class="sh-close">&#10005;</div>
+      </div>
+      <div class="sh-tabs">
+        <div class="shtab on">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+          会话详情</div>
+        <div class="shtab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 7h6l2 2h10v10H3z"/></svg>
+          文件</div>
+      </div>
+      <div class="sh-body">
+        <!-- 上下文占用 -->
+        <div class="ctxb">
+          <div class="lbl">当前上下文占用 <span class="plug">插件</span></div>
+          <div class="big">156,634 <small>/ 1,000,000</small></div>
+          <!-- 插件式堆叠条 -->
+          <div class="strip">
+            <div class="strip-cap"><span>窗口构成</span><span>实测 <b>156,634</b> 已用</span></div>
+            <div class="stripbar">
+              <div class="sg" style="width:8.917%;background:var(--c-assistant)"></div>
+              <div class="sg" style="width:6.155%;background:var(--c-tool)"></div>
+              <div class="sg" style="width:0.485%;background:var(--c-inject)"></div>
+              <div class="sg" style="width:0.066%;background:var(--c-tools)"></div>
+              <div class="sg" style="width:0.014%;background:var(--c-skill)"></div>
+              <div class="sg" style="width:0.016%;background:var(--c-system)"></div>
+              <div class="sg" style="width:0.012%;background:var(--c-user)"></div>
+              <div class="free"></div>
+            </div>
+            <div class="stripaxis"><span>0</span><span style="left:80%">80%</span><span style="left:100%">1M</span></div>
+            <div class="legend7">
+              <span class="lg7"><i style="background:var(--c-assistant)"></i>助手 8.9%</span>
+              <span class="lg7"><i style="background:var(--c-tool)"></i>工具结果 6.2%</span>
+              <span class="lg7"><i style="background:var(--c-inject)"></i>注入 0.5%</span>
+              <span class="lg7"><i style="background:var(--c-tools)"></i>工具定义 0.07%</span>
+              <span class="lg7"><i style="background:var(--c-system)"></i>系统 0.02%</span>
+              <span class="lg7"><i style="background:var(--c-skill)"></i>skill 0.01%</span>
+              <span class="lg7"><i style="background:var(--c-user)"></i>用户 0.01%</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 累计构成圆环 -->
+        <div class="grp">
+          <div class="grp-h">本会话累计构成 <em>圆环 · 可点放大</em></div>
+          <div class="donutbox">
+          <div class="dwrap">
+            <svg class="donut" viewBox="0 0 42 42" style="transform:rotate(-90deg)">
+              <circle class="dtrack" cx="21" cy="21" r="15.9155"/>
+              <circle class="dseg" data-k="assistant" cx="21" cy="21" r="15.9155" stroke="var(--c-assistant)" stroke-dasharray="56.4220 43.5780" stroke-dashoffset="-0.2500"/>
+              <circle class="dseg" data-k="tool" cx="21" cy="21" r="15.9155" stroke="var(--c-tool)" stroke-dasharray="38.7920 61.2080" stroke-dashoffset="-57.1720"/>
+              <circle class="dseg" data-k="inject" cx="21" cy="21" r="15.9155" stroke="var(--c-inject)" stroke-dasharray="2.5967 97.4033" stroke-dashoffset="-96.4640"/>
+              <circle class="dseg" data-k="tools" cx="21" cy="21" r="15.9155" stroke="var(--c-tools)" stroke-dasharray="0.2106 99.7894" stroke-dashoffset="-99.4160"/>
+              <circle class="dseg" data-k="system" cx="21" cy="21" r="15.9155" stroke="var(--c-system)" stroke-dasharray="0.0507 99.9493" stroke-dashoffset="-99.7572"/>
+              <circle class="dseg" data-k="skill" cx="21" cy="21" r="15.9155" stroke="var(--c-skill)" stroke-dasharray="0.0454 99.9546" stroke-dashoffset="-99.8559"/>
+              <circle class="dseg" data-k="user" cx="21" cy="21" r="15.9155" stroke="var(--c-user)" stroke-dasharray="0.0381 99.9619" stroke-dashoffset="-99.9430"/>
+            </svg>
+            <div class="dcenter"><b>3.87M</b><span>累计 token</span></div>
+          </div>
+          <div class="dlegend">
+            <button class="dleg" data-k="assistant"><i style="background:var(--c-assistant)"></i><span class="nm">助手输出</span><b>2.20M</b><span class="pc">56.9%</span></button>
+            <button class="dleg" data-k="tool"><i style="background:var(--c-tool)"></i><span class="nm">工具结果</span><b>1.52M</b><span class="pc">39.3%</span></button>
+            <button class="dleg" data-k="inject"><i style="background:var(--c-inject)"></i><span class="nm">注入</span><b>119.8K</b><span class="pc">3.1%</span></button>
+            <button class="dleg" data-k="tools" data-unit="耗时"><i style="background:var(--c-tools)"></i><span class="nm">工具定义</span><b>16.3K</b><span class="pc">0.42%</span></button>
+            <button class="dleg" data-k="system"><i style="background:var(--c-system)"></i><span class="nm">系统提示</span><b>3.9K</b><span class="pc">0.10%</span></button>
+            <button class="dleg" data-k="skill"><i style="background:var(--c-skill)"></i><span class="nm">skill</span><b>3.5K</b><span class="pc">0.09%</span></button>
+            <button class="dleg" data-k="user"><i style="background:var(--c-user)"></i><span class="nm">用户输入</span><b>2.9K</b><span class="pc">0.08%</span></button>
+          </div>
+        </div>
+        <div class="dtotal"><span>合计 · 跨 46 轮 / 4,528 步</span><span>3,869,342</span></div>
+        <div class="dsel"></div>
+        </div>
+
+        <!-- 费用 + 耗时（插件） -->
+        
+          <div class="card">
+            <div class="card-h">费用 <span class="plug">插件</span></div>
+            <div class="kv"><span>输入</span><span>8.08M</span></div>
+            <div class="kv"><span>输出</span><span>2.66M</span></div>
+            <div class="kv"><span>缓存读</span><span>524.6M</span></div>
+            <div class="kv tot"><span>合计</span><span>$4.38</span></div>
+          </div>
+          <div class="card">
+            <div class="card-h">耗时 <span class="plug">插件</span><em>230 tok/s</em></div>
+            <div class="donutbox">
+              <div class="dwrap" style="flex:0 0 92px;width:92px;height:92px">
+                <svg class="donut" viewBox="0 0 42 42" style="transform:rotate(-90deg);width:92px;height:92px">
+                  <circle class="dtrack" cx="21" cy="21" r="15.9155"/>
+              <circle class="dseg" data-k="ttft" cx="21" cy="21" r="15.9155" stroke="var(--c-ttft)" stroke-dasharray="9.0825 90.9175" stroke-dashoffset="-0.2500"/>
+              <circle class="dseg" data-k="reason" cx="21" cy="21" r="15.9155" stroke="var(--c-reason)" stroke-dasharray="6.5500 93.4500" stroke-dashoffset="-9.8325"/>
+              <circle class="dseg" data-k="text" cx="21" cy="21" r="15.9155" stroke="var(--c-text)" stroke-dasharray="43.2828 56.7172" stroke-dashoffset="-16.8824"/>
+              <circle class="dseg" data-k="toolarg" cx="21" cy="21" r="15.9155" stroke="var(--c-toolarg)" stroke-dasharray="5.8883 94.1117" stroke-dashoffset="-60.6652"/>
+              <circle class="dseg" data-k="tools" cx="21" cy="21" r="15.9155" stroke="var(--c-toolsx)" stroke-dasharray="32.6964 67.3036" stroke-dashoffset="-67.0536"/>
+                </svg>
+                <div class="dcenter"><b>24h21m</b><span data-sub="墙钟" data-sel="占比">墙钟</span></div>
+              </div>
+              <div class="dlegend">
+                <button class="dleg" data-k="ttft" data-unit="耗时"><i style="background:var(--c-ttft)"></i><span class="nm">首字等待</span><b>2h20m</b><span class="pc">9.6%</span></button>
+                <button class="dleg" data-k="reason" data-unit="耗时"><i style="background:var(--c-reason)"></i><span class="nm">推理</span><b>1h43m</b><span class="pc">7.1%</span></button>
+                <button class="dleg" data-k="text" data-unit="耗时"><i style="background:var(--c-text)"></i><span class="nm">正文生成</span><b>10h40m</b><span class="pc">43.8%</span></button>
+                <button class="dleg" data-k="toolarg" data-unit="耗时"><i style="background:var(--c-toolarg)"></i><span class="nm">工具参数</span><b>1h33m</b><span class="pc">6.4%</span></button>
+                <button class="dleg" data-k="tools" data-unit="耗时"><i style="background:var(--c-toolsx)"></i><span class="nm">工具执行</span><b>8h05m</b><span class="pc">33.2%</span></button>
+              </div>
+            </div>
+            <div class="dsel"></div>
+          </div>
+
+        <div class="chips">
+          <span class="chip"><b>180</b> 图</span>
+          <span class="chip"><b>4,484</b> 工具</span>
+          <span class="chip"><b>550</b> 回答</span>
+          <span class="chip"><b>55</b> 输入</span>
+          <span class="chip">首字均 <b>10.3s</b></span>
+          <span class="chip">生成 <b>230 tok/s</b></span>
+          <span class="chip plug">缓存命中 <b>98.6%</b></span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="cap">导航选「<b>会话详情</b>」· 已装插件（完整态）</div>
+  </div>
+
+  <!-- 文件 tab -->
+  <div>
+  <div class="phone" data-fixed="1" style="height:470px">
+    <div class="status"><span>21:03</span><span>&#9679;&#9679;&#9679; &#9650; &#9646;</span></div>
+    <div class="topbar">
+      <div class="tb-back">&#8592;</div>
+      <div class="tb-mid"><div class="tb-t1">侧边栏的布局需要进行修改</div>
+        <div class="tb-t2">F:\dsh-plugin\model-filter</div></div>
+      <div class="tb-btn on">&#9776;</div>
+    </div>
+    <div class="msgs">
+      <div class="m-ai" style="opacity:.5">（对话区仍在左侧，不被抽屉遮死）</div>
+    </div>
+    <div class="scrim" style="right:300px"></div>
+    <div class="sheet">
+      <div class="sh-head">
+        <div class="sh-title">对话详情</div>
+        <div class="sh-close">&#10005;</div>
+      </div>
+      <div class="sh-tabs">
+        <div class="shtab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+          会话详情</div>
+        <div class="shtab on">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 7h6l2 2h10v10H3z"/></svg>
+          文件</div>
+      </div>
+      <div class="sh-body">
+        <div class="fhead"><span class="t">工作区文件</span><span class="line"></span><span class="c">14 项</span></div>
+        <div class="crumb"><b>model-filter</b></div>
+        <div class="frow dir"><span class="ico">&#128193;</span><span class="nm">.dsh</span></div>
+        <div class="frow dir"><span class="ico">&#128193;</span><span class="nm">docs</span></div>
+        <div class="frow dir"><span class="ico">&#128193;</span><span class="nm">packages</span></div>
+        <div class="frow dir"><span class="ico">&#128193;</span><span class="nm">scripts</span></div>
+        <div class="frow"><span class="ico">&#128196;</span><span class="nm">README.md</span><span class="sz">6.1K</span></div>
+        <div class="frow"><span class="ico">&#128196;</span><span class="nm">package.json</span><span class="sz">1.4K</span></div>
+        <div class="frow"><span class="ico">&#128196;</span><span class="nm">tsconfig.json</span><span class="sz">612</span></div>
+        <div class="frow"><span class="ico">&#128196;</span><span class="nm">cordis.patch.yml</span><span class="sz">2.8K</span></div>
+        <div class="frow"><span class="ico">&#128196;</span><span class="nm">pnpm-workspace.yaml</span><span class="sz">89</span></div>
+        <div class="tip" style="margin-top:14px">
+          <div class="tip-h">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5"/></svg>
+            文件以会话 cwd 为根
+          </div>
+          <div class="tip-b">这里是 <code>model-filter</code>，不是 <code>F:/bot</code> 根（826 项，太吵）。点目录进入下一层，面包屑可回上级。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="cap">导航选「<b>文件</b>」· 同一抽屉，只换身体</div>
+  </div>
+
+  <div class="spec">
+    <h4>导航形态</h4>
+    <ul>
+      <li>两格互斥，<b>高度 30dp</b>（视觉 30，触达靠外层 48dp 保证），与配对页的分段控件同构——用户已经认得这个控件。</li>
+      <li>选中格：<code>surface</code> 底 + <code>primary</code> 字 + 1px 投影；未选中：透明 + <code>onSurfaceVariant</code>。</li>
+      <li>每格带 13dp 图标（表盘 / 文件夹），<b>不只靠文字</b>区分。</li>
+      <li>切换<b>不重建抽屉</b>，只换 <code>sh-body</code> 内容；两边的滚动位置各自记住（切回来还在原处）。</li>
+      <li>语义：<code>selectableGroup()</code> + <code>selectable(role = Role.Tab)</code>，读屏会念「会话详情，标签页，已选中」。</li>
+    </ul>
+    <h4>为什么必须分视图</h4>
+    <ul>
+      <li>上一版把上下文卡、圆环、用量、文件列表全串在一个滚动流里，<b>文件区要滚三屏才看得到</b>，而它恰恰是常用的。</li>
+      <li>两个视图的数据来源、刷新节奏、空态全不一样（详情随流更新，文件按需拉取），混在一起会让「为什么这里在转圈」无法解释。</li>
+      <li>抽屉宽 300dp，一屏能放的行数本来就少，<b>堆叠是负收益</b>。</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ 2 -->
+<section>
+<h2><span class="n">2</span>会话详情 · 已装插件（完整态）</h2>
+<div class="note">
+装了 <code>dsh-context</code>（提供 <code>contextTimeline</code> / <code>contextHeaders</code> / <code>contextActivity</code>）与 <code>dsh-cost-meter</code>（提供 <code>costUsage</code>）时，抽屉能多给出三样东西：<b>插件格式的堆叠上下文条</b>、<b>七段圆环</b>、<b>费用与耗时卡</b>。
+</div>
+<div class="row">
+  <div style="flex:1;min-width:330px">
+    <div class="phone" data-fixed="1">
+      <div class="status"><span>21:04</span><span>&#9679;&#9679;&#9679; &#9650; &#9646;</span></div>
+      <div class="sh-head">
+        <div class="sh-title">对话详情</div><div class="sh-close">&#10005;</div>
+      </div>
+      <div class="sh-tabs">
+        <div class="shtab on">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+          会话详情</div>
+        <div class="shtab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 7h6l2 2h10v10H3z"/></svg>
+          文件</div>
+      </div>
+      <div class="sh-body" style="overflow:visible">
+
+        <div class="ctxb">
+          <div class="lbl">当前上下文占用</div>
+          <div class="big">156,634 <small>/ 1,000,000</small></div>
+          <div class="strip">
+            <div class="strip-cap"><span>窗口构成 · 插件式堆叠条</span><span>已用 <b>15.7%</b></span></div>
+            <div class="stripbar">
+              <div class="sg" style="width:8.917%;background:var(--c-assistant)"></div>
+              <div class="sg" style="width:6.155%;background:var(--c-tool)"></div>
+              <div class="sg" style="width:0.485%;background:var(--c-inject)"></div>
+              <div class="sg" style="width:0.066%;background:var(--c-tools)"></div>
+              <div class="sg" style="width:0.014%;background:var(--c-skill)"></div>
+              <div class="sg" style="width:0.016%;background:var(--c-system)"></div>
+              <div class="sg" style="width:0.012%;background:var(--c-user)"></div>
+              <div class="free"></div>
+            </div>
+            <div class="stripaxis"><span>0</span><span style="left:50%">50%</span><span style="left:100%">1,000,000</span></div>
+            <div class="legend7">
+              <span class="lg7"><i style="background:var(--c-assistant)"></i>助手 8.9%</span>
+              <span class="lg7"><i style="background:var(--c-tool)"></i>工具结果 6.2%</span>
+              <span class="lg7"><i style="background:var(--c-inject)"></i>注入 0.5%</span>
+              <span class="lg7"><i style="background:var(--c-tools)"></i>工具定义 0.07%</span>
+              <span class="lg7"><i style="background:var(--c-system)"></i>系统 0.02%</span>
+              <span class="lg7"><i style="background:var(--c-skill)"></i>skill 0.01%</span>
+              <span class="lg7"><i style="background:var(--c-user)"></i>用户 0.01%</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="grp">
+          <div class="grp-h">本会话累计构成 <em>点分段放大 + 出提示</em></div>
+          <div class="donutbox">
+          <div class="dwrap">
+            <svg class="donut" viewBox="0 0 42 42" style="transform:rotate(-90deg)">
+              <circle class="dtrack" cx="21" cy="21" r="15.9155"/>
+              <circle class="dseg" data-k="assistant" cx="21" cy="21" r="15.9155" stroke="var(--c-assistant)" stroke-dasharray="56.4220 43.5780" stroke-dashoffset="-0.2500"/>
+              <circle class="dseg" data-k="tool" cx="21" cy="21" r="15.9155" stroke="var(--c-tool)" stroke-dasharray="38.7920 61.2080" stroke-dashoffset="-57.1720"/>
+              <circle class="dseg" data-k="inject" cx="21" cy="21" r="15.9155" stroke="var(--c-inject)" stroke-dasharray="2.5967 97.4033" stroke-dashoffset="-96.4640"/>
+              <circle class="dseg" data-k="tools" cx="21" cy="21" r="15.9155" stroke="var(--c-tools)" stroke-dasharray="0.2106 99.7894" stroke-dashoffset="-99.4160"/>
+              <circle class="dseg" data-k="system" cx="21" cy="21" r="15.9155" stroke="var(--c-system)" stroke-dasharray="0.0507 99.9493" stroke-dashoffset="-99.7572"/>
+              <circle class="dseg" data-k="skill" cx="21" cy="21" r="15.9155" stroke="var(--c-skill)" stroke-dasharray="0.0454 99.9546" stroke-dashoffset="-99.8559"/>
+              <circle class="dseg" data-k="user" cx="21" cy="21" r="15.9155" stroke="var(--c-user)" stroke-dasharray="0.0381 99.9619" stroke-dashoffset="-99.9430"/>
+            </svg>
+            <div class="dcenter"><b>3.87M</b><span>累计 token</span></div>
+          </div>
+          <div class="dlegend">
+            <button class="dleg" data-k="assistant"><i style="background:var(--c-assistant)"></i><span class="nm">助手输出</span><b>2.20M</b><span class="pc">56.9%</span></button>
+            <button class="dleg" data-k="tool"><i style="background:var(--c-tool)"></i><span class="nm">工具结果</span><b>1.52M</b><span class="pc">39.3%</span></button>
+            <button class="dleg" data-k="inject"><i style="background:var(--c-inject)"></i><span class="nm">注入</span><b>119.8K</b><span class="pc">3.1%</span></button>
+            <button class="dleg" data-k="tools" data-unit="耗时"><i style="background:var(--c-tools)"></i><span class="nm">工具定义</span><b>16.3K</b><span class="pc">0.42%</span></button>
+            <button class="dleg" data-k="system"><i style="background:var(--c-system)"></i><span class="nm">系统提示</span><b>3.9K</b><span class="pc">0.10%</span></button>
+            <button class="dleg" data-k="skill"><i style="background:var(--c-skill)"></i><span class="nm">skill</span><b>3.5K</b><span class="pc">0.09%</span></button>
+            <button class="dleg" data-k="user"><i style="background:var(--c-user)"></i><span class="nm">用户输入</span><b>2.9K</b><span class="pc">0.08%</span></button>
+          </div>
+        </div>
+        <div class="dtotal"><span>合计 · 跨 46 轮 / 4,528 步</span><span>3,869,342</span></div>
+        <div class="dsel"></div>
+        </div>
+
+        
+          <div class="card">
+            <div class="card-h">费用 <span class="plug">插件</span></div>
+            <div class="kv"><span>未缓存输入</span><span>8.08M</span></div>
+            <div class="kv"><span>输出</span><span>2.66M</span></div>
+            <div class="kv"><span>缓存读</span><span>524.6M</span></div>
+            <div class="kv"><span>缓存写</span><span>0</span></div>
+            <div class="kv tot"><span>合计</span><span>$4.38</span></div>
+          </div>
+          <div class="card">
+            <div class="card-h">耗时 <span class="plug">插件</span><em>24h21m · 230 tok/s</em></div>
+            <div class="donutbox">
+              <div class="dwrap" style="flex:0 0 92px;width:92px;height:92px">
+                <svg class="donut" viewBox="0 0 42 42" style="transform:rotate(-90deg);width:92px;height:92px">
+                  <circle class="dtrack" cx="21" cy="21" r="15.9155"/>
+              <circle class="dseg" data-k="ttft" cx="21" cy="21" r="15.9155" stroke="var(--c-ttft)" stroke-dasharray="9.0825 90.9175" stroke-dashoffset="-0.2500"/>
+              <circle class="dseg" data-k="reason" cx="21" cy="21" r="15.9155" stroke="var(--c-reason)" stroke-dasharray="6.5500 93.4500" stroke-dashoffset="-9.8325"/>
+              <circle class="dseg" data-k="text" cx="21" cy="21" r="15.9155" stroke="var(--c-text)" stroke-dasharray="43.2828 56.7172" stroke-dashoffset="-16.8824"/>
+              <circle class="dseg" data-k="toolarg" cx="21" cy="21" r="15.9155" stroke="var(--c-toolarg)" stroke-dasharray="5.8883 94.1117" stroke-dashoffset="-60.6652"/>
+              <circle class="dseg" data-k="tools" cx="21" cy="21" r="15.9155" stroke="var(--c-toolsx)" stroke-dasharray="32.6964 67.3036" stroke-dashoffset="-67.0536"/>
+                </svg>
+                <div class="dcenter"><b>24h21m</b><span data-sub="墙钟" data-sel="占比">墙钟</span></div>
+              </div>
+              <div class="dlegend">
+                <button class="dleg" data-k="ttft" data-unit="耗时"><i style="background:var(--c-ttft)"></i><span class="nm">首字等待</span><b>2h20m</b><span class="pc">9.6%</span></button>
+                <button class="dleg" data-k="reason" data-unit="耗时"><i style="background:var(--c-reason)"></i><span class="nm">推理</span><b>1h43m</b><span class="pc">7.1%</span></button>
+                <button class="dleg" data-k="text" data-unit="耗时"><i style="background:var(--c-text)"></i><span class="nm">正文生成</span><b>10h40m</b><span class="pc">43.8%</span></button>
+                <button class="dleg" data-k="toolarg" data-unit="耗时"><i style="background:var(--c-toolarg)"></i><span class="nm">工具参数</span><b>1h33m</b><span class="pc">6.4%</span></button>
+                <button class="dleg" data-k="tools" data-unit="耗时"><i style="background:var(--c-toolsx)"></i><span class="nm">工具执行</span><b>8h05m</b><span class="pc">33.2%</span></button>
+              </div>
+            </div>
+            <div class="dsel"></div>
+          </div>
+
+        <div class="card">
+          <div class="card-h">按模型 <em>provider:model</em></div>
+          <div class="kv"><span>buddy · deepseek-v4.1-flash</span><span>$4.38</span></div>
+          <div class="kv"><span>qodercn · dfmodel</span><span>$0.00</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-h">工具耗时 Top <em>共 4,484 次</em></div>
+          <div class="kv"><span>bash</span><span>3h45m · 3,753</span></div>
+          <div class="kv"><span>job_output</span><span>21m · 27</span></div>
+          <div class="kv"><span>compress</span><span>36s · 80</span></div>
+          <div class="kv"><span>read_image</span><span>7.9s · 176</span></div>
+        </div>
+
+        <div class="chips">
+          <span class="chip"><b>180</b> 图</span>
+          <span class="chip"><b>4,484</b> 工具</span>
+          <span class="chip"><b>550</b> 回答</span>
+          <span class="chip"><b>55</b> 输入</span>
+          <span class="chip">首字均 <b>10.3s</b></span>
+          <span class="chip">生成 <b>230 tok/s</b></span>
+          <span class="chip">缓存命中 <b>98.6%</b></span>
+          <span class="chip">压缩 <b>0</b></span>
+        </div>
+      </div>
+    </div>
+    <div class="cap">已装插件 · 圆环七段 + 堆叠条 + 费用 + 耗时</div>
+  </div>
+
+  <div class="spec">
+    <h4>插件格式的「上下文条」（照抄插件实现）</h4>
+    <ul>
+      <li>高度 <b>10px</b>、圆角 5px、底色 <code>neutral 18%</code>，各段纯色紧贴、无间隙——与插件的 <code>.lc-stacked</code> 一致。</li>
+      <li><b>剩余空间留白</b>（不是画一条虚线），只有悬停某段时才给该段 <code>brightness 1.18</code>。</li>
+      <li>下方刻度轴 13px：<code>0</code> / <code>50%</code> / 窗口上限。<b>刻度用真实 token 数</b>，不用百分比结尾——1M 窗口的人想知道「还剩多少 token」。</li>
+      <li>七段顺序与圆环<b>一致</b>（按体量降序），不让用户在两个视图之间重新认颜色。</li>
+      <li>这一段<b>只在有 <code>contextTimeline</code> 时出现</b>：核心的 <code>contextBreakdown</code> 只给三段粗粒度，画不出「哪些是助手输出、哪些是工具结果」。</li>
+    </ul>
+    <h4>费用</h4>
+    <ul>
+      <li>来源 <code>costUsage</code>：<code>{input, output, cacheRead, cacheWrite, reasoning, cost, byModel, byProviderModel}</code>。</li>
+      <li><b>合计用主色突出</b>，四行明细用等宽字体，数字右对齐。</li>
+      <li>按模型另起一张卡：<code>byProviderModel</code> 的键就是 <code>provider:model</code>，直接显示；<b>费用为 0 的也照实显示</b>（<code>dfmodel</code> 走的是自有额度，不是免费）。</li>
+      <li>不显示货币符号以外的猜测：<code>cost</code> 是美元，直接 <code>$</code> + 两位。</li>
+    </ul>
+    <h4>耗时 <em>第二张圆环</em></h4>
+    <ul>
+      <li><b>和累计构成用同一种图形</b>：插件里它就是第二张圆环。同一个组件复用两次，用户不用学两套读法。</li>
+      <li>五段来自 <code>contextTimeline.timing</code>：首字等待 <code>ttftMs</code>、推理 <code>reasoningMs</code>、正文生成 <code>textMs</code>（= 生成时长扣掉推理）、工具参数 <code>toolArgMs</code>、工具执行 <code>toolsMs</code>；<b>五段之和 ≈ 墙钟</b>，圆心直接显示墙钟。</li>
+      <li>配色<b>不复用</b>累计构成那七种：这里是另一组量。首字等待蓝 / 推理紫 / 正文生成洋红 / 工具参数琥珀 / 工具执行青——与插件一致。</li>
+      <li>圆心下方副标题写「墙钟」，选中后变「占比」；右侧 <code>tok/s</code> 徽标是解码速度，不占圆环。</li>
+      <li>降级时（无 <code>timing</code>）只剩 <code>sessionStats</code> 的 <code>llmMs</code> / <code>toolMs</code> 两段，<b>圆环退成两段</b>，不是消失。</li>
+      <li>「工具耗时 Top」是另一个维度（按工具拆），保留成单独一张卡，只列前 4 个。</li>
+      <li>时长格式统一 <code>Xh Ym</code>（超过 1 小时）或 <code>Xm Ys</code>，<b>不显示毫秒</b>。</li>
+    </ul>
+    <div class="ok">
+      <b>圆环与堆叠条是两个不同的量</b>，必须分开：<br>
+      圆环 = <b>全会话累计</b>（3,869,342，跨 46 轮求和）；<br>
+      堆叠条 = <b>当前窗口占用</b>（156,634，本轮请求实际发出去的）。<br>
+      两者差 24 倍，混在一起会让人以为上下文快爆了。
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ 3 -->
+<section>
+<h2><span class="n">3</span>会话详情 · 未装插件（降级态 + 醒目提示）</h2>
+<div class="note">
+没装插件时只剩核心的三个投影：<code>contextPressure</code>（占用）、<code>contextBreakdown</code>（三段粗粒度）、<code>tokenUsage</code>（四行用量），加上核心的 <code>sessionStats</code>（轮数/步数/耗时）。<b>圆环退化三段、费用整块消失、耗时圆环退成两段、堆叠条仍可用</b>——这时给一条醒目的提示。
+</div>
+<div class="row">
+  <div>
+  <div class="phone" data-fixed="1" style="height:905px">
+    <div class="status"><span>21:05</span><span>&#9679;&#9679;&#9679; &#9650; &#9646;</span></div>
+    <div class="topbar">
+      <div class="tb-back">&#8592;</div>
+      <div class="tb-mid"><div class="tb-t1">侧边栏的布局需要进行修改</div>
+        <div class="tb-t2">F:\dsh-plugin\model-filter</div></div>
+      <div class="tb-btn on">&#9776;</div>
+    </div>
+    <div class="msgs">
+      <div class="m-user">侧边栏的布局需要进行修改</div>
+      <div class="m-ai" style="opacity:.5">（抽屉打开中）</div>
+    </div>
+    <div class="scrim" style="right:300px"></div>
+    <div class="sheet">
+      <div class="sh-head">
+        <div class="sh-title">对话详情</div><div class="sh-close">&#10005;</div>
+      </div>
+      <div class="sh-tabs">
+        <div class="shtab on">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+          会话详情</div>
+        <div class="shtab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 7h6l2 2h10v10H3z"/></svg>
+          文件</div>
+      </div>
+      <div class="sh-body">
+
+        <div class="ctxb">
+          <div class="lbl">当前上下文占用</div>
+          <div class="big">156,634 <small>/ 1,000,000</small></div>
+          <div class="strip">
+            <div class="strip-cap"><span>窗口构成 · 三段</span><span>已用 <b>15.7%</b></span></div>
+            <div class="stripbar">
+              <div class="sg" style="width:15.582%;background:var(--c-message)"></div>
+              <div class="sg" style="width:0.066%;background:var(--c-tools)"></div>
+              <div class="sg" style="width:0.016%;background:var(--c-system)"></div>
+              <div class="free"></div>
+            </div>
+            <div class="stripaxis"><span>0</span><span style="left:50%">50%</span><span style="left:100%">1,000,000</span></div>
+            <div class="legend7">
+              <span class="lg7"><i style="background:var(--c-message)"></i>消息（合计）15.6%</span>
+              <span class="lg7"><i style="background:var(--c-tools)"></i>工具定义 0.07%</span>
+              <span class="lg7"><i style="background:var(--c-system)"></i>系统 0.02%</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 醒目提示 -->
+        <div class="tip">
+          <div class="tip-h">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5"/></svg>
+            装上上下文洞察插件，这里会详细很多
+          </div>
+          <div class="tip-b">
+            现在只能看到<b>三段</b>：消息、工具定义、系统提示。<br>
+            装 <code>dsh-context</code> 后可拆成<b>七段</b>（助手输出 / 工具结果 / 注入 / skill …），并多出<b>费用</b>与<b>按工具耗时</b>。
+          </div>
+          <div class="tip-btn">去桌面端「插件」页安装</div>
+        </div>
+
+        <div class="grp">
+          <div class="grp-h">本会话累计构成 <em>三段 · 降级</em></div>
+          <div class="donutbox">
+          <div class="dwrap">
+            <svg class="donut" viewBox="0 0 42 42" style="transform:rotate(-90deg)">
+              <circle class="dtrack" cx="21" cy="21" r="15.9155"/>
+              <circle class="dseg" data-k="message" cx="21" cy="21" r="15.9155" stroke="var(--c-message)" stroke-dasharray="98.9759 1.0241" stroke-dashoffset="-0.2500"/>
+              <circle class="dseg" data-k="tools" cx="21" cy="21" r="15.9155" stroke="var(--c-tools)" stroke-dasharray="0.2113 99.7887" stroke-dashoffset="-99.5815"/>
+              <circle class="dseg" data-k="system" cx="21" cy="21" r="15.9155" stroke="var(--c-system)" stroke-dasharray="0.0508 99.9492" stroke-dashoffset="-99.9239"/>
+            </svg>
+            <div class="dcenter"><b>3.86M</b><span>累计 token</span></div>
+          </div>
+          <div class="dlegend">
+            <button class="dleg" data-k="message"><i style="background:var(--c-message)"></i><span class="nm">消息（合计）</span><b>3.84M</b><span class="pc">99.48%</span></button>
+            <button class="dleg" data-k="tools" data-unit="耗时"><i style="background:var(--c-tools)"></i><span class="nm">工具定义</span><b>16.3K</b><span class="pc">0.42%</span></button>
+            <button class="dleg" data-k="system"><i style="background:var(--c-system)"></i><span class="nm">系统提示</span><b>3.9K</b><span class="pc">0.10%</span></button>
+          </div>
+        </div>
+        <div class="dtotal"><span>合计 · 跨 46 轮 / 4,528 步</span><span>3,856,722</span></div>
+        <div class="dsel"></div>
+        <div class="dhintline">「消息」是助手输出 / 工具结果 / 注入 / skill / 用户输入的合并值，核心只给到这一层。</div>
+        </div>
+
+        
+          <div class="card">
+            <div class="card-h">用量 <em>本会话累计</em></div>
+            <div class="kv"><span>未缓存输入</span><span>8.98M</span></div>
+            <div class="kv"><span>输出</span><span>2.79M</span></div>
+            <div class="kv"><span>缓存读</span><span>641.4M</span></div>
+            <div class="kv"><span>缓存写</span><span>0</span></div>
+          </div>
+          <div class="card">
+            <div class="card-h">耗时 <em>核心 · 只有两段</em></div>
+            <div class="donutbox">
+              <div class="dwrap" style="flex:0 0 76px;width:76px;height:76px">
+                <svg class="donut" viewBox="0 0 42 42" style="transform:rotate(-90deg);width:76px;height:76px">
+                  <circle class="dtrack" cx="21" cy="21" r="15.9155"/>
+              <circle class="dseg" data-k="llm" cx="21" cy="21" r="15.9155" stroke="var(--c-assistant)" stroke-dasharray="66.3036 33.6964" stroke-dashoffset="-0.2500"/>
+              <circle class="dseg" data-k="tools" cx="21" cy="21" r="15.9155" stroke="var(--c-toolsx)" stroke-dasharray="32.6964 67.3036" stroke-dashoffset="-67.0536"/>
+                </svg>
+                <div class="dcenter"><b>24h21m</b><span data-sub="墙钟" data-sel="占比">墙钟</span></div>
+              </div>
+              <div class="dlegend">
+                <button class="dleg" data-k="llm" data-unit="耗时"><i style="background:var(--c-assistant)"></i><span class="nm">LLM</span><b>16h16m</b><span class="pc">66.8%</span></button>
+                <button class="dleg" data-k="tools" data-unit="耗时"><i style="background:var(--c-toolsx)"></i><span class="nm">工具</span><b>8h05m</b><span class="pc">33.2%</span></button>
+              </div>
+            </div>
+            <div class="dsel"></div>
+          </div>
+
+        <div class="chips">
+          <span class="chip"><b>46</b> 轮</span>
+          <span class="chip"><b>4,528</b> 步</span>
+          <span class="chip"><b>180</b> 图</span>
+          <span class="chip"><b>4,484</b> 工具</span>
+          <span class="chip"><b>550</b> 回答</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="cap">未装插件 · 三段圆环 + 醒目安装提示</div>
+  </div>
+
+  <div class="spec">
+    <h4>降级到什么程度</h4>
+    <table class="t">
+      <tr><th>内容</th><th>已装插件</th><th>未装插件</th></tr>
+      <tr><td>当前占用 + 进度条</td><td class="yes">有</td><td class="yes">有（<code>contextPressure</code>）</td></tr>
+      <tr><td>窗口构成堆叠条</td><td class="yes">七段</td><td>三段（<code>contextBreakdown</code>）</td></tr>
+      <tr><td>累计构成圆环</td><td class="yes">七段可点</td><td>三段可点</td></tr>
+      <tr><td>用量四行</td><td class="yes">有</td><td class="yes">有（<code>tokenUsage</code>）</td></tr>
+      <tr><td>费用</td><td class="yes">有</td><td class="no">无（<code>costUsage</code>）</td></tr>
+      <tr><td>耗时明细</td><td class="yes">五段圆环 + 工具 Top</td><td>只有 LLM / 工具 / 首字 / 速度</td></tr>
+      <tr><td>轮数 / 步数 / 图 / 回答</td><td class="yes">有</td><td class="yes">有（<code>sessionStats</code>）</td></tr>
+    </table>
+    <h4>提示条的处理</h4>
+    <ul>
+      <li>位置在<b>占用卡与圆环之间</b>——用户先看到「能看的」，紧接着看到「缺什么」，不会以为整个面板坏了。</li>
+      <li>用 <code>tertiary</code>（琥珀）而不是 <code>error</code>：这不是故障，是「功能可以更全」。</li>
+      <li>文案写明<b>装了会多什么</b>（七段 + 费用 + 工具耗时），而不是只说「请安装插件」。</li>
+      <li>按钮<b>不在 App 内跳转</b>（手机上没有插件管理页），点击给 Snackbar：「请在桌面端的「插件」页安装 <code>dsh-context</code>」。</li>
+      <li>装好插件后<b>无需重新配对</b>：<code>session/projections</code> 的键是动态的，下次打开抽屉就会多出来。这条也要写进文案，否则用户会去重配。</li>
+    </ul>
+    <div class="warn">
+      <b>「核心自带」的判断依据</b>：不看插件表里的 <code>Config</code> 列（那一列的说明是 <code>Config marks packages whose row accepts a config mapping</code>，说的是「这一行能不能带配置块」，与是否默认启用无关）。依据是默认 bundle 里有没有 <code>- id: …</code> 行：<code>token-meter</code>、<code>session-stats</code>、<code>session-turn-outline</code> 都有，属核心自带；<code>contextTimeline</code>、<code>contextHeaders</code>、<code>contextActivity</code>、<code>costUsage</code> 在核心 asar 里命中 <b>0 次</b>，只能来自插件。
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ 4 -->
+<section>
+<h2><span class="n">4</span>文件视图 · 目录浏览与 HTML 渲染</h2>
+<div class="note">
+「文件」标签页以<b>会话 cwd 为根</b>。点目录进下一层，面包屑回上级；点文件进现有文件页——<code>.md</code> 走自研 <code>MdParser</code>+<code>MdView</code>，<code>.html</code> 新增「渲染 / 源码」双页签，渲染走 WebView。
+</div>
+<div class="row">
+  <div>
+  <div class="phone" data-fixed="1">
+    <div class="status"><span>21:06</span><span>&#9679;&#9679;&#9679; &#9650; &#9646;</span></div>
+    <div class="sh-head" style="padding-top:10px">
+      <div class="sh-title">对话详情</div><div class="sh-close">&#10005;</div>
+    </div>
+    <div class="sh-tabs">
+      <div class="shtab">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        会话详情</div>
+      <div class="shtab on">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 7h6l2 2h10v10H3z"/></svg>
+        文件</div>
+    </div>
+    <div class="sh-body" style="flex:1">
+      <div class="fhead"><span class="t">工作区文件</span><span class="line"></span><span class="c">8 项</span></div>
+      <div class="crumb">model-filter <span style="opacity:.5">/</span> <b>docs</b></div>
+      <div class="frow up"><span class="ico">&#8617;</span><span class="nm">返回上级</span></div>
+      <div class="frow dir"><span class="ico">&#128193;</span><span class="nm">dev</span></div>
+      <div class="frow dir"><span class="ico">&#128193;</span><span class="nm">notes</span></div>
+      <div class="frow"><span class="ico">&#128196;</span><span class="nm">README.md</span><span class="sz">3.1K</span></div>
+      <div class="frow"><span class="ico">&#128196;</span><span class="nm">design.html</span><span class="sz">18K</span></div>
+      <div class="frow"><span class="ico">&#128196;</span><span class="nm">changelog.md</span><span class="sz">9.4K</span></div>
+      <div class="frow"><span class="ico">&#128196;</span><span class="nm">logo.png</span><span class="sz">240K</span></div>
+    </div>
+  </div>
+  <div class="cap">进入 <b>docs/</b> · 面包屑 + 返回上级</div>
+  </div>
+
+  <div>
+  <div class="phone" data-fixed="1">
+    <div class="status"><span>21:07</span><span>&#9679;&#9679;&#9679; &#9650; &#9646;</span></div>
+    <div class="topbar">
+      <div class="tb-back">&#8592;</div>
+      <div class="tb-mid"><div class="tb-t1">README.md</div>
+        <div class="tb-t2">docs\README.md · 3.1 KB</div></div>
+      <div class="tb-btn">&#8942;</div>
+    </div>
+    <div class="pv-body md">
+      <h3>model-filter</h3>
+      <p>会话级模型过滤插件：按会话把模型目录裁成可用子集。</p>
+      <h3>安装</h3>
+      <pre><code>cd F:/dsh-plugin/model-filter
+pnpm install</code></pre>
+      <h3>配置</h3>
+      <ul>
+        <li><code>cordis.patch.yml</code> —— 插件行与开关</li>
+        <li><code>packages/</code> —— 三个子包</li>
+      </ul>
+      <p style="opacity:.6">（markdown 由现有 MdParser 渲染，此处为示意）</p>
+    </div>
+  </div>
+  <div class="cap">现有文件页 · markdown 直接渲染</div>
+  </div>
+
+  <div>
+  <div class="phone" data-fixed="1">
+    <div class="status"><span>21:08</span><span>&#9679;&#9679;&#9679; &#9650; &#9646;</span></div>
+    <div class="topbar">
+      <div class="tb-back">&#8592;</div>
+      <div class="tb-mid"><div class="tb-t1">design.html</div>
+        <div class="tb-t2">docs\design.html · 18 KB</div></div>
+      <div class="tb-btn">&#8942;</div>
+    </div>
+    <div class="pv-body">
+      <div class="tabs"><span class="tab on">渲染</span><span class="tab">源码</span></div>
+      <div class="webview">
+        <div class="wh">model-filter 设计稿</div>
+        <div class="wp">按会话裁剪模型目录，未选中的模型置灰但仍可点。</div>
+        <div class="wbox">
+          <div style="font-size:9.5px;font-weight:600;color:#123">会话级过滤</div>
+          <div style="font-size:8.5px;color:#566;line-height:1.5;margin-top:3px"
+            >目录来自 <code style="background:#eef3f9;color:#245;padding:0 3px">session/modelCatalog</code>，过滤发生在客户端。</div>
+        </div>
+        <div class="wbtn">开始筛选</div>
+      </div>
+      <div class="wvbar"><span class="dot"></span><span>WebView · 已启用 JS · 18 KB</span></div>
+      <div class="note" style="margin-top:10px;font-size:10px">
+        JS 按拍板<b>已开启</b>（效果图里的动效才跑得起来）；外链仍拦——点击只给提示，不在应用内开浏览器。
+      </div>
+    </div>
+  </div>
+  <div class="cap">HTML · <b>渲染 / 源码</b> 双页签</div>
+  </div>
+
+  <div class="spec">
+    <h4>目录浏览</h4>
+    <ul>
+      <li>面包屑是等宽字体、单行省略，<b>点任一节可跳回</b>；「返回上级」永远第一行（不靠系统返回键，抽屉里返回键要留给关抽屉）。</li>
+      <li>目录在前、文件在后，同类按名字排序；<code>.git</code> 等隐藏目录<b>默认收起</b>，底部「显示隐藏项」开关。</li>
+      <li>文件大小右对齐等宽；目录名用主色 + 文件夹图标。</li>
+      <li>cwd 若就是工作区根（<code>F:/bot</code> 826 项），列表<b>懒加载</b>：首屏 60 项，滚到底再取。</li>
+      <li>空目录给一句「这个目录是空的」，<b>不要空白页</b>。</li>
+    </ul>
+    <h4>HTML 渲染</h4>
+    <ul>
+      <li>文件页顶部出现 <b>渲染 / 源码</b> 双页签，<b>只有 <code>.html/.htm</code> 才有</b>，其余类型不出现。</li>
+      <li>渲染走 <code>AndroidView(WebView)</code>：<code>javaScriptEnabled = true</code>（已拍板）、<code>allowFileAccess = false</code>、<code>allowContentAccess = false</code>、<code>setBackgroundColor(白)</code>。</li>
+      <li>内容用 <code>loadDataWithBaseURL(null, html, "text/html", "utf-8", null)</code>——<b>不从 file:// 加载</b>，避免同源逃逸到工作区其它文件。</li>
+      <li><code>WebViewClient.shouldOverrideUrlLoading</code> 一律返回 true 拦截：外链给 Snackbar「已拦截外部链接」，不在应用内导航。</li>
+      <li><code>DisposableEffect</code> 里 <code>webView.destroy()</code>——WebView 是全 App 最容易泄漏的控件。</li>
+      <li>相对路径的图片会 404（<code>loadDataWithBaseURL(null…)</code> 没有 base）。<b>这是已知取舍</b>：要么接受 404，要么用 <code>loadDataWithBaseURL("https://localhost/", …)</code> + 重写 <code>shouldInterceptRequest</code> 去读工作区文件。前者便宜，后者完整——<b>这条请你在拍板时说一句</b>。</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ 5 -->
+<section>
+<h2><span class="n">5</span>亮色主题</h2>
+<div class="note">全部只用语义令牌。亮色下抽屉白底 + 浅描边、阴影减弱；圆环与堆叠条的七段色<b>不换</b>（语义色在两套主题下都能辨），只换底与文字。</div>
+<div class="row light" style="background:var(--background);padding:20px;border-radius:16px">
+  <div>
+  <div class="phone" data-fixed="1" style="height:685px">
+    <div class="status"><span>21:09</span><span>&#9679;&#9679;&#9679; &#9650; &#9646;</span></div>
+    <div class="topbar">
+      <div class="tb-back">&#8592;</div>
+      <div class="tb-mid"><div class="tb-t1">侧边栏的布局需要进行修改</div>
+        <div class="tb-t2">F:\dsh-plugin\model-filter</div></div>
+      <div class="tb-btn on">&#9776;</div>
+    </div>
+    <div class="msgs"></div>
+    <div class="sheet">
+      <div class="sh-head"><div class="sh-title">对话详情</div><div class="sh-close">&#10005;</div></div>
+      <div class="sh-tabs">
+        <div class="shtab on">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+          会话详情</div>
+        <div class="shtab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 7h6l2 2h10v10H3z"/></svg>
+          文件</div>
+      </div>
+      <div class="sh-body">
+        <div class="ctxb">
+          <div class="lbl">当前上下文占用</div>
+          <div class="big">156,634 <small>/ 1,000,000</small></div>
+          <div class="strip">
+            <div class="strip-cap"><span>窗口构成</span><span>已用 <b>15.7%</b></span></div>
+            <div class="stripbar">
+              <div class="sg" style="width:8.917%;background:var(--c-assistant)"></div>
+              <div class="sg" style="width:6.155%;background:var(--c-tool)"></div>
+              <div class="sg" style="width:0.485%;background:var(--c-inject)"></div>
+              <div class="sg" style="width:0.066%;background:var(--c-tools)"></div>
+              <div class="sg" style="width:0.014%;background:var(--c-skill)"></div>
+              <div class="sg" style="width:0.016%;background:var(--c-system)"></div>
+              <div class="sg" style="width:0.012%;background:var(--c-user)"></div>
+              <div class="free"></div>
+            </div>
+            <div class="stripaxis"><span>0</span><span style="left:50%">50%</span><span style="left:100%">1,000,000</span></div>
+          </div>
+        </div>
+        <div class="grp">
+          <div class="grp-h">本会话累计构成 <em>可点</em></div>
+          <div class="donutbox">
+          <div class="dwrap">
+            <svg class="donut" viewBox="0 0 42 42" style="transform:rotate(-90deg)">
+              <circle class="dtrack" cx="21" cy="21" r="15.9155"/>
+              <circle class="dseg" data-k="assistant" cx="21" cy="21" r="15.9155" stroke="var(--c-assistant)" stroke-dasharray="56.4220 43.5780" stroke-dashoffset="-0.2500"/>
+              <circle class="dseg" data-k="tool" cx="21" cy="21" r="15.9155" stroke="var(--c-tool)" stroke-dasharray="38.7920 61.2080" stroke-dashoffset="-57.1720"/>
+              <circle class="dseg" data-k="inject" cx="21" cy="21" r="15.9155" stroke="var(--c-inject)" stroke-dasharray="2.5967 97.4033" stroke-dashoffset="-96.4640"/>
+              <circle class="dseg" data-k="tools" cx="21" cy="21" r="15.9155" stroke="var(--c-tools)" stroke-dasharray="0.2106 99.7894" stroke-dashoffset="-99.4160"/>
+              <circle class="dseg" data-k="system" cx="21" cy="21" r="15.9155" stroke="var(--c-system)" stroke-dasharray="0.0507 99.9493" stroke-dashoffset="-99.7572"/>
+              <circle class="dseg" data-k="skill" cx="21" cy="21" r="15.9155" stroke="var(--c-skill)" stroke-dasharray="0.0454 99.9546" stroke-dashoffset="-99.8559"/>
+              <circle class="dseg" data-k="user" cx="21" cy="21" r="15.9155" stroke="var(--c-user)" stroke-dasharray="0.0381 99.9619" stroke-dashoffset="-99.9430"/>
+            </svg>
+            <div class="dcenter"><b>3.87M</b><span>累计 token</span></div>
+          </div>
+          <div class="dlegend">
+            <button class="dleg" data-k="assistant"><i style="background:var(--c-assistant)"></i><span class="nm">助手输出</span><b>2.20M</b><span class="pc">56.9%</span></button>
+            <button class="dleg" data-k="tool"><i style="background:var(--c-tool)"></i><span class="nm">工具结果</span><b>1.52M</b><span class="pc">39.3%</span></button>
+            <button class="dleg" data-k="inject"><i style="background:var(--c-inject)"></i><span class="nm">注入</span><b>119.8K</b><span class="pc">3.1%</span></button>
+            <button class="dleg" data-k="tools" data-unit="耗时"><i style="background:var(--c-tools)"></i><span class="nm">工具定义</span><b>16.3K</b><span class="pc">0.42%</span></button>
+            <button class="dleg" data-k="system"><i style="background:var(--c-system)"></i><span class="nm">系统提示</span><b>3.9K</b><span class="pc">0.10%</span></button>
+            <button class="dleg" data-k="skill"><i style="background:var(--c-skill)"></i><span class="nm">skill</span><b>3.5K</b><span class="pc">0.09%</span></button>
+            <button class="dleg" data-k="user"><i style="background:var(--c-user)"></i><span class="nm">用户输入</span><b>2.9K</b><span class="pc">0.08%</span></button>
+          </div>
+        </div>
+        <div class="dtotal"><span>合计 · 跨 46 轮 / 4,528 步</span><span>3,869,342</span></div>
+        <div class="dsel"></div>
+        </div>
+        
+          <div class="card">
+            <div class="card-h">费用 <span class="plug">插件</span></div>
+            <div class="kv"><span>未缓存输入</span><span>8.08M</span></div>
+            <div class="kv"><span>输出</span><span>2.66M</span></div>
+            <div class="kv tot"><span>合计</span><span>$4.38</span></div>
+          </div>
+          <div class="card">
+            <div class="card-h">耗时 <span class="plug">插件</span><em>230 tok/s</em></div>
+            <div class="donutbox">
+              <div class="dwrap" style="flex:0 0 92px;width:92px;height:92px">
+                <svg class="donut" viewBox="0 0 42 42" style="transform:rotate(-90deg);width:92px;height:92px">
+                  <circle class="dtrack" cx="21" cy="21" r="15.9155"/>
+              <circle class="dseg" data-k="ttft" cx="21" cy="21" r="15.9155" stroke="var(--c-ttft)" stroke-dasharray="9.0825 90.9175" stroke-dashoffset="-0.2500"/>
+              <circle class="dseg" data-k="reason" cx="21" cy="21" r="15.9155" stroke="var(--c-reason)" stroke-dasharray="6.5500 93.4500" stroke-dashoffset="-9.8325"/>
+              <circle class="dseg" data-k="text" cx="21" cy="21" r="15.9155" stroke="var(--c-text)" stroke-dasharray="43.2828 56.7172" stroke-dashoffset="-16.8824"/>
+              <circle class="dseg" data-k="toolarg" cx="21" cy="21" r="15.9155" stroke="var(--c-toolarg)" stroke-dasharray="5.8883 94.1117" stroke-dashoffset="-60.6652"/>
+              <circle class="dseg" data-k="tools" cx="21" cy="21" r="15.9155" stroke="var(--c-toolsx)" stroke-dasharray="32.6964 67.3036" stroke-dashoffset="-67.0536"/>
+                </svg>
+                <div class="dcenter"><b>24h21m</b><span data-sub="墙钟" data-sel="占比">墙钟</span></div>
+              </div>
+              <div class="dlegend">
+                <button class="dleg" data-k="ttft" data-unit="耗时"><i style="background:var(--c-ttft)"></i><span class="nm">首字等待</span><b>2h20m</b><span class="pc">9.6%</span></button>
+                <button class="dleg" data-k="reason" data-unit="耗时"><i style="background:var(--c-reason)"></i><span class="nm">推理</span><b>1h43m</b><span class="pc">7.1%</span></button>
+                <button class="dleg" data-k="text" data-unit="耗时"><i style="background:var(--c-text)"></i><span class="nm">正文生成</span><b>10h40m</b><span class="pc">43.8%</span></button>
+                <button class="dleg" data-k="toolarg" data-unit="耗时"><i style="background:var(--c-toolarg)"></i><span class="nm">工具参数</span><b>1h33m</b><span class="pc">6.4%</span></button>
+                <button class="dleg" data-k="tools" data-unit="耗时"><i style="background:var(--c-toolsx)"></i><span class="nm">工具执行</span><b>8h05m</b><span class="pc">33.2%</span></button>
+              </div>
+            </div>
+            <div class="dsel"></div>
+          </div>
+      </div>
+    </div>
+  </div>
+  <div class="cap">亮色 · 抽屉白底 + 浅描边</div>
+  </div>
+
+  <div>
+  <div class="phone" data-fixed="1">
+    <div class="status"><span>21:10</span><span>&#9679;&#9679;&#9679; &#9650; &#9646;</span></div>
+    <div class="sh-head" style="padding-top:10px">
+      <div class="sh-title">对话详情</div><div class="sh-close">&#10005;</div>
+    </div>
+    <div class="sh-tabs">
+      <div class="shtab">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        会话详情</div>
+      <div class="shtab on">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 7h6l2 2h10v10H3z"/></svg>
+        文件</div>
+    </div>
+    <div class="sh-body" style="flex:1">
+      <div class="fhead"><span class="t">工作区文件</span><span class="line"></span><span class="c">14 项</span></div>
+      <div class="crumb"><b>model-filter</b></div>
+      <div class="frow dir"><span class="ico">&#128193;</span><span class="nm">docs</span></div>
+      <div class="frow dir"><span class="ico">&#128193;</span><span class="nm">packages</span></div>
+      <div class="frow"><span class="ico">&#128196;</span><span class="nm">README.md</span><span class="sz">6.1K</span></div>
+      <div class="frow"><span class="ico">&#128196;</span><span class="nm">package.json</span><span class="sz">1.4K</span></div>
+      <div class="frow"><span class="ico">&#128196;</span><span class="nm">tsconfig.json</span><span class="sz">612</span></div>
+      <div class="frow"><span class="ico">&#128196;</span><span class="nm">cordis.patch.yml</span><span class="sz">2.8K</span></div>
+      <div class="frow dir"><span class="ico">&#128193;</span><span class="nm">scripts</span></div>
+      <div class="frow dir"><span class="ico">&#128193;</span><span class="nm">.dsh</span></div>
+      <div class="frow"><span class="ico">&#128196;</span><span class="nm">pnpm-workspace.yaml</span><span class="sz">89</span></div>
+      <div class="note" style="margin-top:14px;font-size:10px">
+        文件视图与插件无关：没装插件也能正常浏览、预览。
+      </div>
+    </div>
+  </div>
+  <div class="cap">亮色 · 文件视图（与插件无关，始终可用）</div>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ 6 -->
+<section>
+<h2><span class="n">6</span>数据来源与降级判定</h2>
+<div class="row">
+  <div class="spec" style="max-width:none;flex:1">
+    <h4>取数（一次读，之后走已在跑的流）</h4>
+    <ul>
+      <li><code>session/projections {request:{sessionId}}</code> → <code>values</code>。<b>打开抽屉时读一次</b>；整包实测 <b>≈88 KB</b>（25 个键，不支持只取指定键），所以<b>不能轮询</b>（3s 一次 = ≈30 KB/s）。</li>
+      <li>之后靠 <code>session/control</code> 那条<b>已经在跑</b>的投影流：它每帧自带投影增量，<b>零额外流量</b>。关抽屉即停渲染订阅。</li>
+      <li>文件走 <code>workspaceFiles/list</code>（<b>扁平参数</b> <code>{workspaceFileScopeId, path}</code>，根路径用 <code>.</code>），按需拉取，不进上面的流。</li>
+    </ul>
+    <h4>哪些键来自哪里（实测，不是推测）</h4>
+    <table class="t">
+      <tr><th>投影键</th><th>本机实测大小</th><th>来源</th><th>用途</th></tr>
+      <tr><td><code>contextPressure</code></td><td>74 B</td><td class="yes">核心</td><td>当前占用 / 进度条</td></tr>
+      <tr><td><code>contextBreakdown</code></td><td>65 B</td><td class="yes">核心</td><td>三段降级</td></tr>
+      <tr><td><code>tokenUsage</code></td><td>103 B</td><td class="yes">核心</td><td>用量四行</td></tr>
+      <tr><td><code>sessionStats</code></td><td>138 B</td><td class="yes">核心</td><td>轮数 / 步数 / 耗时</td></tr>
+      <tr><td><code>contextTimeline</code></td><td>1,935 B</td><td class="no">dsh-context</td><td>七段 + 详细耗时</td></tr>
+      <tr><td><code>contextHeaders</code></td><td>70,219 B</td><td class="no">dsh-context</td><td><b>不用</b>（太重）</td></tr>
+      <tr><td><code>contextActivity</code></td><td>969 B</td><td class="no">dsh-context</td><td>按天活跃（暂不用）</td></tr>
+      <tr><td><code>costUsage</code></td><td>652 B</td><td class="no">dsh-cost-meter</td><td>费用</td></tr>
+    </table>
+    <h4>判定逻辑（一行代码的事）</h4>
+    <ul>
+      <li><code>values["contextTimeline"]</code> 存在 → 七段 + 堆叠条 + 详细耗时。</li>
+      <li>否则 <code>values["contextBreakdown"]</code> 存在 → 三段 + 醒目提示。</li>
+      <li>两者都没有 → 只显示占用进度条与<code>tokenUsage</code>，提示条文案换成「连基础统计都没返回，可能是桌面端版本过旧」。</li>
+      <li><code>costUsage</code> 单独判：有就渲染费用卡，没有就整块不出现（不显示 $0.00 冒充）。</li>
+    </ul>
+    <h4>这一轮按你要求改的三处</h4>
+    <ul>
+      <li><b>① 顶部导航</b>：会话详情 / 文件两格，一个功能一个视图。</li>
+      <li><b>② 插件态多显示</b>：插件格式堆叠上下文条 + 费用（含按模型）+ 耗时圆环（含按工具 Top）。</li>
+      <li><b>③ 降级态</b>：三段圆环 + 琥珀色醒目提示，写明装了会多什么。</li>
+    </ul>
+    <div class="warn">
+      <b>还有一条要你定</b>：HTML 里的相对路径资源（<code>&lt;img src="logo.png"&gt;</code>）在 <code>loadDataWithBaseURL(null…)</code> 下会 404。<br>
+      <b>A</b>（便宜）：接受 404，只保证内联样式与脚本的页面正常——本仓库这些效果图属于这一类。<br>
+      <b>B</b>（完整）：<code>baseUrl</code> 设成一个假域名 + 在 <code>shouldInterceptRequest</code> 里把请求映射回 <code>workspaceFiles/readBytes</code> 读真实文件——多约 40 行代码，图片/子页面都能显示。<br>
+      我倾向 <b>B</b>：你已经装了 <code>R031-app-icon.png</code> 这类同目录图片，A 会在真机上留下「图片全裂」的观感。
+    </div>
+  </div>
+</div>
+</section>
+
+</div>
+
+<script>
+(function(){
+  // .dsel 与 .donutbox 是兄弟关系（在 .grp 或 .card 里），必须往上找一层容器
+  function hostOf(box){ return box.closest('.grp') || box.closest('.card') || box.parentElement; }
+  function dselOf(box){ var h = hostOf(box); return h ? h.querySelector('.dsel') : null; }
+  // 圆心副标题的默认文案与选中后文案，由 data-sub / data-sel 提供（累计 token / 占累计，或 墙钟 / 占比）
+  function subOf(box){ var sp = box.querySelector('.dcenter span'); return sp.dataset.sub || '累计 token'; }
+  function selOf(box){ var sp = box.querySelector('.dcenter span'); return sp.dataset.sel || '占累计'; }
+
+  function reset(box){
+    var svg = box.querySelector('.donut');
+    var c = box.querySelector('.dcenter b');
+    if (!c.dataset.home) c.dataset.home = c.textContent;
+    svg.classList.remove('dim');
+    box.querySelectorAll('.dseg.on,.dleg.on').forEach(function(n){ n.classList.remove('on'); });
+    var d = dselOf(box);
+    if (d) d.classList.remove('show');
+    c.textContent = c.dataset.home;
+    box.querySelector('.dcenter span').textContent = subOf(box);
+  }
+
+  function select(box, key){
+    var svg = box.querySelector('.donut');
+    var legs = box.querySelectorAll('.dleg');
+    var current = svg.querySelector('.dseg.on');
+    if (current && current.dataset.k === key) { reset(box); return; }
+    box.querySelectorAll('.dseg').forEach(function(c){ c.classList.toggle('on', c.dataset.k === key); });
+    legs.forEach(function(b){ b.classList.toggle('on', b.dataset.k === key); });
+    svg.classList.add('dim');
+    var leg = null;
+    for (var j = 0; j < legs.length; j++) if (legs[j].dataset.k === key) leg = legs[j];
+    if (!leg) return;
+    var c = box.querySelector('.dcenter b');
+    if (!c.dataset.home) c.dataset.home = c.textContent;
+    var label = leg.querySelector('.nm').textContent;
+    var val = leg.querySelector('b').textContent;
+    var pct = leg.querySelector('.pc').textContent;
+    c.textContent = pct;
+    box.querySelector('.dcenter span').textContent = selOf(box);
+    var dsel = dselOf(box);
+    if (!dsel) return;
+    var color = leg.querySelector('i').style.background;
+    var unit = leg.dataset.unit || 'tokens';
+    dsel.innerHTML = '<i style="background:' + color + '"></i>' +
+      '<span class="nm"></span><span class="vv"></span>';
+    dsel.querySelector('.nm').textContent = label;
+    dsel.querySelector('.vv').textContent = val + ' ' + unit + ' · ' + pct;
+    dsel.classList.add('show');
+  }
+
+  document.querySelectorAll('.donutbox').forEach(function(box){
+    box.querySelectorAll('.dseg').forEach(function(seg){
+      seg.addEventListener('click', function(ev){ ev.stopPropagation(); select(box, seg.dataset.k); });
+    });
+    box.querySelectorAll('.dleg').forEach(function(btn){
+      btn.addEventListener('click', function(ev){ ev.stopPropagation(); select(box, btn.dataset.k); });
+    });
+  });
+
+  document.addEventListener('click', function(){
+    document.querySelectorAll('.donutbox').forEach(function(box){
+      if (box.querySelector('.donut').classList.contains('dim')) reset(box);
+    });
+  });
+})();
+</script>
+</body>
+</html>

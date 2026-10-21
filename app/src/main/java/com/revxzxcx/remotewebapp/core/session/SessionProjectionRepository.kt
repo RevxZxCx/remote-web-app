@@ -31,13 +31,29 @@ class SessionProjectionRepository(
 
     /** 一次 unary 读：提问 + 权限两个投影。会话不存在时两个都是 null（服务端回 `null`）。 */
     suspend fun read(sessionId: String): ProjectionSnapshot = withContext(Dispatchers.IO) {
-        val raw = connection.typert.callRaw(DshEndpoints.SESSION_PROJECTIONS, ChatArgs.projections(sessionId))
-        if (raw is JsonNull) return@withContext ProjectionSnapshot.EMPTY
-        val values = (raw as? JsonObject)?.get("values") as? JsonObject
+        val values = readValues(sessionId)
         ProjectionSnapshot(
             questions = userQuestionsOf(values),
             permission = permissionOf(values),
+            values = values,
         )
+    }
+
+    /**
+     * 一次 unary 读，返回**原始的 `values` 对象**。
+     *
+     * 给「对话详情」侧边栏用：那边要的是 `contextTimeline` / `costUsage` / `tokenUsage` /
+     * `contextPressure` / `contextBreakdown` / `sessionStats` 六个键，且**一次读全**
+     * （响应 ≈88 KB，其中 `contextHeaders` 70 KB + `turnOutline` 11 KB 占了绝大部分，
+     * 但 descriptor 不支持只取指定键，所以要么全拿要么不拿）。
+     *
+     * 会话不存在时服务端整体回 `null`，这里返回 null 而不是空对象——调用方据此区分
+     * 「会话没了」与「会话还在但没有这些投影」。
+     */
+    suspend fun readValues(sessionId: String): JsonObject? = withContext(Dispatchers.IO) {
+        val raw = connection.typert.callRaw(DshEndpoints.SESSION_PROJECTIONS, ChatArgs.projections(sessionId))
+        if (raw is JsonNull) return@withContext null
+        (raw as? JsonObject)?.get("values") as? JsonObject
     }
 
     /** 只读提问投影（生成中周期重读用，比 [read] 少解析一个键）。 */
@@ -114,6 +130,13 @@ class SessionProjectionRepository(
     data class ProjectionSnapshot(
         val questions: UserQuestionsSnapshot? = null,
         val permission: PermissionSnapshot? = null,
+        /**
+         * 同一次响应的原始 `values`。
+         *
+         * 带出来是为了让「问一次拿三个键」成为可能：`session/projections` 一次 88 KB，
+         * 侧边栏再单独发一次请求就是白拉第二遍 88 KB。
+         */
+        val values: JsonObject? = null,
     ) {
         companion object {
             val EMPTY = ProjectionSnapshot()

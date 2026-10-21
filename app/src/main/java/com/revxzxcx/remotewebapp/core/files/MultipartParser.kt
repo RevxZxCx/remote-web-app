@@ -160,6 +160,8 @@ enum class FileKind {
     TEXT,
     IMAGE,
     PDF,
+    /** HTML：可用 WebView 渲染（用户 m21945 拍板「要 WebView 渲染」）。 */
+    HTML,
     BINARY,
     ;
 
@@ -173,6 +175,9 @@ enum class FileKind {
                 "md", "markdown", "mdown" -> MARKDOWN
                 "png", "jpg", "jpeg", "webp", "gif", "bmp" -> IMAGE
                 "pdf" -> PDF
+                // HTML 单列一类而不是归 CODE（R040）：它不是「读文本」的场景，
+                // 默认视图是渲染结果，源码是第二个页签。
+                "html", "htm" -> HTML
                 in CODE_EXTENSIONS -> CODE
                 "txt", "log", "csv", "tsv", "json", "xml", "yaml", "yml", "toml", "ini", "cfg", "properties" -> TEXT
                 "" -> TEXT
