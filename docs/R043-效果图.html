@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>R043 效果图 · 中断报错可见 + 输入区加号菜单</title>
+<style>
+:root{
+  --primary:#5AA2FF; --onPrimary:#04121F;
+  --background:#0B1420; --onBackground:#E6EFFA;
+  --surface:#111C2B; --onSurface:#E6EFFA;
+  --surfaceVariant:#1A2942; --onSurfaceVariant:#9BB0C8;
+  --outline:#31485F; --outlineVariant:#22334A;
+  --tertiary:#F2C14E; --running:#4ADE80; --error:#FF8A80;
+  --r-xs:6px; --r-sm:10px; --r-md:14px; --r-lg:20px; --r-xl:28px; --r-pill:999px;
+  --t-fast:140ms; --t-med:240ms; --t-slow:360ms;
+  --ease:cubic-bezier(.2,0,0,1);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:#060B12;color:var(--onBackground);
+  font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:13px;line-height:1.6;padding:28px 24px 80px;
+}
+.wrap{max-width:1560px;margin:0 auto}
+h1{font-size:19px;font-weight:600;letter-spacing:.2px}
+.sub{color:var(--onSurfaceVariant);font-size:12px;margin-top:6px;line-height:1.8}
+.sub code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.sub code{font-size:11px;background:var(--surfaceVariant);padding:1px 5px;border-radius:var(--r-xs);color:#cfe0f5}
+h2{font-size:13.5px;font-weight:600;margin:34px 0 3px;display:flex;align-items:center;gap:9px;
+  padding-top:18px;border-top:1px solid var(--outlineVariant)}
+h2 .n{width:19px;height:19px;border-radius:50%;background:var(--primary);color:var(--onPrimary);
+  font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.lead{color:var(--onSurfaceVariant);font-size:11.5px;line-height:1.75;margin:0 0 14px 28px;max-width:1200px}
+.lead b{color:var(--tertiary);font-weight:600}
+.row{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;margin-left:0}
+
+/* ---------- 手机样机 ---------- */
+.phone{width:340px;background:var(--background);border:1px solid var(--outline);
+  border-radius:var(--r-lg);overflow:hidden;display:flex;flex-direction:column;flex:0 0 auto}
+.phone.light{background:#F4F7FB;border-color:#B9C8D9;
+  --background:#F4F7FB;--onBackground:#182430;--surface:#FFFFFF;--onSurface:#182430;
+  --surfaceVariant:#E9EFF7;--onSurfaceVariant:#45586D;--outline:#B9C8D9;--outlineVariant:#DCE5EF;
+  --primary:#1F6FEB;--onPrimary:#FFFFFF;--tertiary:#C08A12;--error:#B3261E;--running:#15803D;}
+.sbar{height:26px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 13px;font-size:10.5px;color:var(--onSurfaceVariant);flex:0 0 auto}
+.sbar .r{display:flex;gap:5px;align-items:center;opacity:.8}
+.tb{height:48px;display:flex;align-items:center;gap:9px;padding:0 11px;
+  border-bottom:1px solid var(--outlineVariant);flex:0 0 auto}
+.tb .t1{font-size:13.5px;font-weight:600;line-height:1.25}
+.tb .t2{font-size:10px;color:var(--onSurfaceVariant);line-height:1.3;margin-top:1px}
+.tb .grow{flex:1;min-width:0}
+.ib{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  color:var(--onSurfaceVariant);flex:0 0 auto}
+.ib.on{background:var(--primary);color:var(--onPrimary)}
+.body{flex:1;min-height:0;padding:10px 11px;display:flex;flex-direction:column;gap:9px;overflow:hidden}
+
+/* ---------- 消息 ---------- */
+.msg{display:flex;flex-direction:column;gap:5px}
+.msg .who{font-size:9.5px;color:var(--onSurfaceVariant);opacity:.7;letter-spacing:.3px}
+.bub{background:var(--surface);border:1px solid var(--outlineVariant);border-radius:var(--r-md);
+  padding:8px 10px;font-size:11.5px;line-height:1.65}
+.bub.u{margin-left:52px;background:var(--primary);color:var(--onPrimary);border:0;border-radius:var(--r-md)}
+.bub .ell{color:var(--onSurfaceVariant)}
+.round{display:flex;align-items:center;gap:9px;color:var(--onSurfaceVariant);
+  font-size:9.5px;padding:2px 0}
+.round .ln{flex:1;height:1px;background:var(--outlineVariant)}
+
+/* ---------- ① 轮次结果卡（本次核心） ---------- */
+.turn{margin:2px 0;border-radius:var(--r-md);border:1px solid;overflow:hidden;background:var(--surface)}
+.turn.fail{border-color:rgba(255,138,128,.45)}
+.turn.cut{border-color:rgba(242,193,78,.45)}
+.turn.stop{border-color:var(--outline)}
+.turn .h{display:flex;align-items:center;gap:8px;padding:9px 10px 8px}
+.turn .ico{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  flex:0 0 auto}
+.turn.fail .ico{background:rgba(255,138,128,.16);color:var(--error)}
+.turn.cut .ico{background:rgba(242,193,78,.16);color:var(--tertiary)}
+.turn.stop .ico{background:var(--surfaceVariant);color:var(--onSurfaceVariant)}
+.turn .ttl{font-size:11.5px;font-weight:600;flex:1;min-width:0;line-height:1.4}
+.turn .tag{font-size:9px;padding:1px 6px;border-radius:var(--r-pill);border:1px solid;
+  font-family:ui-monospace,monospace;flex:0 0 auto;letter-spacing:.2px}
+.turn.fail .tag{color:var(--error);border-color:rgba(255,138,128,.4);background:rgba(255,138,128,.08)}
+.turn.cut .tag{color:var(--tertiary);border-color:rgba(242,193,78,.4);background:rgba(242,193,78,.08)}
+.turn.stop .tag{color:var(--onSurfaceVariant);border-color:var(--outline);background:var(--surfaceVariant)}
+.turn .b{padding:0 10px 9px 40px;font-size:11px;line-height:1.7;color:var(--onSurfaceVariant)}
+.turn .b .k{color:var(--onSurface);font-family:ui-monospace,monospace;font-size:10.5px}
+.turn .b .errtext{margin-top:5px;background:#0A121D;border:1px solid var(--outlineVariant);
+  border-radius:var(--r-sm);padding:7px 8px;font-family:ui-monospace,monospace;font-size:10px;
+  line-height:1.6;color:#c8d8ec;max-height:64px;overflow:hidden;
+  word-break:break-all;overflow-wrap:anywhere;
+  -webkit-mask-image:linear-gradient(180deg,#000 55%,transparent);mask-image:linear-gradient(180deg,#000 55%,transparent)}
+.phone.light .turn .b .errtext{background:#F7FAFD;color:#2C3E50}
+.turn .acts{display:flex;align-items:center;gap:6px;padding:0 10px 9px 40px}
+.turn .meta{font-size:9.5px;color:var(--onSurfaceVariant);opacity:.65;flex:1}
+.btn{height:26px;padding:0 11px;border-radius:var(--r-pill);font-size:10.5px;
+  display:inline-flex;align-items:center;gap:5px;border:1px solid;white-space:nowrap}
+.btn.pri{background:var(--primary);color:var(--onPrimary);border-color:transparent;font-weight:600}
+.btn.ghost{background:transparent;color:var(--onSurfaceVariant);border-color:var(--outline)}
+.btn.warn{background:transparent;color:var(--tertiary);border-color:rgba(242,193,78,.45)}
+
+/* ---------- 输入区 ---------- */
+.dock{border-top:1px solid var(--outlineVariant);padding:8px 10px 10px;flex:0 0 auto;background:var(--background)}
+.fieldrow{display:flex;align-items:center;gap:7px;background:var(--surface);border-radius:var(--r-lg);
+  padding:6px 8px;border:1px solid var(--outlineVariant)}
+.ph{flex:1;font-size:11.5px;color:var(--onSurfaceVariant);opacity:.75;min-width:0}
+.plus{width:32px;height:32px;border-radius:50%;background:var(--surfaceVariant);
+  display:flex;align-items:center;justify-content:center;position:relative;flex:0 0 auto}
+.plus.on{background:var(--primary);color:var(--onPrimary)}
+.plus svg{width:15px;height:15px}
+.snd{width:32px;height:32px;border-radius:50%;background:var(--primary);color:var(--onPrimary);
+  display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.snd svg{width:15px;height:15px}
+
+/* ---------- 图例 / 表格 ---------- */
+.legend{margin-left:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:8px 22px;max-width:1240px}
+.lg{display:flex;gap:8px;font-size:11px;line-height:1.65;color:var(--onSurfaceVariant)}
+.lg .d{width:7px;height:7px;border-radius:2px;flex:0 0 auto;margin-top:6px}
+.lg b{color:var(--onSurface);font-weight:600}
+table{border-collapse:collapse;font-size:11px;margin:0 0 6px}
+th,td{border:1px solid var(--outlineVariant);padding:6px 9px;text-align:left;vertical-align:top}
+th{background:var(--surfaceVariant);color:var(--onSurface);font-weight:600;font-size:10.5px}
+td.mono{font-family:ui-monospace,monospace;font-size:10px;color:#c8d8ec}
+.caption{font-size:10.5px;color:var(--onSurfaceVariant);text-align:center;margin-top:7px;line-height:1.6}
+.caption b{color:var(--onSurface);font-weight:600}
+.tag2{display:inline-block;font-size:9.5px;padding:1px 6px;border-radius:var(--r-pill);
+  background:var(--surfaceVariant);color:var(--onSurfaceVariant);margin-right:5px;font-family:ui-monospace,monospace}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>R043 效果图 · 中断报错可见 + 输入区「＋」菜单</h1>
+<div class="sub">
+两处改动：<b>①</b> 轮次异常结束（模型报错 / 输出被截断 / 被中止 / 上下文超限 / 断流）现在只剩一句「第 N 轮结束」，
+错误全文被丢掉；改成按类型渲染的<b>轮次结果卡</b>。&nbsp;
+<b>②</b> 输入区「＋」现在只弹一个「选图片 / 选文件」的对话框；改成与桌面端同构的<b>「＋」面板</b>：
+添加类（图片 / 文件 / 引用）＋ 快捷类（目标 / 计划）＋ 全部命令（<code>commands/list</code> 实测 19 条）。
+</div>
+
+<h2><span class="n">1</span>现在 vs 改后：一次失败轮次长什么样</h2>
+<div class="lead">
+根因不是「没做 UI」，而是<b>解析器把对象当字符串读了</b>。<code>turn/end</code> 的 <code>data.reason</code> 是对象
+（<code>{kind:"error", error:{message, code}}</code>），App 侧 <code>stringOrNull("reason")</code> 只认 <code>JsonPrimitive</code> 字符串，
+于是恒为 <code>null</code> → 渲染成「第 N 轮结束」。<b>服务端已经把错误原文递到手里了，只是被丢掉。</b>
+</div>
+<div class="row">
+  <div>
+    <div class="phone">
+      <div class="sbar"><span>09:41</span><span class="r">5G ▮▮▮ 82</span></div>
+      <div class="tb">
+        <div class="ib">←</div>
+        <div class="grow"><div class="t1">开发（new）</div><div class="t2">F:\bot</div></div>
+        <div class="ib">⋮</div>
+      </div>
+      <div class="body">
+        <div class="msg"><div class="bub u">把这个模块的重试逻辑补上</div></div>
+        <div class="msg">
+          <div class="who">助手</div>
+          <div class="bub">我先看 <span class="mono" style="font-size:10.5px">RetryPolicy.kt</span> 的现有实现，再补指数退避和抖动。</div>
+        </div>
+        <div class="round"><span class="ln"></span>第 12 轮结束<span class="ln"></span></div>
+        <div class="msg"><div class="bub u">继续</div></div>
+        <div class="round"><span class="ln"></span>第 13 轮结束<span class="ln"></span></div>
+      </div>
+      <div class="dock">
+        <div class="fieldrow">
+          <div class="plus">＋</div>
+          <div class="ph">描述你的任务，或先聊几句…</div>
+          <div class="snd">↑</div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>现在</b>：第 13 轮失败了（429 限流）<br>界面上只有一行灰字，用户只能点「继续」</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="sbar"><span>09:41</span><span class="r">5G ▮▮▮ 82</span></div>
+      <div class="tb">
+        <div class="ib">←</div>
+        <div class="grow"><div class="t1">开发（new）</div><div class="t2">F:\bot</div></div>
+        <div class="ib">⋮</div>
+      </div>
+      <div class="body">
+        <div class="msg"><div class="bub u">把这个模块的重试逻辑补上</div></div>
+        <div class="msg">
+          <div class="who">助手</div>
+          <div class="bub">我先看 <span class="mono" style="font-size:10.5px">RetryPolicy.kt</span> 的现有实现，再补指数退避和抖动。</div>
+        </div>
+        <div class="round"><span class="ln"></span>第 12 轮结束<span class="ln"></span></div>
+        <div class="msg"><div class="bub u">继续</div></div>
+
+        <div class="turn fail">
+          <div class="h">
+            <div class="ico">!</div>
+            <div class="ttl">本轮失败 · 模型限流</div>
+            <div class="tag">RATE_LIMIT</div>
+          </div>
+          <div class="b">
+            <div class="k">第 13 轮 · 09:41</div>
+            <div class="errtext">429 {"error":{"message":"UID rate limit reached for TPM for UID","type":"rate_limit_exceeded_error","code":"rate_limit_tpm_exceeded"}}</div>
+          </div>
+          <div class="acts">
+            <div class="meta">1 次重试后仍失败</div>
+            <div class="btn ghost">复制</div>
+            <div class="btn pri">重试本轮</div>
+          </div>
+        </div>
+      </div>
+      <div class="dock">
+        <div class="fieldrow">
+          <div class="plus">＋</div>
+          <div class="ph">描述你的任务，或先聊几句…</div>
+          <div class="snd">↑</div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>改后</b>：错误码 + 原文 + 时间 + 动作<br>「重试本轮」直接重发，不用手打「继续」</div>
+  </div>
+</div>
+<h2><span class="n">2</span>五种轮次结局，五种卡（不是四种错误塞进一个样式）</h2>
+<div class="lead">
+真实日志里 <code>turn/end.reason.kind</code> 只出现这几类，各自该给的建议完全不同：限流要等、截断要接着写、
+超限要压缩或换模型、被中止是用户自己按的、断流要重连。<b>用一张通用「出错了」卡片会让用户用错对策。</b>
+下表是从 130 个真实会话里统计出来的分布，样例文案取自真实日志原文。
+</div>
+<div class="row">
+  <div>
+    <div class="phone">
+      <div class="sbar"><span>09:41</span><span class="r">5G ▮▮▮ 82</span></div>
+      <div class="tb"><div class="ib">←</div><div class="grow"><div class="t1">开发（new）</div><div class="t2">F:\bot</div></div><div class="ib">⋮</div></div>
+      <div class="body">
+        <div class="turn cut">
+          <div class="h"><div class="ico">▤</div><div class="ttl">输出被截断</div><div class="tag">max-tokens</div></div>
+          <div class="b">
+            <div class="k">第 8 轮 · 10:22</div>
+            模型达到单轮输出上限，这一轮的话没说完。已产出的部分在上面，可以直接让它接着写。
+          </div>
+          <div class="acts"><div class="meta">已产出 4 段</div><div class="btn ghost">复制</div><div class="btn warn">继续写</div></div>
+        </div>
+        <div class="turn stop">
+          <div class="h"><div class="ico">■</div><div class="ttl">本轮已中止</div><div class="tag">user</div></div>
+          <div class="b"><div class="k">第 9 轮 · 10:25</div>你按了停止。已落盘的内容保留。</div>
+          <div class="acts"><div class="meta">用时 12s</div><div class="btn ghost">继续</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>截断 / 用户中止</b><br>中性色；中止是用户自己的动作，不该报警</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="sbar"><span>09:41</span><span class="r">5G ▮▮▮ 82</span></div>
+      <div class="tb"><div class="ib">←</div><div class="grow"><div class="t1">开发（new）</div><div class="t2">F:\bot</div></div><div class="ib">⋮</div></div>
+      <div class="body">
+        <div class="turn fail">
+          <div class="h"><div class="ico">!</div><div class="ttl">上下文超出模型窗口</div><div class="tag">HTTP_413</div></div>
+          <div class="b">
+            <div class="k">第 31 轮 · 11:04</div>
+            这一轮的上下文放不进模型窗口，请求没有发出去。
+            <div class="errtext">413: payload core text alone is ~34158473 bytes — that is ≥ ~4554464 tokens vs the model window 768000; no upstream can accept it, so it was NOT forwarded.</div>
+          </div>
+          <div class="acts"><div class="meta">占用 4.6M / 768K</div><div class="btn ghost">查看上下文</div><div class="btn pri">压缩后重试</div></div>
+        </div>
+        <div class="turn fail">
+          <div class="h"><div class="ico">!</div><div class="ttl">本轮失败 · 未登录</div><div class="tag">MISSING_CREDENTIAL</div></div>
+          <div class="b"><div class="k">第 32 轮 · 11:09</div>这个 provider 还没有 api key。
+              <div class="errtext">llm-deepseek: no API key for provider route "deepseek-official"; store DEEPSEEK_API_KEY through the credentials service, or export it in the launching environment</div>
+            </div>
+          <div class="acts"><div class="meta">桌面端可修复</div><div class="btn ghost">复制</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>上下文超限 / 凭证缺失</b><br>给「去桌面端配」，不给「重试」</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="sbar"><span>09:41</span><span class="r">5G ▮▮▮ 82</span></div>
+      <div class="tb"><div class="ib">←</div><div class="grow"><div class="t1">开发（new）</div><div class="t2">F:\bot</div></div><div class="ib">⋮</div></div>
+      <div class="body">
+        <div class="turn fail">
+          <div class="h"><div class="ico">!</div><div class="ttl">本轮失败 · 上游 502</div><div class="tag">SERVER</div></div>
+          <div class="b"><div class="k">第 5 轮 · 12:10</div>
+            <div class="errtext">ustc API error (502): 502 "acp-proxy failure"</div>
+          </div>
+          <div class="acts"><div class="meta">可重试</div><div class="btn ghost">复制</div><div class="btn pri">重试本轮</div></div>
+        </div>
+        <div class="turn fail">
+          <div class="h"><div class="ico">✂</div><div class="ttl">输出流中断</div><div class="tag">TRANSPORT</div></div>
+          <div class="b">
+            <div class="k">第 6 轮 · 12:12</div>
+            连接在完成前断开了，这一轮的内容不完整。
+            <div class="errtext">our free model closed the stream before its finish token, without answering</div>
+          </div>
+          <div class="acts"><div class="meta">已收到 2 段</div><div class="btn ghost">复制</div><div class="btn pri">重新生成</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>上游错误 / 断流</b><br>断流标注「内容不完整」，免得把半截话当结论</div>
+  </div>
+</div>
+
+<h2><span class="n">3</span>解析映射表（服务端给什么 → 界面显示什么）</h2>
+<div class="lead">
+左侧是 <code>turn/end</code> 事件 <code>data.reason</code> 的原始形状（全部实测自本机 130 个会话、645 次轮次结束）；
+右侧是 App 要呈现的样子。<b>已经给出 <code>error.message</code> 的，必须原样展示</b>——转述会把
+「额度已用完」「没有 API key」这类可直接行动的信息揉成一句「出错了」。
+</div>
+<div class="row" style="gap:26px">
+<table>
+<tr><th>reason.kind</th><th>真实次数</th><th>卡片</th><th>主按钮</th></tr>
+<tr><td class="mono">error</td><td>~48</td><td>本轮失败（红）<br><span class="tag2">按 error.code 细分标题</span></td><td>按 code 决定：可重试给「重试本轮」，凭证/额度类不给</td></tr>
+<tr><td class="mono">max-tokens</td><td>33</td><td>输出被截断（琥珀）</td><td>继续写</td></tr>
+<tr><td class="mono">aborted · user</td><td>73</td><td>本轮已中止（中性）</td><td>继续</td></tr>
+<tr><td class="mono">aborted · parent / disposed</td><td>3</td><td>本轮已中止（中性）<br><span class="tag2">不写「你按了停止」</span></td><td>—</td></tr>
+<tr><td class="mono">blocked</td><td>7</td><td>等待批准 / 被阻止（琥珀）</td><td>去处理</td></tr>
+<tr><td class="mono">interrupted</td><td>5</td><td>输出流中断（红）</td><td>重新生成</td></tr>
+<tr><td class="mono">completed</td><td>465</td><td>保持现状「第 N 轮结束」（灰细线）</td><td>—</td></tr>
+</table>
+<table>
+<tr><th>error.code</th><th>标题文案</th><th>是否给「重试」</th></tr>
+<tr><td class="mono">RATE_LIMIT</td><td>模型限流</td><td>给（附「1 次重试后仍失败」）</td></tr>
+<tr><td class="mono">QUOTA_EXCEEDED</td><td>额度已用完</td><td><b>不给</b>，改「去桌面端查看」</td></tr>
+<tr><td class="mono">MISSING_CREDENTIAL</td><td>未登录 / 无密钥</td><td><b>不给</b>，原文明说去哪配</td></tr>
+<tr><td class="mono">INVALID_REQUEST</td><td>请求被拒绝</td><td>给，但提示「换模型试试」</td></tr>
+<tr><td class="mono">HTTP_413</td><td>上下文超出窗口</td><td>给「压缩后重试」</td></tr>
+<tr><td class="mono">SERVER / TRANSPORT</td><td>上游错误 / 断流</td><td>给</td></tr>
+<tr><td class="mono">REASONING_LOOP</td><td>思考陷入重复</td><td>给，并建议降档/换模型</td></tr>
+<tr><td class="mono">其他</td><td>本轮失败</td><td>给（保守：未知错误先允许重试）</td></tr>
+</table>
+</div>
+<div class="lead" style="margin-top:12px">
+<b>一条硬约束</b>：错误原文里可能带 <code>request_id</code>、账号 UID、密钥提示路径。卡片默认<b>折到 3 行</b>并渐隐，
+点一下展开全文；「复制」只复制原文，方便贴给别人排查。<b>不做任何删除或改写</b>——排查时缺一个字符就可能是另一回事。
+</div>
+<h2><span class="n">4</span>输入区「＋」：现在是二选一对话框，改后是完整面板</h2>
+<div class="lead">
+桌面端那个加号的 <code>aria-label</code> 就是「<b>添加文件或调用指令</b>」，点下去执行的是
+<code>toggleSource("command", {trigger:"/"})</code> —— 也就是说<b>它和输入 <code>/</code> 打开的是同一个菜单</b>，
+不是独立的附件菜单。所以手机端也不该只有「选图片 / 选文件」两项。
+</div>
+<div class="row">
+  <div>
+    <div class="phone">
+      <div class="sbar"><span>09:41</span><span class="r">5G ▮▮▮ 82</span></div>
+      <div class="tb"><div class="ib">←</div><div class="grow"><div class="t1">开发（new）</div><div class="t2">F:\bot</div></div><div class="ib">⋮</div></div>
+      <div class="body">
+        <div class="msg"><div class="bub u">帮我把 R042 的测试补一下</div></div>
+        <div class="msg"><div class="who">助手</div><div class="bub">好，我先看现有覆盖……</div></div>
+      </div>
+      <div class="dock">
+        <div style="background:var(--surface);border:1px solid var(--outline);border-radius:var(--r-lg);
+                    padding:4px;box-shadow:0 -8px 28px rgba(0,0,0,.45);margin-bottom:8px">
+          <div style="display:flex;align-items:center;gap:9px;padding:8px 9px;font-size:11.5px;color:var(--onSurface)">
+            <span style="opacity:.8">🖼</span><span>选图片</span></div>
+          <div style="display:flex;align-items:center;gap:9px;padding:8px 9px;font-size:11.5px;color:var(--onSurface)">
+            <span style="opacity:.8">📄</span><span>选文件</span></div>
+        </div>
+        <div class="fieldrow">
+          <div class="plus">＋</div>
+          <div class="ph">描述你的任务，或先聊几句…</div>
+          <div class="snd">↑</div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>现在</b>：<code>AlertDialog</code> 两个按钮<br>还挂着一句「其它文件先上传到桌面端」的说明</div>
+  </div>
+
+  <div>
+    <div class="phone" style="width:360px">
+      <div class="sbar"><span>09:41</span><span class="r">5G ▮▮▮ 82</span></div>
+      <div class="tb"><div class="ib">←</div><div class="grow"><div class="t1">开发（new）</div><div class="t2">F:\bot</div></div><div class="ib">⋮</div></div>
+      <div class="body" style="opacity:.35">
+        <div class="msg"><div class="bub u">帮我把 R042 的测试补一下</div></div>
+        <div class="msg"><div class="who">助手</div><div class="bub">好，我先看现有覆盖……</div></div>
+      </div>
+      <div class="dock">
+        <!-- 面板 -->
+        <div style="background:var(--surface);border:1px solid var(--outline);border-radius:var(--r-md);
+                    overflow:hidden;box-shadow:0 -10px 34px rgba(0,0,0,.5);margin-bottom:8px">
+          <!-- 添加类 -->
+          <div style="padding:9px 11px 5px;font-size:9.5px;letter-spacing:.5px;color:var(--onSurfaceVariant);opacity:.7">添加</div>
+          <div style="display:flex;padding:0 6px 8px;gap:5px">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;padding:9px 4px;
+                        border-radius:var(--r-sm);background:var(--surfaceVariant)">
+              <div style="width:28px;height:28px;border-radius:9px;background:rgba(90,162,255,.16);
+                          color:var(--primary);display:flex;align-items:center;justify-content:center;font-size:14px">🖼</div>
+              <div style="font-size:10.5px">图片</div>
+            </div>
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;padding:9px 4px;
+                        border-radius:var(--r-sm);background:var(--surfaceVariant)">
+              <div style="width:28px;height:28px;border-radius:9px;background:rgba(90,162,255,.16);
+                          color:var(--primary);display:flex;align-items:center;justify-content:center;font-size:14px">📄</div>
+              <div style="font-size:10.5px">文件</div>
+            </div>
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;padding:9px 4px;
+                        border-radius:var(--r-sm);background:var(--surfaceVariant)">
+              <div style="width:28px;height:28px;border-radius:9px;background:rgba(90,162,255,.16);
+                          color:var(--primary);display:flex;align-items:center;justify-content:center;font-size:14px">@</div>
+              <div style="font-size:10.5px">引用文件</div>
+            </div>
+          </div>
+          <!-- 快捷 -->
+          <div style="padding:2px 11px 5px;font-size:9.5px;letter-spacing:.5px;color:var(--onSurfaceVariant);opacity:.7;
+                      border-top:1px solid var(--outlineVariant);margin-top:2px;padding-top:8px">快捷</div>
+          <div style="padding:0 6px">
+            <div style="display:flex;align-items:center;gap:9px;padding:7px 6px;border-radius:var(--r-sm)">
+              <div style="width:24px;height:24px;border-radius:7px;background:rgba(242,193,78,.16);color:var(--tertiary);
+                          display:flex;align-items:center;justify-content:center;font-size:12px">◎</div>
+              <div style="flex:1"><div style="font-size:11.5px">设为目标</div>
+                <div style="font-size:9.5px;color:var(--onSurfaceVariant)">让它长时间连续执行</div></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:9px;padding:7px 6px;border-radius:var(--r-sm)">
+              <div style="width:24px;height:24px;border-radius:7px;background:rgba(90,162,255,.16);color:var(--primary);
+                          display:flex;align-items:center;justify-content:center;font-size:12px">☰</div>
+              <div style="flex:1"><div style="font-size:11.5px">计划模式</div>
+                <div style="font-size:9.5px;color:var(--onSurfaceVariant)">先出方案再动手</div></div>
+            </div>
+          </div>
+          <!-- 命令 -->
+          <div style="display:flex;align-items:center;padding:8px 11px 5px;border-top:1px solid var(--outlineVariant);
+                      margin-top:4px;padding-top:8px">
+            <div style="font-size:9.5px;letter-spacing:.5px;color:var(--onSurfaceVariant);opacity:.7;flex:1">命令</div>
+            <div style="font-size:9.5px;color:var(--primary)">全部 19 条 ›</div>
+          </div>
+          <div style="padding:0 6px 8px">
+            <div style="display:flex;align-items:center;gap:9px;padding:6px 6px;border-radius:var(--r-sm);background:var(--surfaceVariant)">
+              <div style="font-family:ui-monospace,monospace;font-size:10px;color:var(--primary);width:74px;flex:0 0 auto">/goal</div>
+              <div style="font-size:10px;color:var(--onSurfaceVariant);flex:1;min-width:0;overflow:hidden;
+                          text-overflow:ellipsis;white-space:nowrap">设置或查看长任务的目标</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:9px;padding:6px 6px;border-radius:var(--r-sm)">
+              <div style="font-family:ui-monospace,monospace;font-size:10px;color:var(--primary);width:74px;flex:0 0 auto">/plan</div>
+              <div style="font-size:10px;color:var(--onSurfaceVariant);flex:1;min-width:0;overflow:hidden;
+                          text-overflow:ellipsis;white-space:nowrap">进入或退出计划模式</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:9px;padding:6px 6px;border-radius:var(--r-sm)">
+              <div style="font-family:ui-monospace,monospace;font-size:10px;color:var(--primary);width:74px;flex:0 0 auto">/permission</div>
+              <div style="font-size:10px;color:var(--onSurfaceVariant);flex:1;min-width:0;overflow:hidden;
+                          text-overflow:ellipsis;white-space:nowrap">切换权限预设（沙箱 + 审批策略）</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:9px;padding:6px 6px;border-radius:var(--r-sm)">
+              <div style="font-family:ui-monospace,monospace;font-size:10px;color:var(--primary);width:74px;flex:0 0 auto">/btw</div>
+              <div style="font-size:10px;color:var(--onSurfaceVariant);flex:1;min-width:0;overflow:hidden;
+                          text-overflow:ellipsis;white-space:nowrap">根据当前上下文回答，不执行工具</div>
+            </div>
+          </div>
+        </div>
+        <div class="fieldrow">
+          <div class="plus on">＋</div>
+          <div class="ph">描述你的任务，或先聊几句…</div>
+          <div class="snd">↑</div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>改后</b>：三段式——添加 / 快捷 / 命令<br>命令先露 4 条，点「全部 19 条」进搜索列表</div>
+  </div>
+
+  <div>
+    <div class="phone" style="width:360px">
+      <div class="sbar"><span>09:41</span><span class="r">5G ▮▮▮ 82</span></div>
+      <div class="tb"><div class="ib">←</div><div class="grow"><div class="t1">命令</div><div class="t2">19 条 · 输入筛选</div></div><div class="ib">✕</div></div>
+      <div class="body" style="gap:0;padding:0">
+        <div style="padding:8px 11px;border-bottom:1px solid var(--outlineVariant)">
+          <div style="background:var(--surface);border-radius:var(--r-pill);padding:7px 11px;font-size:11px;
+                      color:var(--onSurfaceVariant);opacity:.8">筛选命令…</div>
+        </div>
+        <div style="flex:1;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:9px;padding:9px 12px;border-bottom:1px solid var(--outlineVariant)">
+            <div style="flex:1;min-width:0">
+              <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--primary)">/goal</div>
+              <div style="font-size:10px;color:var(--onSurfaceVariant);line-height:1.5;margin-top:2px">设置或查看长任务的目标</div>
+            </div>
+            <div style="font-size:9px;color:var(--onSurfaceVariant);opacity:.6;font-family:ui-monospace,monospace">[目标|clear]</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:9px 12px;border-bottom:1px solid var(--outlineVariant)">
+            <div style="flex:1;min-width:0">
+              <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--primary)">/plan</div>
+              <div style="font-size:10px;color:var(--onSurfaceVariant);line-height:1.5;margin-top:2px">进入或退出计划模式</div>
+            </div>
+            <div style="font-size:9px;color:var(--onSurfaceVariant);opacity:.6;font-family:ui-monospace,monospace">[off]</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:9px 12px;border-bottom:1px solid var(--outlineVariant)">
+            <div style="flex:1;min-width:0">
+              <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--primary)">/permission</div>
+              <div style="font-size:10px;color:var(--onSurfaceVariant);line-height:1.5;margin-top:2px">切换权限预设（沙箱 + 审批策略）</div>
+            </div>
+            <div style="font-size:9px;color:var(--onSurfaceVariant);opacity:.6;font-family:ui-monospace,monospace">&lt;preset&gt;</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:9px 12px;border-bottom:1px solid var(--outlineVariant)">
+            <div style="flex:1;min-width:0">
+              <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--primary)">/btw</div>
+              <div style="font-size:10px;color:var(--onSurfaceVariant);line-height:1.5;margin-top:2px">根据当前上下文回答，不执行工具</div>
+            </div>
+            <div style="font-size:9px;color:var(--onSurfaceVariant);opacity:.6;font-family:ui-monospace,monospace">&lt;旁问&gt;</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:9px 12px;border-bottom:1px solid var(--outlineVariant)">
+            <div style="flex:1;min-width:0">
+              <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--primary)">/review</div>
+              <div style="font-size:10px;color:var(--onSurfaceVariant);line-height:1.5;margin-top:2px">选择范围或输入自定义要求</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:9px 12px;border-bottom:1px solid var(--outlineVariant)">
+            <div style="flex:1;min-width:0">
+              <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--primary)">/simplify</div>
+              <div style="font-size:10px;color:var(--onSurfaceVariant);line-height:1.5;margin-top:2px">简化最近改动的代码</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:9px 12px;border-bottom:1px solid var(--outlineVariant)">
+            <div style="flex:1;min-width:0">
+              <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--primary)">/export</div>
+              <div style="font-size:10px;color:var(--onSurfaceVariant);line-height:1.5;margin-top:2px">把这个会话的日志导出为 ZIP</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:9px 12px;border-bottom:1px solid var(--outlineVariant)">
+            <div style="flex:1;min-width:0">
+              <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--primary)">/feedback</div>
+              <div style="font-size:10px;color:var(--onSurfaceVariant);line-height:1.5;margin-top:2px">记录对这次会话的反馈</div>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:9px 12px">
+            <div style="flex:1;min-width:0">
+              <div style="font-family:ui-monospace,monospace;font-size:11px;color:var(--primary)">/skill-review</div>
+              <div style="font-size:10px;color:var(--onSurfaceVariant);line-height:1.5;margin-top:2px">列出等待批准的技能候选</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>全部命令列表</b>：等宽命令名 + 描述 + 参数提示<br>点一条 → 把 <code>/goal </code> 填进输入框并聚焦</div>
+  </div>
+</div>
+<h2><span class="n">5</span>点进一条命令之后：参数提示不能靠用户猜</h2>
+<div class="lead">
+19 条命令里 <b>6 条带参数</b>（<code>input.hint</code> 是服务端给的原文）。桌面端把这些提示放在候选右侧；
+手机屏幕窄，改成<b>选完命令后输入框上方浮一条提示条</b>，直接告诉用户「现在该打什么」。
+</div>
+<div class="row">
+  <div>
+    <div class="phone" style="width:360px">
+      <div class="sbar"><span>09:41</span><span class="r">5G ▮▮▮ 82</span></div>
+      <div class="tb"><div class="ib">←</div><div class="grow"><div class="t1">开发（new）</div><div class="t2">F:\bot</div></div><div class="ib">⋮</div></div>
+      <div class="body">
+        <div class="msg"><div class="bub u">帮我把 R042 的测试补一下</div></div>
+        <div class="msg"><div class="who">助手</div><div class="bub">好，我先看现有覆盖……</div></div>
+      </div>
+      <div class="dock">
+        <div style="background:rgba(90,162,255,.1);border:1px solid rgba(90,162,255,.35);
+                    border-radius:var(--r-sm);padding:7px 9px;margin-bottom:7px;display:flex;gap:8px;align-items:flex-start">
+          <div style="font-family:ui-monospace,monospace;font-size:10px;color:var(--primary);flex:0 0 auto">/goal</div>
+          <div style="flex:1;font-size:10px;line-height:1.55;color:var(--onSurfaceVariant)">
+            参数：<span style="font-family:ui-monospace,monospace;color:var(--onSurface)">[&lt;目标&gt; | clear | edit &lt;目标&gt; | pause | resume]</span>
+          </div>
+        </div>
+        <div class="fieldrow" style="border-color:var(--primary)">
+          <div class="plus">＋</div>
+          <div class="ph" style="opacity:1;color:var(--onSurface)">/goal 完成 R043 三项并交付<span style="border-left:1.5px solid var(--primary);
+               margin-left:1px">&nbsp;</span></div>
+          <div class="snd">↑</div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>参数提示条</b>：服务端 <code>input.hint</code> 原文照抄<br>提示条在读入第一个字符后自动消失，不挡视线</div>
+  </div>
+
+  <div>
+    <div class="phone" style="width:360px">
+      <div class="sbar"><span>09:41</span><span class="r">5G ▮▮▮ 82</span></div>
+      <div class="tb"><div class="ib">←</div><div class="grow"><div class="t1">开发（new）</div><div class="t2">F:\bot</div></div><div class="ib">⋮</div></div>
+      <div class="body">
+        <div class="msg"><div class="bub u">把 docs/dev 下的记录按 R042 补一下</div></div>
+      </div>
+      <div class="dock">
+        <div style="background:var(--surface);border:1px solid var(--outline);border-radius:var(--r-md);
+                    overflow:hidden;margin-bottom:8px;box-shadow:0 -10px 34px rgba(0,0,0,.5)">
+          <div style="padding:8px 11px;font-size:9.5px;letter-spacing:.5px;color:var(--onSurfaceVariant);
+                      opacity:.7;border-bottom:1px solid var(--outlineVariant);display:flex;align-items:center;gap:6px">
+            <span style="font-family:ui-monospace,monospace;color:var(--primary)">@</span> 引用工作区里的路径
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:7px 11px;background:var(--surfaceVariant)">
+            <span style="font-size:12px;opacity:.8">📁</span>
+            <span style="font-family:ui-monospace,monospace;font-size:10.5px;flex:1">docs/</span>
+            <span style="font-size:9.5px;color:var(--onSurfaceVariant);opacity:.6">目录</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:7px 11px">
+            <span style="font-size:12px;opacity:.8">📁</span>
+            <span style="font-family:ui-monospace,monospace;font-size:10.5px;flex:1">src/</span>
+            <span style="font-size:9.5px;color:var(--onSurfaceVariant);opacity:.6">目录</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:7px 11px">
+            <span style="font-size:12px;opacity:.8">📄</span>
+            <span style="font-family:ui-monospace,monospace;font-size:10.5px;flex:1">README.md</span>
+            <span style="font-size:9.5px;color:var(--onSurfaceVariant);opacity:.6">文件</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:7px 11px;border-top:1px solid var(--outlineVariant)">
+            <span style="font-size:12px;opacity:.8">💬</span>
+            <span style="font-size:10.5px;flex:1">引用某个会话</span>
+            <span style="font-size:9.5px;color:var(--onSurfaceVariant);opacity:.6">会话</span>
+          </div>
+        </div>
+        <div class="fieldrow">
+          <div class="plus on">＋</div>
+          <div class="ph" style="opacity:1;color:var(--onSurface)">把 <span style="background:rgba(90,162,255,.18);color:var(--primary);
+               border-radius:4px;padding:0 4px;font-family:ui-monospace,monospace;font-size:10.5px">docs/dev/</span> 下的记录按 R042 补一下</div>
+          <div class="snd">↑</div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>引用选择器</b>：目录优先、再文件、最后会话<br>选中后变成输入框里的<b>小胶囊</b>，可整块删除</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="sbar"><span>09:41</span><span class="r">5G ▮▮▮ 82</span></div>
+      <div class="tb"><div class="ib">←</div><div class="grow"><div class="t1">开发（new）</div><div class="t2">F:\bot</div></div><div class="ib">⋮</div></div>
+      <div class="body">
+        <div class="msg"><div class="bub u">把这个模块的重试逻辑补上</div></div>
+        <div class="msg"><div class="who">助手</div><div class="bub">我先看 <span class="mono" style="font-size:10.5px">RetryPolicy.kt</span> 的现有实现。</div></div>
+      </div>
+      <div class="dock">
+        <div style="display:flex;gap:6px;margin-bottom:7px;flex-wrap:wrap">
+          <div style="display:flex;align-items:center;gap:5px;background:var(--surfaceVariant);
+                      border-radius:var(--r-sm);padding:5px 7px;font-size:10px">
+            <span style="font-size:11px;opacity:.8">🖼</span><span>截图_0941.png</span>
+            <span style="opacity:.5;font-size:11px">✕</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:5px;background:var(--surfaceVariant);
+                      border-radius:var(--r-sm);padding:5px 7px;font-size:10px">
+            <span style="font-size:11px;opacity:.8">📄</span><span>retry.log</span>
+            <span style="opacity:.5;font-size:11px">✕</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:5px;background:rgba(90,162,255,.16);color:var(--primary);
+                      border-radius:var(--r-sm);padding:5px 7px;font-size:10px;font-family:ui-monospace,monospace">
+            @docs/dev/
+          </div>
+        </div>
+        <div class="fieldrow">
+          <div class="plus on">＋</div>
+          <div class="ph">描述你的任务，或先聊几句…</div>
+          <div class="snd">↑</div>
+        </div>
+      </div>
+    </div>
+    <div class="caption"><b>已选内容</b>：图片 / 文件 / 引用同排<br>每项可单独移除；三者可以混在同一条消息里发</div>
+  </div>
+</div>
+
+<h2><span class="n">6</span>亮色主题：同一套语义色，不另写死颜色</h2>
+<div class="lead">
+和 R031 / R033 / R040 一致：所有新组件只用语义令牌，切亮色时自动跟随。轮次结果卡的失败红在亮色下要<b>加深一档</b>
+（<code>#FF8A80</code> 在浅底上对比度只有 2.1:1，换 <code>#B3261E</code> 才过 AA）。
+</div>
+<div class="row">
+  <div>
+    <div class="phone light">
+      <div class="sbar"><span>09:41</span><span class="r">5G ▮▮▮ 82</span></div>
+      <div class="tb"><div class="ib">←</div><div class="grow"><div class="t1">开发（new）</div><div class="t2">F:\bot</div></div><div class="ib">⋮</div></div>
+      <div class="body">
+        <div class="msg"><div class="bub u">把这个模块的重试逻辑补上</div></div>
+        <div class="turn fail">
+          <div class="h"><div class="ico">!</div><div class="ttl">本轮失败 · 模型限流</div><div class="tag">RATE_LIMIT</div></div>
+          <div class="b">
+            <div class="k">第 13 轮 · 09:41</div>
+            <div class="errtext">429 {"error":{"message":"UID rate limit reached for TPM for UID","type":"rate_limit_exceeded_error"}}</div>
+          </div>
+          <div class="acts"><div class="meta">1 次重试后仍失败</div><div class="btn ghost">复制</div><div class="btn pri">重试本轮</div></div>
+        </div>
+        <div class="turn cut">
+          <div class="h"><div class="ico">▤</div><div class="ttl">输出被截断</div><div class="tag">max-tokens</div></div>
+          <div class="acts" style="padding-top:2px"><div class="meta">第 14 轮</div><div class="btn warn">继续写</div></div>
+        </div>
+      </div>
+      <div class="dock">
+        <div class="fieldrow"><div class="plus">＋</div><div class="ph">描述你的任务，或先聊几句…</div><div class="snd">↑</div></div>
+      </div>
+    </div>
+    <div class="caption"><b>亮色 · 轮次结果卡</b></div>
+  </div>
+  <div>
+    <div class="phone light">
+      <div class="sbar"><span>09:41</span><span class="r">5G ▮▮▮ 82</span></div>
+      <div class="tb"><div class="ib">←</div><div class="grow"><div class="t1">开发（new）</div><div class="t2">F:\bot</div></div><div class="ib">⋮</div></div>
+      <div class="body">
+        <div class="msg"><div class="bub u">帮我把 R042 的测试补一下</div></div>
+      </div>
+      <div class="dock">
+        <div style="background:var(--surface);border:1px solid var(--outline);border-radius:var(--r-md);
+                    overflow:hidden;margin-bottom:8px;box-shadow:0 -8px 26px rgba(24,36,48,.14)">
+          <div style="padding:9px 11px 5px;font-size:9.5px;letter-spacing:.5px;color:var(--onSurfaceVariant);opacity:.7">添加</div>
+          <div style="display:flex;padding:0 6px 8px;gap:5px">
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;padding:9px 4px;
+                        border-radius:var(--r-sm);background:var(--surfaceVariant)">
+              <div style="width:28px;height:28px;border-radius:9px;background:rgba(31,111,235,.12);color:var(--primary);
+                          display:flex;align-items:center;justify-content:center;font-size:14px">🖼</div>
+              <div style="font-size:10.5px">图片</div>
+            </div>
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;padding:9px 4px;
+                        border-radius:var(--r-sm);background:var(--surfaceVariant)">
+              <div style="width:28px;height:28px;border-radius:9px;background:rgba(31,111,235,.12);color:var(--primary);
+                          display:flex;align-items:center;justify-content:center;font-size:14px">📄</div>
+              <div style="font-size:10.5px">文件</div>
+            </div>
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;padding:9px 4px;
+                        border-radius:var(--r-sm);background:var(--surfaceVariant)">
+              <div style="width:28px;height:28px;border-radius:9px;background:rgba(31,111,235,.12);color:var(--primary);
+                          display:flex;align-items:center;justify-content:center;font-size:14px">@</div>
+              <div style="font-size:10.5px">引用文件</div>
+            </div>
+          </div>
+          <div style="padding:2px 11px 5px;font-size:9.5px;letter-spacing:.5px;color:var(--onSurfaceVariant);opacity:.7;
+                      border-top:1px solid var(--outlineVariant);padding-top:8px">快捷</div>
+          <div style="padding:0 6px 10px">
+            <div style="display:flex;align-items:center;gap:9px;padding:7px 6px;border-radius:var(--r-sm)">
+              <div style="width:24px;height:24px;border-radius:7px;background:rgba(192,138,18,.14);color:var(--tertiary);
+                          display:flex;align-items:center;justify-content:center;font-size:12px">◎</div>
+              <div style="flex:1"><div style="font-size:11.5px">设为目标</div>
+                <div style="font-size:9.5px;color:var(--onSurfaceVariant)">让它长时间连续执行</div></div>
+            </div>
+          </div>
+        </div>
+        <div class="fieldrow"><div class="plus on">＋</div><div class="ph">描述你的任务，或先聊几句…</div><div class="snd">↑</div></div>
+      </div>
+    </div>
+    <div class="caption"><b>亮色 · ＋面板</b><br>描边加粗一档，否则在浅底上看不见边界</div>
+  </div>
+  <div>
+    <div style="max-width:420px">
+      <table>
+        <tr><th>令牌</th><th>深色</th><th>亮色</th></tr>
+        <tr><td>失败描边 / 文字</td><td class="mono">#FF8A80</td><td class="mono">#B3261E</td></tr>
+        <tr><td>截断 / 提示</td><td class="mono">#F2C14E</td><td class="mono">#C08A12</td></tr>
+        <tr><td>卡片底</td><td class="mono">surface #111C2B</td><td class="mono">surface #FFFFFF</td></tr>
+        <tr><td>错误原文底</td><td class="mono">#0A121D</td><td class="mono">#F7FAFD</td></tr>
+        <tr><td>面板底 / 描边</td><td class="mono">surface / outline</td><td class="mono">surface / outline</td></tr>
+      </table>
+      <div class="caption" style="text-align:left;margin-top:10px">
+        <b>为什么错误原文单独一块深底</b>：它常带引号、花括号、<code>request_id</code>，
+        和正文混排会让人以为是正文的一部分。等宽 + 独立底色 = 「这是机器输出，别当人话读」。
+      </div>
+    </div>
+  </div>
+</div>
+
+<h2><span class="n">7</span>要动的地方（给开发看的）</h2>
+<div class="lead">两处改动都不触碰协议层——服务端早就把数据给全了。</div>
+<div class="row" style="gap:26px;align-items:flex-start;flex-wrap:nowrap">
+<table>
+<tr><th>#</th><th>文件</th><th>改什么</th></tr>
+<tr><td>1</td><td class="mono">core/session/SessionEventParser.kt</td><td><code>turnEndNotice()</code>：<code>reason</code> 从 <code>stringOrNull</code> 改成读对象，解析出 <code>kind</code> / <code>error.message</code> / <code>error.code</code> / <code>reason.reason.kind</code></td></tr>
+<tr><td>2</td><td class="mono">core/session/ChatModel.kt</td><td><code>ChatItem.Notice</code> 升级为 <code>ChatItem.TurnResult</code>（带 kind / code / message / 时长 / 是否有产出），旧 Notice 保留给标题类事件</td></tr>
+<tr><td>3</td><td class="mono">ui/chat/TurnResultCard.kt</td><td>新文件：七种 <code>reason.kind</code> → 三种视觉（fail / cut / stop）；<code>completed</code> 不出卡片+ 展开收起 + 复制</td></tr>
+<tr><td>4</td><td class="mono">ui/chat/ChatScreen.kt</td><td>渲染分支接新卡；「重试本轮」走已有 <code>retrySend()</code>；「压缩后重试」走 <code>/compact</code> 或提示</td></tr>
+<tr><td>5</td><td class="mono">ui/chat/ComposerAddSheet.kt</td><td>新文件：三段式面板（添加 / 快捷 / 命令）</td></tr>
+<tr><td>6</td><td class="mono">core/protocol/DshEndpoints.kt</td><td>新增 <code>COMMANDS_LIST = "commands/list"</code>（实测参数 <code>{agentId}</code>）</td></tr>
+<tr><td>7</td><td class="mono">core/command/CommandCatalog.kt</td><td>新文件：拉 <code>commands/list</code>、按 <code>name</code> 排序、缓存一次；失败静默降级为「只有添加类」</td></tr>
+<tr><td>8</td><td class="mono">core/protocol/DshEndpoints.kt</td><td>新增 <code>FILE_REFERENCES_LIST = "fileReferences/list"</code>（实测参数 <code>{agentId, query}</code>，返回 <code>{path, kind:directory|file}</code>）</td></tr>
+</table>
+<table>
+<tr><th>已实测的协议形状（可直接用）</th></tr>
+<tr><td class="mono">commands/list → {agentId}</td></tr>
+<tr><td class="mono">返回 [{name, description, input?:{hint}, definitionId?}]</td></tr>
+<tr><td class="mono">fileReferences/list → {agentId, query}</td></tr>
+<tr><td class="mono">返回 [{path, kind:"directory"|"file"}]</td></tr>
+<tr><td class="mono">turn/end → {turn, reason:{kind, error?{message,code}, reason?{kind}}}</td></tr>
+</table>
+</div>
+<div class="lead" style="margin-top:12px">
+<b>降级策略</b>：<code>commands/list</code> 拉不到（老版本桌面端 / 掉线）时，面板只留「添加」段并显示一行
+「命令列表暂不可用」——<b>不能</b>把整个加号按钮禁掉，否则用户连图片都加不了。
+</div>
+
+</div>
+</body>
+</html>

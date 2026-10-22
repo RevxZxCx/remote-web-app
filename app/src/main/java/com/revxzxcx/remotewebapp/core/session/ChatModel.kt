@@ -1,6 +1,8 @@
 package com.revxzxcx.remotewebapp.core.session
 
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * 会话日志里的一条**事件信封**。
@@ -150,6 +152,25 @@ sealed interface ChatItem {
     ) : ChatItem
 
     /**
+     * 一轮结束且**结局异常**时的结果卡（R043，用户 m26743）。
+     *
+     * 与 [Notice] 的区别：Notice 是「第 N 轮结束」这种中性分隔行；本条目承载的是
+     * **用户需要知道并可能要处理**的结局——模型报错、输出被截断、被谁中止、策略拦下。
+     * 正常结束（[TurnOutcome.Completed]）不产生本条目，避免每轮多一行噪声。
+     *
+     * [outcome] 决定卡片视觉与可执行动作（见 `TurnResultCard`）：只有
+     * [TurnOutcome.Failed] 里那些「重试有意义」的 code 才给「重试本轮」。
+     */
+    data class TurnResult(
+    override val seq: Long,
+    override val time: Long,
+    override val turn: Long,
+    val outcome: TurnOutcome,
+    /** `turn/end` 里是否真的带了 `turn` 字段；缺失时卡片不显示「第 N 轮」。 */
+    val turnKnown: Boolean = true,
+) : ChatItem
+
+    /**
      * 「这一轮改了哪些文件」的**占位卡片**（需求 FR-5.4）。
      *
      * ⚠️ 这条事件（`workspace/changes`）的 `data` **只有 `{turn}`**，文件清单并不在事件里：
@@ -185,6 +206,146 @@ sealed interface ChatItem {
  */
 fun visibleAssistantBlocks(blocks: List<ContentBlock>, interrupted: Boolean): List<ContentBlock> =
     if (interrupted) blocks else blocks.filterNot { it is ContentBlock.ToolCall }
+
+/**
+ * 一轮结束时服务端给出的**结局**（`turn/end` 的 `data.reason`）。
+ *
+ * ⚠️ R043 之前的实现是 `event.data.string("reason")`——而 `reason` 是**对象**，
+ * `stringOrNull` 只认 `JsonPrimitive` 字符串，于是**恒返回 null**，所有结局都被渲染成
+ * 同一行灰字「第 N 轮结束」。用户 m26743：模型报错、输出被截断时「app 端看不到任何内容」。
+ *
+ * 线上形状（实测 130 个会话、646 次 `turn/end`）：
+ * ```
+ * {kind:'completed'}
+ * {kind:'error', error:{message, code, status?}}
+ * {kind:'max-tokens'}
+ * {kind:'aborted', reason:{kind:'user'|'parent'|'disposed'}}
+ * {kind:'blocked'}
+ * {kind:'interrupted'}
+ * ```
+ * `data` 里只有 `{turn, reason}` 两个键，没有别的东西可捡。
+ *
+ * 六种 `kind` 折成三种**视觉**（见 `TurnResultCard`）：失败（红）、被截断（琥珀）、中性
+ * （`aborted` / `blocked` / `interrupted`）。但文案必须按 `kind` 分开——「你点了停止」和
+ * 「进程重启把它掐了」对用户是完全不同的两件事。
+ */
+sealed interface TurnOutcome {
+
+    /** `{kind:'completed'}` —— 正常结束。**不出卡片**（否则每轮都多一行噪声）。 */
+    data object Completed : TurnOutcome
+
+    /** `{kind:'error', error:{message, code, status?}}` —— 模型/网关报错，[message] 是给用户看的原文。 */
+    data class Failed(
+        val message: String,
+        val code: String?,
+        val status: Int?,
+    ) : TurnOutcome
+
+    /** `{kind:'max-tokens'}` —— 输出被截断，内容**不完整**但可续写。 */
+    data object Truncated : TurnOutcome
+
+    /** `{kind:'aborted', reason:{kind}}` —— 被主动中止；[by] 区分是谁动的手。 */
+    data class Aborted(val by: AbortCause) : TurnOutcome
+
+    /** `{kind:'blocked'}` —— 权限/策略拦下，需要用户处理（例如去桌面端批准）。 */
+    data object Blocked : TurnOutcome
+
+    /** `{kind:'interrupted'}` —— 上游断流或进程重启，内容可能只有半截。 */
+    data object Interrupted : TurnOutcome
+
+    /** 认不出的 `kind`：保留原文，渲染成中性卡，不猜语义。 */
+    data class Unknown(val kind: String) : TurnOutcome
+}
+
+/**
+ * 中止动作的来源。
+ *
+ * 实测分布：`user` 73 次、`disposed` 2 次、`parent` 1 次。文案必须分开——
+ * 用户自己按的停止键不该显示「异常中止」，那会让人以为出了故障。
+ */
+enum class AbortCause(val raw: String) {
+    /** 用户点了停止。 */
+    USER("user"),
+
+    /** 父会话把它掐了（子代理场景）。 */
+    PARENT("parent"),
+
+    /** 进程/连接销毁（App 被杀、桌面端重启）。 */
+    DISPOSED("disposed"),
+
+    /** 未知来源。 */
+    UNKNOWN(""),
+    ;
+
+    companion object {
+        fun of(raw: String?): AbortCause = entries.firstOrNull { it.raw == raw } ?: UNKNOWN
+    }
+}
+
+/**
+ * 解析 `turn/end` 的 `data.reason`。
+ *
+ * 容忍两种退化形态：
+ *  - `reason` 是字符串（老版本服务端 / 手工构造的测试数据）→ 当作 [TurnOutcome.Unknown]，
+ *    但保留原文，不丢信息；
+ *  - `reason` 缺失 → 返回 `null`，调用方回退到「第 N 轮结束」分隔线。
+ *
+ * 抽成顶层函数是为了能脱离 Compose 单测——本项目 M2 的教训是「数据层断言对了、
+ * UI 层照样可能渲染错」，所以判据必须放在能被纯 JVM 测试钉住的位置。
+ */
+private fun JsonObject.string(key: String): String? =
+    (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+/**
+ * 读一个数字字段。
+ *
+ * ⚠️ 不能照抄 [string] 的 `isString` 判据：`error.status` 在线上是 **JSON 数字**
+ * （`"status":429`），而 `isString` 只对带引号的字面量为真。R043 首版就是抄了
+ * `string` 的写法，导致 status 永远是 null——`TurnOutcomeTest` 立刻抓到。
+ * 同时接受字符串形态（服务端偶尔把数字序列化成字符串），两种都认才稳。
+ */
+private fun JsonObject.long(key: String): Long? =
+    (this[key] as? JsonPrimitive)?.content?.toLongOrNull()
+
+fun parseTurnOutcome(reason: JsonElement?): TurnOutcome? {
+    // 字符串形态的 reason 在旧格式/回放历史里真的存在（`{"turn":0,"reason":"completed"}`，
+    // 见 `ChatReducerTest` 里的夹具）。首版一律当 `Unknown`，于是**正常结束也会冒出
+    // 一张红色「本轮结束异常」卡**——把好轮次报成故障（R043 审查 P2-1）。
+    // 已知 kind 按对象分支同一套语义翻译，匹配不上才退回 `Unknown`。
+    val raw = reason?.let { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content }
+    if (raw != null) {
+        return when (raw.trim().lowercase()) {
+            "completed", "complete", "done" -> TurnOutcome.Completed
+            "max-tokens", "max_tokens", "truncated" -> TurnOutcome.Truncated
+            "blocked" -> TurnOutcome.Blocked
+            "interrupted" -> TurnOutcome.Interrupted
+            "user" -> TurnOutcome.Aborted(AbortCause.USER)
+            "parent" -> TurnOutcome.Aborted(AbortCause.PARENT)
+            "disposed" -> TurnOutcome.Aborted(AbortCause.DISPOSED)
+            else -> TurnOutcome.Unknown(raw)
+        }
+    }
+    val obj = reason as? JsonObject ?: return null
+    val kind = obj.string("kind") ?: return null
+    return when (kind) {
+        "completed" -> TurnOutcome.Completed
+        "max-tokens" -> TurnOutcome.Truncated
+        "blocked" -> TurnOutcome.Blocked
+        "interrupted" -> TurnOutcome.Interrupted
+        "aborted" -> TurnOutcome.Aborted(
+            AbortCause.of((obj["reason"] as? JsonObject)?.string("kind")),
+        )
+        "error" -> {
+            val err = obj["error"] as? JsonObject
+            TurnOutcome.Failed(
+                message = err?.string("message").orEmpty(),
+                code = err?.string("code")?.takeIf { it.isNotBlank() },
+                status = err?.long("status")?.toInt(),
+            )
+        }
+        else -> TurnOutcome.Unknown(kind)
+    }
+}
 
 /** `agent/inbox/spliced` 事件的两个收件箱（`InboxTarget`）。 */
 const val INBOX_NEXT_TURN = "next-turn"

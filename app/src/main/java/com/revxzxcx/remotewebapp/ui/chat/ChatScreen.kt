@@ -131,6 +131,8 @@ import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
 import com.revxzxcx.remotewebapp.core.protocol.isHealthy
 import com.revxzxcx.remotewebapp.core.session.ChatItem
+import com.revxzxcx.remotewebapp.core.session.FileReference
+import com.revxzxcx.remotewebapp.core.session.SlashCommand
 import com.revxzxcx.remotewebapp.core.session.AskQuestion
 import com.revxzxcx.remotewebapp.core.session.ContentBlock
 import com.revxzxcx.remotewebapp.ui.theme.Motion
@@ -301,6 +303,9 @@ fun ChatScreen(
     // 审批权限面板（用户 m28009）。请求本身由应用级的 `$events` 订阅推送，
     // ViewModel 只按 sessionId 取子集；这里是「弹不弹」。
     var showApprovals by rememberSaveable { mutableStateOf(false) }
+
+    // R043：引用选择器（「+」面板 → 引用文件）。
+    var showReferencePicker by rememberSaveable { mutableStateOf(false) }
     val approvals by viewModel.approvals.collectAsState()
     val approvalError by viewModel.approvalError.collectAsState()
     val interactive by viewModel.interactive.collectAsState()
@@ -310,6 +315,15 @@ fun ChatScreen(
     // 旋转屏幕既不取消上传也不丢提示。早先是这里的 `remember`，旋转就被重置。
     val attachNotice by viewModel.attachNotice.collectAsState()
     val pending by viewModel.pending.collectAsState()
+
+    // R043 第 2 条：输入区「+」面板的命令清单与已选引用。
+    val commands by viewModel.commands.collectAsState()
+    val commandsLoading by viewModel.commandsLoading.collectAsState()
+    val commandsError by viewModel.commandsError.collectAsState()
+    val references by viewModel.references.collectAsState()
+    val referenceResults by viewModel.referenceResults.collectAsState()
+    val referenceLoading by viewModel.referenceLoading.collectAsState()
+    val referenceError by viewModel.referenceError.collectAsState()
 
     // 桌面端「标准模式」的折叠分组（用户 m24940）。一整段过程（工具调用 + 工具结果 +
     // 只含思考的助手消息）折成一行摘要，用户消息与含正文的助手消息仍然单独成行。
@@ -675,6 +689,9 @@ fun ChatScreen(
                                             attachments = viewModel.attachments,
                                             sessionId = viewModel.sessionId,
                                             modifier = enter,
+                                            onRetryTurn = { seq -> viewModel.retryTurn(seq) },
+                                            onRetryDropsAttachments = viewModel::retryDropsAttachments,
+                                            onContinueTurn = { viewModel.continueTurn() },
                                         )
 
                                         is ChatRow.Group -> GroupRow(
@@ -688,6 +705,9 @@ fun ChatScreen(
                                             attachments = viewModel.attachments,
                                             sessionId = viewModel.sessionId,
                                             modifier = enter,
+                                            onRetryTurn = { seq -> viewModel.retryTurn(seq) },
+                                            onRetryDropsAttachments = viewModel::retryDropsAttachments,
+                                            onContinueTurn = { viewModel.continueTurn() },
                                         )
                                     }
                                 }
@@ -918,6 +938,17 @@ fun ChatScreen(
                                 viewModel.attachFileInBackground(bytes, name)
                             },
                             onAttachNotice = { viewModel.setAttachNotice(it) },
+                            commands = commands,
+                            commandsLoading = commandsLoading,
+                            commandsError = commandsError,
+                            onLoadCommands = { viewModel.loadCommands() },
+                            onApplyCommand = { command, argument ->
+                                viewModel.applyCommand(command, argument)
+                            },
+                            references = references,
+                            onAddReference = viewModel::addReference,
+                            onRemoveReference = viewModel::removeReference,
+                            onPickReference = { showReferencePicker = true },
                         )
                 }
 
@@ -989,6 +1020,29 @@ fun ChatScreen(
     }
     // 模型选择器。放在 Scaffold 外面：AlertDialog 需要覆盖在整个页面之上，
     // 放 bottomBar/topBar 里会被裁掉（Compose 的对话框是独立窗口）。
+    // R043：引用选择器。与「+」面板一样是独立 overlay——从面板点进来后
+    // 面板已经关掉，这里单独承载搜索与多选。
+    //
+    // ⚠️ 必须挂在 `state.catalog?.let { … }` **之外**。首版把它写进了那个
+    // `let` 里，于是模型目录还没到时整块不执行，用户点「引用」面板关掉、
+    // 选择器却永远不出现（设备验收 m27460 就是这样发现的）。引用与模型目录
+    // 毫无关系，没有理由被它的可见性门控。
+    if (showReferencePicker) {
+        ReferencePickerDialog(
+            results = referenceResults,
+            loading = referenceLoading,
+            error = referenceError,
+            selected = references,
+            onSearch = { viewModel.searchReferences(it) },
+            onAdd = { reference -> viewModel.addReference(reference) },
+            onRemove = { reference -> viewModel.removeReference(reference) },
+            onDismiss = {
+                showReferencePicker = false
+                viewModel.clearReferenceResults()
+            },
+        )
+    }
+
     state.catalog?.let { catalog ->
         if (showModelPicker) {
             ModelPickerDialog(
@@ -1314,6 +1368,18 @@ internal fun Composer(
     onAttachImage: (ByteArray, String, String?, ImageMeasure) -> String?,
     onAttachFile: (ByteArray, String?) -> Unit,
     onAttachNotice: (String?) -> Unit,
+    /** 命令清单（「+」面板的命令段）。 */
+    commands: List<SlashCommand> = emptyList(),
+    commandsLoading: Boolean = false,
+    commandsError: String? = null,
+    onLoadCommands: () -> Unit = {},
+    onApplyCommand: (SlashCommand, String) -> Unit = { _, _ -> },
+    /** 已选文件引用；会拼成 `@path` 随正文发出。 */
+    references: List<FileReference> = emptyList(),
+    onAddReference: (FileReference) -> Unit = {},
+    onRemoveReference: (FileReference) -> Unit = {},
+    /** 打开引用选择器（由调用方弹一个可搜索的文件列表）。 */
+    onPickReference: () -> Unit = {},
 ) {
     if (interactive != null) {
         InteractiveWindow(
@@ -1507,7 +1573,10 @@ internal fun Composer(
                             enter = fadeIn(tween(Motion.FAST, delayMillis = Motion.FAST)),
                             exit = fadeOut(tween(0)),
                         ) {
-                            AttachButton(onClick = { showAttachSheet = true })
+                            AttachButton(onClick = {
+                                showAttachSheet = true
+                                onLoadCommands()
+                            })
                         }
                         ComposerField(
                             draft = draft,
@@ -1540,6 +1609,12 @@ internal fun Composer(
                     }
                 }
 
+                // R043：已选文件引用排在输入框上方（引用是消息的一部分，不是附件）。
+                ReferenceChips(
+                    references = references,
+                    onRemove = onRemoveReference,
+                )
+
                 // ---- 底排（仅展开态）：权限图标 + 模型胶囊 + ＋ + 发送 ----
                 // 用户 m42277 定案：权限只留图标（它本来就只读，多写几个字只是占宽度），
                 // 于是原来必须拆成两行的四件东西能回到同一排——这正是 m41448「各种操作
@@ -1561,7 +1636,10 @@ internal fun Composer(
                         // 于是底排顺序从「权限 · 模型 · …… · ＋ · 发送」改为
                         // 「＋ · 权限 · 模型 · …… · 发送」——＋ 与发送分居两端，中间是
                         // 两个只读徽标，视觉上两侧对称。
-                        AttachButton(onClick = { showAttachSheet = true })
+                        AttachButton(onClick = {
+                            showAttachSheet = true
+                            onLoadCommands()
+                        })
                         Spacer(Modifier.width(6.dp))
                         permissionChip()
                         Spacer(Modifier.width(6.dp))
@@ -1592,31 +1670,68 @@ internal fun Composer(
     }
 
     if (showAttachSheet) {
-        AlertDialog(
-            onDismissRequest = { showAttachSheet = false },
-            title = { Text("添加附件") },
-            text = {
-                Column {
-                    Text(
-                        text = "图片按桌面端的上限预检后直接发送；其它文件先上传到桌面端，再随消息一起提交。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+        // R043（用户 m26743 第 2 条）：原来的「添加附件」二选一对话框换成面板。
+        //
+        // 桌面端的加号本来就不是附件菜单——它打开的是 `/` 命令菜单
+        // （`aria-label = 添加文件或调用指令`）。所以这里把「添加」「快捷」「命令」三段
+        // 并进同一个面板：前两段是手机端才有的入口（桌面端靠拖拽和快捷键），
+        // 第三段才是与桌面端对齐的那部分。
+        ComposerAddSheet(
+            onDismiss = { showAttachSheet = false },
+            onPickImage = {
+                showAttachSheet = false
+                pickImage.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                )
             },
-            confirmButton = {
-                TextButton(onClick = {
-                    showAttachSheet = false
-                    pickImage.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                    )
-                }) { Text("选图片") }
+            onPickFile = {
+                showAttachSheet = false
+                pickFile.launch(arrayOf("*/*"))
             },
-            dismissButton = {
-                TextButton(onClick = {
-                    showAttachSheet = false
-                    pickFile.launch(arrayOf("*/*"))
-                }) { Text("选文件") }
+            commands = commands,
+            commandsLoading = commandsLoading,
+            commandsError = commandsError,
+            onRetryCommands = onLoadCommands,
+            onCommand = { command ->
+                showAttachSheet = false
+                // 一律「塞进输入框等用户点发送」，不做「不吃参数就立刻发」。
+                //
+                // 首版这里写了 if/else，但两个分支一模一样，注释所描述的「直接发」
+                // 根本不存在（R043 审查 P2-3）。**不补实现**而是删分支，理由有二：
+                // ① 桌面端选中命令后同样是落进编辑器、由用户回车，App 跟随这一行为；
+                // ② 立刻发会把用户的「选错命令」变成不可撤回的一次服务端调用
+                //    （`/export` 这类会产生副作用），而落进输入框随时可以改或删。
+                onApplyCommand(command, "")
+            },
+            onSetGoal = {
+                showAttachSheet = false
+                onApplyCommand(
+                    SlashCommand(
+                        name = "goal",
+                        description = "设置或查看目标",
+                        hint = "[<objective>|clear|edit <objective>|pause|resume]",
+                        acceptsAttachments = true,
+                        definitionId = "@deepseek-ai/dsh-command-goal",
+                    ),
+                    "",
+                )
+            },
+            onPlanMode = {
+                showAttachSheet = false
+                onApplyCommand(
+                    SlashCommand(
+                        name = "plan",
+                        description = "计划模式",
+                        hint = null,
+                        acceptsAttachments = false,
+                        definitionId = "@deepseek-ai/dsh-plan-mode",
+                    ),
+                    "",
+                )
+            },
+            onPickReference = {
+                showAttachSheet = false
+                onPickReference()
             },
         )
     }
@@ -2007,6 +2122,9 @@ internal fun GroupRow(
     attachments: SessionAttachmentRepository,
     sessionId: String,
     modifier: Modifier = Modifier,
+    onRetryTurn: ((Long) -> Unit)? = null,
+    onContinueTurn: (() -> Unit)? = null,
+    onRetryDropsAttachments: ((Long) -> Boolean)? = null,
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     val summary = remember(members, running) { summarizeGroup(members, running) }
@@ -2182,6 +2300,9 @@ internal fun GroupRow(
                                 onRetryChanges = onRetryChanges,
                                 attachments = attachments,
                                 sessionId = sessionId,
+                                onRetryTurn = onRetryTurn,
+                                onContinueTurn = onContinueTurn,
+                                onRetryDropsAttachments = onRetryDropsAttachments,
                             )
                         }
                     }
@@ -2214,6 +2335,9 @@ private fun GroupMemberRow(
     onRetryChanges: (Long) -> Unit,
     attachments: SessionAttachmentRepository,
     sessionId: String,
+    onRetryTurn: ((Long) -> Unit)? = null,
+    onContinueTurn: (() -> Unit)? = null,
+    onRetryDropsAttachments: ((Long) -> Boolean)? = null,
 ) {
     when (item) {
         is ChatItem.ToolCall -> {
@@ -2311,6 +2435,9 @@ private fun GroupMemberRow(
                     onRetryChanges = onRetryChanges,
                     attachments = attachments,
                     sessionId = sessionId,
+                    onRetryTurn = onRetryTurn,
+                    onContinueTurn = onContinueTurn,
+                    onRetryDropsAttachments = onRetryDropsAttachments,
                     railColor = null,
                 )
             }
@@ -2327,6 +2454,9 @@ private fun GroupMemberRow(
             onRetryChanges = onRetryChanges,
             attachments = attachments,
             sessionId = sessionId,
+            onRetryTurn = onRetryTurn,
+            onContinueTurn = onContinueTurn,
+            onRetryDropsAttachments = onRetryDropsAttachments,
             railColor = null,
         )
     }
@@ -2356,6 +2486,11 @@ internal fun ChatItemRow(
     attachments: SessionAttachmentRepository,
     sessionId: String,
     modifier: Modifier = Modifier,
+    /** 「重试本轮」：参数是该轮结果卡的 seq（R043）。 */
+    onRetryTurn: ((Long) -> Unit)? = null,
+    /** 「继续写」：输出被截断时的续写（R043）。 */
+    onContinueTurn: (() -> Unit)? = null,
+    onRetryDropsAttachments: ((Long) -> Boolean)? = null,
     /**
      * 助手正文左侧导轨的颜色；`null` = 不画。
      *
@@ -2503,6 +2638,25 @@ internal fun ChatItemRow(
             HorizontalDivider(
                 modifier = Modifier.weight(1f),
                 color = MaterialTheme.colorScheme.outlineVariant,
+            )
+        }
+
+        // R043（用户 m26743 第 1 条）：轮次异常结局的实体卡。
+        //
+        // 与上面的 Notice 并存不是重复：Notice 说「这一轮结束了」，卡片说「为什么
+        // 结束得不对、我可以做什么」。正常结束只有前者，异常时两条都有。
+        is ChatItem.TurnResult -> Column(modifier = modifier.fillMaxWidth()) {
+            TurnResultCard(
+                item = item,
+                onRetry = onRetryTurn
+                    ?.takeIf { canRetry(item.outcome) }
+                    ?.let { run -> { run(item.seq) } },
+                onContinue = onContinueTurn?.takeIf { canContinue(item.outcome) },
+                // 只有真要重试时才需要这句提示，不重试就不说。
+                retryDropsAttachments = onRetryTurn != null &&
+                    canRetry(item.outcome) &&
+                    onRetryDropsAttachments != null &&
+                    onRetryDropsAttachments(item.seq),
             )
         }
     }

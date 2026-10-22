@@ -367,6 +367,7 @@ internal fun ChatItem.Assistant.hasReasoning(): Boolean =
  *  - [ChatItem.User] → `user`（用户自己发的话，永远单独成行）；
  *  - [ChatItem.Notice] → `turn/end`、`turn-error`、`model-retry`、`turn-tail` 一族；
  *  - [ChatItem.Changes] → 桌面端没有对应物，但它是独立卡片，同样必须单独成行；
+ *  - [ChatItem.TurnResult] → 轮次异常结局卡（R043），同属 `turn-end` 一族的独立条目；
  *  - 含正文的 [ChatItem.Assistant] → `assistant-step` 的 `response` 部分；
  *  - 其余（工具调用、工具结果、只含思考的助手消息）→ 累积进当前分组。
  *
@@ -387,7 +388,7 @@ fun foldChatItems(items: List<ChatItem>): List<ChatRow> {
 
     for (item in items) {
         val independent = when (item) {
-            is ChatItem.User, is ChatItem.Notice, is ChatItem.Changes -> true
+            is ChatItem.User, is ChatItem.Notice, is ChatItem.Changes, is ChatItem.TurnResult -> true
             is ChatItem.Assistant -> item.hasReply()
             else -> false
         }

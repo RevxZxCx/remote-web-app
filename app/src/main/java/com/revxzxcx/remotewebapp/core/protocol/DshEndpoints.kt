@@ -59,6 +59,22 @@ object DshEndpoints {
     const val SESSION_WORKSPACE_PATH_APPLICATIONS = "session/workspacePathApplications"
     const val SESSION_CAN_OPEN_WORKSPACE_PATH = "session/canOpenWorkspacePath"
 
+    // ------------------------------------------------------- composer 目录（R043）
+
+    /**
+     * 输入区「+」面板的两条目录来源。
+     *
+     * 两者都**不是**会话方法，参数是 `{agentId: "session-<id>"}`（agentId 必须带
+     * `session-` 前缀——传裸 sessionId 服务端查不到 agent）。
+     *
+     * `commands/list` 实测返回 19 条（核心 13 + 插件 6），`fileReferences/list` 额外要
+     * `query`，返回相对工作区根的路径。选中命令后**没有** invoke RPC：把
+     * `/name 参数` 拼成一条普通用户消息走 `session/prompt`，服务端自己解析斜杠命令
+     * （桌面端 `toggleSource("command", {trigger:"/"})` 就是同一个入口）。
+     */
+    const val COMMANDS_LIST = "commands/list"
+    const val FILE_REFERENCES_LIST = "fileReferences/list"
+
     // -------------------------------------------------------------- workspace
 
     const val WORKSPACE_CREATE = "workspace/create"

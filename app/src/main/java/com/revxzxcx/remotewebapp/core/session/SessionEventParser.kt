@@ -205,15 +205,30 @@ class SessionEventParser {
         )
     }
 
+    /**
+     * `turn/end` → 轮次结果。
+     *
+     * ⚠️ R043 之前这里是 `event.data.string("reason")`：`reason` 是**对象**，
+     * `stringOrNull` 只认 `JsonPrimitive` 字符串 → **恒为 null** → 所有结局（包括模型报错、
+     * 输出被截断）都渲染成同一行灰字「第 N 轮结束」，用户 m26743 的「中断时什么都看不到」
+     * 就是这么来的。现在按 [parseTurnOutcome] 解析出结构化结局。
+     *
+     * `completed` 与「解析不出 reason」都**不产卡片**：正常结束每轮都有一条，
+     * 画出来只是噪声；后者退化成原来的分隔线（由 [ChatReducer] 自己维护的轮次边界负责）。
+     */
     private fun turnEndNotice(event: SessionEvent): ChatItem? {
-        val turn = event.data.long("turn") ?: return null
-        val reason = event.data.string("reason").orEmpty()
-        return ChatItem.Notice(
+        // `turn` 只喂卡片上的「第 N 轮」文案，**不能**当成出卡的前提：字段缺失时
+        // 提前 return 会把一条带着上游错误原文的结局一起丢掉，退化成 R043 之前的
+        // 静默状态——正好丢掉了本需求最要紧的信息（R043 审查 P2-2）。
+        val turnValue = event.data.long("turn")
+        val outcome = parseTurnOutcome(event.data["reason"]) ?: return null
+        if (outcome is TurnOutcome.Completed) return null
+        return ChatItem.TurnResult(
             seq = event.seq,
             time = event.time,
-            turn = turn,
-            text = if (reason.isEmpty()) "第 ${turn + 1} 轮结束" else "第 ${turn + 1} 轮结束（$reason）",
-            eventType = event.type,
+            turn = turnValue ?: 0L,
+            outcome = outcome,
+            turnKnown = turnValue != null,
         )
     }
 

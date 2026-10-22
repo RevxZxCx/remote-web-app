@@ -63,6 +63,7 @@ class ComposerAttachmentTest {
         onRemove: (Int) -> Unit = {},
         onSend: () -> Unit = {},
         onStop: () -> Unit = {},
+        commandsError: String? = null,
     ) {
         compose.setContent {
             Composer(
@@ -80,6 +81,8 @@ class ComposerAttachmentTest {
                 onAttachImage = { _, _, _, _ -> null },
                 onAttachFile = { _, _ -> },
                 onAttachNotice = {},
+                onLoadCommands = {},
+                commandsError = commandsError,
             )
         }
     }
@@ -164,15 +167,42 @@ class ComposerAttachmentTest {
     }
 
     @Test
-    fun `点加号给出选图片与选文件两个入口`() {
+    fun `点加号给出图片文件引用三个入口`() {
         setComposer()
         // R017：「＋」字符换成 `Icons.Default.Add` 图标，带 contentDescription「添加附件」。
-        // 判据从文本换成 contentDescription——这也更接近真实用户（读屏用户）的路径。
+        // R043：弹的不再是「选图片 / 选文件」二选一的 AlertDialog，而是三段式
+        // 面板（添加 / 快捷 / 命令）；添加段有三格，其中「引用」是新增的
+        // ——它拼的是正文里的 `@path`，不上传附件。
         compose.onNodeWithContentDescription("添加附件").performClick()
         compose.waitForIdle()
-        compose.onNodeWithText("添加附件").assertIsDisplayed()
-        compose.onNodeWithText("选图片").assertIsDisplayed()
-        compose.onNodeWithText("选文件").assertIsDisplayed()
+        compose.onNodeWithText("添加").assertIsDisplayed()
+        compose.onNodeWithText("图片").assertIsDisplayed()
+        compose.onNodeWithText("文件").assertIsDisplayed()
+        compose.onNodeWithText("引用").assertIsDisplayed()
+    }
+
+    @Test
+    fun `加号面板的快捷段给出设为目标与计划模式`() {
+        // 用户 m26743 明确要求「能进行各种的添加，比如任务、目标」，
+        // 所以快捷段必须有这两条，且不依赖命令清单是否已加载。
+        setComposer()
+        compose.onNodeWithContentDescription("添加附件").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("快捷").assertIsDisplayed()
+        compose.onNodeWithText("设为目标").assertIsDisplayed()
+        compose.onNodeWithText("计划模式").assertIsDisplayed()
+    }
+
+    @Test
+    fun `命令清单读不到时只降级命令段`() {
+        // 关键取舍：命令清单要额外一次 RPC，失败很常见。失败时
+        // 「添加」与「快捷」必须照常可用，不能整个加号都点不动。
+        setComposer(commandsError = "transport：网络请求失败")
+        compose.onNodeWithContentDescription("添加附件").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("图片").assertIsDisplayed()
+        compose.onNodeWithText("设为目标").assertIsDisplayed()
+        compose.onNodeWithText("命令清单读不到：transport：网络请求失败").assertIsDisplayed()
     }
 
     @Test

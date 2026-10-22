@@ -154,14 +154,48 @@ class SessionEventParserTest {
     }
 
     @Test
-    fun `turn-end 变成提示并带事件类型`() {
-        val item = parser.parse(
-            obj("""{"type":"turn/end","seq":40,"time":9,"data":{"turn":2,"reason":"completed"}}"""),
+    fun `turn-end 正常结束不产生任何条目`() {
+        // R043 之前的实现把每次 turn/end 都变成一条「第 N 轮结束」提示；
+        // 现在正常结束是噪声（它在真实日志里占 646 次里的 465 次），
+        // 只有非正常结局才落成 TurnResult 卡片。
+        assertNull(
+            parser.parse(
+                obj("""{"type":"turn/end","seq":40,"time":9,"data":{"turn":2,"reason":{"kind":"completed"}}}"""),
+            ),
         )
-        val notice = item as ChatItem.Notice
-        assertEquals("turn/end", notice.eventType)
-        assertEquals(2L, notice.turn)
-        assertTrue(notice.text.contains("completed"))
+    }
+
+    @Test
+    fun `turn-end 失败落成带上游原文的结局卡`() {
+        // R043 第 1 条的核心回归：`reason` 是对象，旧实现用字符串扩展读它
+        // 恒得 null，于是模型报错被渲染成中性的「第 N 轮结束」，错误原文丢失。
+        val item = parser.parse(
+            obj(
+                """
+                {"type":"turn/end","seq":40,"time":9,"data":{"turn":2,
+                 "reason":{"kind":"error","error":{"message":"429 too many","code":"RATE_LIMIT","status":429}}}}
+                """.trimIndent(),
+            ),
+        )
+        val result = item as ChatItem.TurnResult
+        assertEquals(2L, result.turn)
+        val outcome = result.outcome as TurnOutcome.Failed
+        assertEquals("429 too many", outcome.message)
+        assertEquals("RATE_LIMIT", outcome.code)
+        assertEquals(429, outcome.status)
+    }
+
+    @Test
+    fun `turn-end 截断与中止也落成结局卡`() {
+        val truncated = parser.parse(
+            obj("""{"type":"turn/end","seq":41,"time":9,"data":{"turn":3,"reason":{"kind":"max-tokens"}}}"""),
+        ) as ChatItem.TurnResult
+        assertEquals(TurnOutcome.Truncated, truncated.outcome)
+
+        val aborted = parser.parse(
+            obj("""{"type":"turn/end","seq":42,"time":9,"data":{"turn":4,"reason":{"kind":"aborted","reason":{"kind":"user"}}}}"""),
+        ) as ChatItem.TurnResult
+        assertEquals(TurnOutcome.Aborted(AbortCause.USER), aborted.outcome)
     }
 
     @Test
@@ -462,5 +496,20 @@ class SessionEventParserTest {
         for (type in listOf("assistant/message", "tool/call", "tool/result", "session/title")) {
             assertTrue(parser.isCacheable(parsed("""{"type":"$type","seq":4,"time":1,"data":{}}""")))
         }
+    }
+
+    @Test
+    fun turnEndWithoutTurnFieldStillProducesResultCard() {
+        // 审查 P2-2：`turn` 只用于「第 N 轮」文案，缺失时不能连卡一起丢——
+        // 那会把带上游错误原文的结局退化成 R043 之前的静默状态。
+        val item = parser.parse(
+            obj(
+                """{"type":"turn/end","seq":9,"time":1,
+                 "data":{"reason":{"kind":"error","error":{"message":"boom","code":"SERVER"}}}}""".trimIndent(),
+            ),
+        )
+        val card = item as ChatItem.TurnResult
+        assertEquals("boom", (card.outcome as TurnOutcome.Failed).message)
+        assertFalse(card.turnKnown)
     }
 }

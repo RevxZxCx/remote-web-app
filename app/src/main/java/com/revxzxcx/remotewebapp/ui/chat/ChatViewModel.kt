@@ -17,6 +17,7 @@ import com.revxzxcx.remotewebapp.core.protocol.TypertException
 import com.revxzxcx.remotewebapp.core.session.ChatArgs
 import com.revxzxcx.remotewebapp.core.session.ChatFrame
 import com.revxzxcx.remotewebapp.core.session.ChatItem
+import com.revxzxcx.remotewebapp.core.session.ContentBlock
 import com.revxzxcx.remotewebapp.core.session.ChatReducer
 import com.revxzxcx.remotewebapp.core.session.ChatRepository
 import com.revxzxcx.remotewebapp.core.files.WorkspaceFileListing
@@ -30,6 +31,10 @@ import com.revxzxcx.remotewebapp.core.session.mergeContextValue
 import com.revxzxcx.remotewebapp.core.session.rebuildContextValues
 import com.revxzxcx.remotewebapp.core.session.replayPendingContext
 import com.revxzxcx.remotewebapp.core.session.FileUploadRepository
+import com.revxzxcx.remotewebapp.core.session.ComposerCatalogRepository
+import com.revxzxcx.remotewebapp.core.session.CommandCatalogParser
+import com.revxzxcx.remotewebapp.core.session.FileReference
+import com.revxzxcx.remotewebapp.core.session.SlashCommand
 import com.revxzxcx.remotewebapp.core.session.ImageLimits
 import com.revxzxcx.remotewebapp.core.session.ImageMeasure
 import com.revxzxcx.remotewebapp.core.session.ImageRejection
@@ -119,12 +124,146 @@ class ChatViewModel(
     /** 文件上传（发文件前必须先换回执，见 [FileUploadRepository]）。 */
     private val uploads = connection.uploads
 
+    /** 输入区「+」面板的命令清单与文件引用（R043 第 2 条）。 */
+    private val composerCatalog = ComposerCatalogRepository(connection)
+
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
 
     /** 输入框内容（放在 ViewModel 里，旋转屏幕不丢）。 */
     private val _draft = MutableStateFlow("")
     val draft: StateFlow<String> = _draft.asStateFlow()
+
+    // ------------------------------------------------- 输入区「+」面板（R043）
+
+    /** 命令清单；未加载成功时为空表。 */
+    private val _commands = MutableStateFlow<List<SlashCommand>>(emptyList())
+    val commands: StateFlow<List<SlashCommand>> = _commands.asStateFlow()
+
+    private val _commandsLoading = MutableStateFlow(false)
+    val commandsLoading: StateFlow<Boolean> = _commandsLoading.asStateFlow()
+
+    private val _commandsError = MutableStateFlow<String?>(null)
+    val commandsError: StateFlow<String?> = _commandsError.asStateFlow()
+
+    /** 已经选好的文件引用（会拼成 `@path` 追加在消息末尾）。 */
+    private val _references = MutableStateFlow<List<FileReference>>(emptyList())
+    val references: StateFlow<List<FileReference>> = _references.asStateFlow()
+
+    private var commandsJob: Job? = null
+
+    /**
+     * 拉一次命令清单。
+     *
+     * **失败只降级命令段**，不把整个「+」面板禁掉（见 `ComposerAddSheet` 的 KDoc）：
+     * 服务端可能因为插件被禁用而返回空，或这次 RPC 超时，但选图片/选文件与命令无关。
+     *
+     * 只在面板第一次打开时调用；成功过就不再重拉——清单在一次 App 生命周期里不会变，
+     * 每次开面板都拉一遍等于每次多一个往返。
+     */
+    fun loadCommands(force: Boolean = false) {
+        if (!force && _commands.value.isNotEmpty()) return
+        if (commandsJob?.isActive == true) return
+        _commandsLoading.value = true
+        _commandsError.value = null
+        commandsJob = viewModelScope.launch {
+            try {
+                _commands.value = composerCatalog.loadCommands(sessionId)
+                _commandsError.value = null
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Exception) {
+                _commandsError.value = describe(cause)
+            } finally {
+                _commandsLoading.value = false
+            }
+        }
+    }
+
+    /** 把选中的命令塞进输入框（`/name ` 或直接发送无参数命令由 UI 决定）。 */
+    fun applyCommand(command: SlashCommand, argument: String) {
+        onDraftChange(CommandCatalogParser.compose(command, argument))
+    }
+
+    /**
+     * 追加一条文件引用。
+     *
+     * 引用在正文里是 `@path`——那是桌面端的写法，服务端的 `@` 引用源认的也是这个语法。
+     * 已经加过的不重复加（同一个文件引用两次没有意义，还会让服务端解析出两段）。
+     */
+    fun addReference(reference: FileReference) {
+        if (_references.value.any { it.path == reference.path }) return
+        _references.value = _references.value + reference
+    }
+
+    // -------------------------------------------------- 引用选择器（R043）
+
+    private val _referenceResults = MutableStateFlow<List<FileReference>>(emptyList())
+    val referenceResults: StateFlow<List<FileReference>> = _referenceResults.asStateFlow()
+
+    private val _referenceLoading = MutableStateFlow(false)
+    val referenceLoading: StateFlow<Boolean> = _referenceLoading.asStateFlow()
+
+    private val _referenceError = MutableStateFlow<String?>(null)
+    val referenceError: StateFlow<String?> = _referenceError.asStateFlow()
+
+    private var referenceJob: Job? = null
+
+    /**
+     * 按关键词搜工作区文件（`fileReferences/list`）。
+     *
+     * 输入即搜，所以这里自己吞掉 [kotlinx.coroutines.CancellationException] 之外的失败：
+     * 连续打字时每一次都挂一条错误横幅比不搜更烦。切换输入时取消上一次在途请求，
+     * 否则「打了 R → 打了 R0」两个结果会互相覆盖（后到的未必是新的）。
+     */
+    fun searchReferences(query: String) {
+        referenceJob?.cancel()
+        referenceJob = viewModelScope.launch {
+            _referenceLoading.value = true
+            try {
+                _referenceResults.value = composerCatalog.searchReferences(sessionId, query)
+                _referenceError.value = null
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Exception) {
+                _referenceError.value = describe(cause)
+            } finally {
+                _referenceLoading.value = false
+            }
+        }
+    }
+
+    fun clearReferenceResults() {
+        referenceJob?.cancel()
+        _referenceResults.value = emptyList()
+        _referenceError.value = null
+        _referenceLoading.value = false
+    }
+
+    fun removeReference(reference: FileReference) {
+        _references.value = _references.value.filterNot { it.path == reference.path }
+    }
+
+    /**
+     * 重试会不会丢附件。
+     *
+     * `retryTurn` 只重发正文，原轮次的图片/文件不带回去（`session/prompt` 的附件是
+     * 一次性 content 块，`ChatItem.User.blocks` 里虽有原始块，但重放它等于伪造一次
+     * 新的上传）。带附件的那一轮重试注定复现不出原问题，所以卡片上要说清楚，
+     * 不能装作能一模一样地重来（R043 审查 P3-1）。
+     */
+    fun retryDropsAttachments(resultSeq: Long): Boolean =
+        _state.value.items.lastOrNull { it is ChatItem.User && it.seq < resultSeq }
+            ?.let { (it as ChatItem.User).blocks.any { b -> b !is ContentBlock.Text } }
+            ?: false
+
+    /**
+     * 发出去的那条消息：草稿 + 引用后缀。
+     *
+     * 引用不单独走一个 RPC，而是**拼进正文**——`session/prompt` 只吃文本，没有
+     * 「附带引用列表」这种参数（`ChatArgs.prompt` 只有 text/attachments）。
+     */
+    fun composedText(): String = composeOutgoingText(_draft.value, _references.value)
 
     /**
      * 全局连接状态（需求 FR-4.4），直接取自唯一的载波。
@@ -547,6 +686,86 @@ class ChatViewModel(
     }
 
     /**
+     * 重发某一轮的用户消息（轮次结果卡上的「重试本轮」）。
+     *
+     * 不复用 [send]：它读的是输入框里的草稿，而这里要发的是**历史里那条**用户消息。
+     * 用户点「重试」时输入框很可能还写着别的东西，把它发出去是灾难。
+     *
+     * 说话人归属：`user/message` 不带 `turn` 字段（[com.revxzxcx.remotewebapp.core.session.ChatItem.User]
+     * 的 `turn` 恒为 0），所以不能用 turn 相等去匹配，只能按 seq 取「这一轮结果卡之前
+     * 最近的一条用户消息」——事件日志里 turn/end 一定排在它所属轮次的用户消息之后。
+     *
+     * 找不到（例如翻页后用户消息已被裁掉）时挂一条 `sendError` 说明，而不是静默无反应：
+     * 用户点了一个按钮，界面什么都不发生，比报错更让人困惑。
+     */
+    fun retryTurn(resultSeq: Long) {
+        val origin = _state.value.items.lastOrNull { it is ChatItem.User && it.seq < resultSeq }
+            as? ChatItem.User
+        if (origin == null) {
+            _state.value = _state.value.copy(sendError = "找不到这一轮对应的用户消息，可能是历史被裁剪了")
+            return
+        }
+        if (sendJob?.isActive == true) return
+        if (interactive.value != null) {
+            _attachNotice.value = "先回答上面的请求，再发新消息。"
+            return
+        }
+        sendJob = viewModelScope.launch {
+            _state.value = _state.value.copy(sending = true)
+            try {
+                repository.prompt(
+                    sessionId = sessionId,
+                    text = origin.text,
+                    mode = ChatArgs.PromptMode.Queue,
+                    attachments = emptyList(),
+                    clientTimeZone = java.util.TimeZone.getDefault().id,
+                )
+                _state.value = _state.value.copy(sendError = null)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Exception) {
+                _state.value = _state.value.copy(sendError = describe(cause))
+            } finally {
+                _state.value = _state.value.copy(sending = false)
+            }
+        }
+    }
+
+    /**
+     * 输出被截断后「继续写」。
+     *
+     * 只是发一句「继续」——服务端没有「接着上次续写」的专用 RPC（`session/prompt` 就是
+     * 追加一条用户消息），桌面端做的也是这件事。文案取最短的那句，避免把它当成正式的
+     * 用户发言。
+     */
+    fun continueTurn() {
+        if (sendJob?.isActive == true) return
+        if (interactive.value != null) {
+            _attachNotice.value = "先回答上面的请求，再发新消息。"
+            return
+        }
+        sendJob = viewModelScope.launch {
+            _state.value = _state.value.copy(sending = true)
+            try {
+                repository.prompt(
+                    sessionId = sessionId,
+                    text = CONTINUE_PROMPT,
+                    mode = ChatArgs.PromptMode.Queue,
+                    attachments = emptyList(),
+                    clientTimeZone = java.util.TimeZone.getDefault().id,
+                )
+                _state.value = _state.value.copy(sendError = null)
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Exception) {
+                _state.value = _state.value.copy(sendError = describe(cause))
+            } finally {
+                _state.value = _state.value.copy(sending = false)
+            }
+        }
+    }
+
+    /**
      * 发送输入框里的文本。
      *
      * 成功后清空输入框；失败保留输入内容并把错误挂到状态上（不能让用户白打一遍字）。
@@ -573,7 +792,11 @@ class ChatViewModel(
      * 加了第二条发送入口（比如快捷键）绕过 UI。
      */
     fun send() {
-        val text = _draft.value.trim()
+        // ⚠️ 必须是 `composedText()` 而不是 `_draft.value`：选中的文件引用是以
+        // `@path` 后缀拼进正文发出去的（[composedText] 的 KDoc 有解释）。首版这里
+        // 读的是草稿，chip 在界面上看得见、消息里却没有，引用功能等于装饰
+        // （R043 审查 P1-1）。
+        val text = composedText().trim()
         val attachments = _pending.value
         if (text.isEmpty() && attachments.isEmpty()) return
         if (sendJob?.isActive == true) return
@@ -630,6 +853,9 @@ class ChatViewModel(
                     }
                 }
                 _pending.value = emptyList()
+                // 引用与草稿同生命周期：草稿都清了，chip 必须一起清，否则下一条
+                // 消息会把上一条的引用再发一遍（R043 审查 P1-1 的连带问题）。
+                _references.value = emptyList()
                 _attachNotice.value = null
                 _state.value = _state.value.copy(error = null, sendError = null)
             } catch (cause: kotlinx.coroutines.CancellationException) {
@@ -1959,6 +2185,14 @@ class ChatViewModel(
          */
         private const val DRAFT_SAVE_DEBOUNCE_MS = 700L
 
+        /**
+         * 「继续写」发送的用户消息文本（[continueTurn]）。
+         *
+         * 服务端没有「续写上一次输出」的专用入口，桌面端做的也是补一句用户消息，
+         * 所以这里就用最短的两个字，别让它读起来像正式发言。
+         */
+        private const val CONTINUE_PROMPT = "继续"
+
         fun factory(
             connection: DshConnection,
             sessionId: String,
@@ -1968,4 +2202,23 @@ class ChatViewModel(
             initializer { ChatViewModel(connection, sessionId, cache, ownerId) }
         }
     }
+
+}
+
+/**
+ * 把草稿与选中的文件引用拼成真正发出去的那条文本。
+ *
+ * 抽成顶层纯函数只为一个理由：这是**引用功能唯一的实质逻辑**，而 [ChatViewModel]
+ * 的构造依赖真 `AppContainer`（Keystore + Room），在 JVM 单测里造不出来。R043 首版
+ * `send()` 读的是草稿、`composedText()` 一个调用点都没有，结果「引用」在界面上看得见、
+ * 消息里却没有（审查 P1-1 就是这么漏掉的）——把这行逻辑拿出来单测，才不会第二次漏。
+ *
+ * 引用以 ` @path` 后缀拼在正文末尾：`session/prompt` 只吃文本，没有「附带引用列表」
+ * 这种参数（`ChatArgs.prompt` 只有 text/attachments）。
+ */
+internal fun composeOutgoingText(draft: String, references: List<FileReference>): String {
+    if (references.isEmpty()) return draft
+    val suffix = references.joinToString(" ") { "@${it.path}" }
+    val base = draft.trimEnd()
+    return if (base.isEmpty()) suffix else "$base $suffix"
 }
