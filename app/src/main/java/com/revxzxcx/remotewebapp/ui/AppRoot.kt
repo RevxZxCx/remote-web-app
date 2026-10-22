@@ -33,6 +33,7 @@ import com.revxzxcx.remotewebapp.core.AppState
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.ui.chat.ChatScreen
 import com.revxzxcx.remotewebapp.ui.chat.ChatViewModel
+import com.revxzxcx.remotewebapp.ui.chat.DetailTab
 import com.revxzxcx.remotewebapp.ui.common.ConfirmUnpairDialog
 import com.revxzxcx.remotewebapp.ui.debug.DebugScreen
 import com.revxzxcx.remotewebapp.ui.debug.DebugViewModel
@@ -149,6 +150,39 @@ fun AppRoot(container: AppContainer) {
 
     /** 当前查看的文件；null 表示不在文件查看页。 */
     var openFile by rememberSaveable { mutableStateOf<FileTarget?>(null) }
+
+    // ── R041（用户 m24881 第 ③ 条）：对话详情侧栏的跨屏状态 ──────────────────
+    //
+    // 三个值本来在 `ChatScreen` 里 `remember`，但「从侧栏点开文件」会切到
+    // `file != null` 分支，聊天分支整个离开组合——那些 `remember` 随之消失，
+    // 返回时侧栏就是关的（用户原话：「点开文件后，再返回就直接关闭侧边栏到对话
+    // 界面」）。提到这里之后它们跨分支存活，返回时侧栏还在、页签还是「文件」、
+    // 目录还是刚才那一层。
+    //
+    // 用 `rememberSaveable`：这是「用户手动走到哪了」的导航状态，进程被回收后
+    // 重建应当回到同一处，而不是弹回会话详情根目录。
+    var sidebarOpen by rememberSaveable { mutableStateOf(false) }
+
+    /** 侧栏当前页签（存 name，枚举在 Bundle 里不如 String 稳当）。 */
+    var sidebarTabName by rememberSaveable { mutableStateOf(DetailTab.SESSION.name) }
+    val sidebarTab = DetailTab.entries.firstOrNull { it.name == sidebarTabName } ?: DetailTab.SESSION
+
+    /** 侧栏文件页签当前所在目录（相对会话 cwd，根是空串）。 */
+    var sidebarFilesPath by rememberSaveable { mutableStateOf("") }
+
+    // 离开会话就把侧栏收回到初始态。
+    //
+    // 不重置会串味：从会话 A 的文件页签下钻到 `docs/dev`，返回首页再进会话 B，
+    // B 的侧栏一打开就停在 A 的目录上——而 B 的 cwd 可能根本没有 `docs`，于是
+    // 列出来是空的，看起来像「文件页签坏了」。这条状态的归属是「某个会话的一次
+    // 查看」，不是「这个 App 的一次查看」。
+    //
+    // 放在 `openSession` 置空/换值的同一处，避免两处各写一遍。
+    fun resetSidebar() {
+        sidebarOpen = false
+        sidebarTabName = DetailTab.SESSION.name
+        sidebarFilesPath = ""
+    }
 
     /** 是否停在调试页（需求 FR-4.4 / 可观测）。 */
     var openDebug by rememberSaveable { mutableStateOf(false) }
@@ -276,6 +310,7 @@ fun AppRoot(container: AppContainer) {
                                     onOpenSession = { summary, _ ->
                                         openSession = summary
                                         openFile = null
+                                        resetSidebar()
                                     },
                                     onOpenDebug = { openDebug = true },
                                     onOpenSettings = { openSettings = true },
@@ -331,14 +366,26 @@ fun AppRoot(container: AppContainer) {
                                 viewModelStoreOwner = owner,
                             )
                             // 系统返回键与标题栏「返回」等效：不然两层下钻后按返回会直接退出 App。
-                            BackHandler(enabled = true) { openSession = null }
+                            BackHandler(enabled = true) {
+                                openSession = null
+                                resetSidebar()
+                            }
                             ScreenTransition(route = "chat") {
                                 ChatScreen(
                                     viewModel = vm,
                                     title = session.displayName,
-                                    onBack = { openSession = null },
+                                    onBack = {
+                                        openSession = null
+                                        resetSidebar()
+                                    },
                                     onOpenFile = { target -> openFile = target },
                                     onUnpair = { pendingUnpair = true },
+                                    sidebarOpen = sidebarOpen,
+                                    onSidebarOpenChange = { sidebarOpen = it },
+                                    sidebarTab = sidebarTab,
+                                    onSidebarTabChange = { sidebarTabName = it.name },
+                                    filesPath = sidebarFilesPath,
+                                    onFilesPathChange = { sidebarFilesPath = it },
                                 )
                             }
                         }

@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -53,8 +55,14 @@ import com.revxzxcx.remotewebapp.ui.common.AppIconButton
 import com.revxzxcx.remotewebapp.ui.theme.bubbleShape
 import com.revxzxcx.remotewebapp.ui.theme.chipShape
 
-/** 侧边栏的两个页签（用户 m22479：一个功能占一个视图）。 */
-internal enum class DetailTab(val label: String) {
+/**
+ * 侧边栏的两个页签（用户 m22479：一个功能占一个视图）。
+ *
+ * public 而非 internal：这个类型出现在 [ChatScreen] 的参数里，而后者是 public 的
+ * （`AppRoot` 直接调用）。R041 把页签状态提到 `AppRoot` 之后，它就成了跨 Composable
+ * 的公开契约，Kotlin 不允许 public 函数暴露 internal 类型。
+ */
+enum class DetailTab(val label: String) {
     SESSION("会话详情"),
     FILES("文件"),
 }
@@ -100,14 +108,16 @@ internal fun DetailSidebar(
     Surface(
         modifier = modifier
             .fillMaxHeight()
-            .width(SidebarWidth)
-            .padding(vertical = 8.dp, horizontal = 0.dp),
+            .width(SidebarWidth),
         shape = SidebarShape,
         color = MaterialTheme.colorScheme.surface,
         shadowElevation = 12.dp,
         tonalElevation = 0.dp,
     ) {
-        Column(Modifier.fillMaxSize()) {
+        // R041（用户 m24881）：侧栏现在从 `top: 0` 铺到 `bottom: 0`（原型 `.sheet` 就是
+        // `top:0; right:0; bottom:0`），不再被顶栏挤出一个上留边。既然它盖住了整屏，
+        // 系统栏也归它自己让——否则标题钻进状态栏、页脚压在导航条底下。
+        Column(Modifier.fillMaxSize().systemBarsPadding()) {
             SidebarHeader(onClose = onClose)
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
             TabPicker(current = tab, onSelect = onTabChange)
@@ -307,8 +317,27 @@ private fun OccupancyCard(insights: ContextInsights) {
             )
         }
         Spacer(Modifier.height(7.dp))
-        OccupancyBar(fraction = fraction)
-        Spacer(Modifier.height(6.dp))
+
+        // ── 窗口构成（用户 m24881 第 1 条）。
+        //
+        // 原来这里是一条单色进度条，用户看到后说「上下文条没有分类显示构成的样式」。
+        // 原型 `docs/R040-效果图.html` 第 2 节里这条是**七段堆叠条 + 图例**：
+        // 段宽 = 该段在累计构成里的占比 × 已用比例，所以七段加起来正好是占用率，
+        // 剩下的一截留白就是余量（插件的 `.lc-stacked` 也是这个画法）。
+        //
+        // 为什么能这么算：`breakdown` 是全会话累计，`usedTokens` 是本轮占用，两者
+        // 只按**比例**参与，不做同量纲加减——所以 24 倍的量纲差不会污染段宽。
+        val segments = insights.segmentsBySize
+        if (segments.isNotEmpty()) {
+            SegmentStackedBar(segments = segments, fraction = fraction)
+            Spacer(Modifier.height(6.dp))
+            SegmentLegend(segments = segments, fraction = fraction)
+            Spacer(Modifier.height(6.dp))
+        } else {
+            OccupancyBar(fraction = fraction)
+            Spacer(Modifier.height(6.dp))
+        }
+
         Row(Modifier.fillMaxWidth()) {
             Text(
                 text = if (insights.hasTurnUsage) "本轮请求" else "累计（桌面端未给本轮数据）",
@@ -346,6 +375,117 @@ private fun OccupancyBar(fraction: Float) {
                 ),
         )
     }
+}
+
+/**
+ * 窗口构成条的段宽（占整条的比例，0..1）。
+ *
+ * 每段 = `该段 token ÷ 累计总量 × 已用比例`。与 [insights.segmentsBySize] 同序。
+ * 抽成纯函数是为了能在 JVM 单测里直接验算——UI 里算权重无法断言。
+ *
+ * 已用比例会被夹到 0..1：桌面端偶尔给出超窗口的瞬时值（压缩前的最后一帧），
+ * 不夹会让剩下那一截变成负权重、整条塌掉。
+ */
+internal fun segmentBarShares(tokens: List<Long>, total: Long, fraction: Float): List<Float> {
+    if (total <= 0L) return tokens.map { 0f }
+    val used = fraction.coerceIn(0f, 1f)
+    return tokens.map { token ->
+        if (token <= 0L) 0f else (token.toFloat() / total.toFloat()) * used
+    }
+}
+
+/**
+ * 窗口构成的堆叠条：七段（降级时三段）紧贴，余量留白。
+ *
+ * 与「累计构成」卡里的 [StackedBar] 不是同一条：那条表达「全量内部构成」，
+ * 这条表达「当前窗口被谁占了」。同一套配色、同一个画法，量纲不同。
+ */
+@Composable
+private fun SegmentStackedBar(segments: List<ContextSegment>, fraction: Float) {
+    val total = segments.sumOf { it.tokens }
+    val shares = segmentBarShares(segments.map { it.tokens }, total, fraction)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(10.dp)
+            .clip(RoundedCornerShape(5.dp))
+            .background(ContextPalette.track.copy(alpha = 0.18f)),
+    ) {
+        segments.forEachIndexed { index, segment ->
+            val share = shares[index]
+            if (share <= 0f) return@forEachIndexed
+            Box(
+                Modifier
+                    // 用 fillMaxWidth(fraction) 而不是 weight：段宽本身就是「占整条的
+                    // 多少」，直接给比例才不会因为兄弟节点个数变化而重新归一化。
+                    .fillMaxWidth(share)
+                    .fillMaxHeight()
+                    .background(ContextPalette.ofSegment(segment.key)),
+            )
+        }
+    }
+}
+
+/**
+ * 窗口构成的图例：非零段全部列出（原型 `.legend7` 也是 flex-wrap 全列）。
+ *
+ * 不截断成「前 N 段 + 其余」：用户 m24881 投诉的正是「与原型不一样」，而原型
+ * `docs/R040-效果图.html` 第 2 节里七枚彩色图例是**一个不少**地排两行。真实会话里
+ * 小段只有 0.0x%，截断后就只剩「其余 3 段」这种读不出信息的占位。
+ *
+ * 0.1% 的段在 318dp 宽的条上不足 1px，点不中也看不清——图例是这一块的文字出口。
+ */
+@Composable
+private fun SegmentLegend(segments: List<ContextSegment>, fraction: Float) {
+    val total = segments.sumOf { it.tokens }
+    if (total <= 0L) return
+    val used = fraction.coerceIn(0f, 1f)
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        segments.filter { it.tokens > 0L }.forEach { segment ->
+            val share = segment.tokens.toFloat() / total.toFloat() * used
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(ContextPalette.ofSegment(segment.key)),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = "${segment.label} ${formatPercent(share)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 百分比文案。
+ *
+ * 小段必须给一位小数：《助手 8.9% / 工具结果 6.2% / 注入 0.5%》里最后一段只有
+ * 0.01%，取整后全变 0%，用户会以为那几段不存在（原型里也是这么标的）。
+ */
+internal fun formatPercent(share: Float): String {
+    val percent = share * 100f
+    if (percent <= 0f) return "0%"
+    // 分档看的是**渲染之后**的值，不是原始值：9.99% 用一位小数渲染出来就是
+    // `10.0%`，与 10% 这一档自相矛盾。所以先按档渲染，再按渲染结果重新判档。
+    val text = when {
+        percent >= 10f -> String.format(java.util.Locale.US, "%.0f", percent)
+        percent >= 1f -> String.format(java.util.Locale.US, "%.1f", percent)
+        else -> String.format(java.util.Locale.US, "%.2f", percent)
+    }
+    // 去掉多余的小数零：`10.0` → `10`、`6.40` → `6.4`、`1.00` → `1`。
+    // 不这么做的话，「10%」这个数字会以 `10.0%` 的形式出现，读者会以为两者不同档。
+    val trimmed = if ('.' in text) text.trimEnd('0').trimEnd('.') else text
+    return "$trimmed%"
 }
 
 /**
@@ -734,6 +874,20 @@ private fun FilesTab(
 /** 拼一个相对路径。根是空串时不能拼出 `/name`——服务端会当成绝对路径拒绝。 */
 internal fun joinPath(parent: String, name: String): String =
     if (parent.isEmpty()) name else "$parent/$name"
+
+/**
+ * 上一级目录（相对路径，根是空串）。
+ *
+ * 抽出来是因为 R041 之后它有两个调用方：`ChatViewModel.filesUp()` 真的去列上一级，
+ * 而 `ChatScreen` 的 `onFilesUp` 还要把「向上走一层」这件事同步回 `AppRoot`（否则从
+ * 文件页返回时会恢复到刚离开的那一层）。两处各写一遍 `substringBeforeLast('/', "")`
+ * 迟早会走偏——比如某天给根加上 `"."` 的表示法，只改一处就错。
+ *
+ * 没有单独的「已在根就直接返回」分支：[String.substringBeforeLast] 的
+ * `missingDelimiterValue` 已经是空串，`""` 进来自然还是 `""`。曾写过那个早退，
+ * 变异测试证明删掉它一条用例都不会红——它是死代码，所以不留。
+ */
+internal fun parentPath(current: String): String = current.substringBeforeLast('/', "")
 
 /** 文件大小：与工作区文件页保持一致的口径（B / KB / MB）。 */
 internal fun formatSize(bytes: Long): String = when {

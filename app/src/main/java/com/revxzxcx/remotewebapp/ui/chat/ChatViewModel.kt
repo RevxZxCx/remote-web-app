@@ -1061,8 +1061,7 @@ class ChatViewModel(
     fun filesUp() {
         val current = _filesPath.value
         if (current.isEmpty()) return
-        val parent = current.substringBeforeLast('/', "")
-        openFiles(parent)
+        openFiles(parentPath(current))
     }
 
     /**
