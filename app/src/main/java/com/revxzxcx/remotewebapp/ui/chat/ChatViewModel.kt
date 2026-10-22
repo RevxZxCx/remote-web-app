@@ -56,12 +56,15 @@ import com.revxzxcx.remotewebapp.core.session.toBase64
 import com.revxzxcx.remotewebapp.core.session.validateImage
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.retryWhen
@@ -318,7 +321,26 @@ class ChatViewModel(
     /** 列目录失败的原因（null 表示没有错误）。 */
     val filesError = _filesError
 
+    /** 正在「刷新」（保留旧列表）；首次进入目录用的是 [filesLoading] 的整屏 spinner。 */
+    private val _filesRefreshing = MutableStateFlow(false)
+
+    val filesRefreshing = _filesRefreshing
+
+    /** 已经列过的目录，键是相对路径（根是空串）。切换目录时靠它免掉一次往返。 */
+    private val filesCache = mutableMapOf<String, WorkspaceFileListing>()
+
+    /**
+     * 每次发起目录请求就自增，`finally` 只清自己那一版留下的标志位。
+     *
+     * 不能只比较 path：[refreshFiles] 刷的是**同一个** path，`filesJob?.cancel()` 之后旧
+     * 协程的 `finally` 是异步执行的，可能排在新协程把 `filesRefreshing` 置真之后才跑，
+     * 于是下拉指示器与刷新按钮的禁用态提前消失，用户能再叠一次请求。
+     */
+    private var filesJobVersion = 0
+
     private var filesJob: Job? = null
+    private var filesWatchJob: Job? = null
+    private var watchPath: String? = null
 
     private var pageJob: Job? = null
     private var sendJob: Job? = null
@@ -1041,20 +1063,122 @@ class ChatViewModel(
     fun openFiles(path: String) {
         filesJob?.cancel()
         _filesPath.value = path
+        // 命中缓存就直接用（R042 用户要求：进子目录、看完文件退回来，都不该再转圈）。
+        // 缓存里的内容可能已经旧了，但目录监听会在变化时把它刷掉；监听不可用时还有
+        // 下拉刷新与「刷新」按钮兜底，所以这里不必每次重新请求。
+        val cached = filesCache[path]
+        if (cached != null) {
+            _files.value = cached
+            _filesLoading.value = false
+            _filesError.value = null
+            watchCurrentDirectory(path)
+            return
+        }
         _filesLoading.value = true
+        _filesError.value = null
+        fetchFiles(path)
+    }
+
+    /**
+     * 重新列当前目录（用户点了「刷新」或下拉，或者监听报告了变化）。
+     *
+     * 与 [openFiles] 的区别只有一处：**不看缓存**。列表保留在屏幕上直到新数据到达，
+     * 期间不显示整屏 spinner——刷新是「确认一下」，不该让人以为内容没了。
+     */
+    fun refreshFiles() {
+        fetchFiles(_filesPath.value, keepVisible = true)
+    }
+
+    private fun fetchFiles(path: String, keepVisible: Boolean = false) {
+        filesJob?.cancel()
+        val version = ++filesJobVersion
+        if (!keepVisible) _filesLoading.value = true
+        _filesRefreshing.value = keepVisible
         _filesError.value = null
         filesJob = viewModelScope.launch {
             try {
                 val listing = fileRepository.list(sessionId, path.ifEmpty { "." })
+                // 请求回来时用户可能已经切到别的目录了，迟到的结果不能覆盖当前列表。
+                if (_filesPath.value != path) return@launch
+                filesCache[path] = listing
                 _files.value = listing
+                watchCurrentDirectory(path)
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Exception) {
-                _filesError.value = describe(cause)
+                if (_filesPath.value == path) _filesError.value = describe(cause)
             } finally {
-                _filesLoading.value = false
+                // 只清自己那一版：被取消的旧请求不能抹掉新请求刚点亮的标志位（见
+                // filesJobVersion 的注释）。
+                if (filesJobVersion == version) {
+                    _filesLoading.value = false
+                    _filesRefreshing.value = false
+                }
             }
         }
+    }
+
+    /**
+     * 监听当前目录的直接子项，变了就重列一次。
+     *
+     * 监听失败**静默降级**：服务端在部分场景会拒（`workspace-file/watch-unsupported`），
+     * 这时用户仍然有刷新按钮和下拉刷新，没必要为了「自动更新不可用」再弹一条错误。
+     *
+     * 每条 `change` 都重新 `list`：帧里只说「这个路径变了」，不带目录内容，所以监听
+     * 省掉的是轮询，不是请求。连续多次变化用 [FILES_WATCH_DEBOUNCE_MS] 合并。
+     */
+    @OptIn(FlowPreview::class)
+    private fun watchCurrentDirectory(path: String) {
+        if (watchPath == path && filesWatchJob?.isActive == true) return
+        filesWatchJob?.cancel()
+        watchPath = path
+        filesWatchJob = viewModelScope.launch {
+            try {
+                // 去抖必须挂在上游：写在 `collect` 体里的 `delay` 是**串行节流**，上游
+                // 缓冲里排队的每一帧仍会被逐个消费，`git checkout` 那种连推几十帧的场景
+                // 就等于几十次 `list`。`debounce` 直接丢掉窗口内的后续帧。
+                fileRepository
+                    .watchDirectory(sessionId, path)
+                    .debounce(FILES_WATCH_DEBOUNCE_MS)
+                    .collect {
+                        if (_filesPath.value == path) fetchFiles(path, keepVisible = true)
+                    }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Exception) {
+                // 监听不可用（老版本桌面端 / 平台不支持）——静默，用户仍可手动刷新。
+            }
+        }
+    }
+
+    /**
+     * 侧栏重新打开时接到文件页签：重启监听，并静默对一次账。
+     *
+     * [stopFilesWatch] 在侧栏关闭时会停掉监听，于是「关着的那段时间」里发生的变化一条都
+     * 收不到；而重新打开走的是缓存路径（[openFiles] 命中缓存就直接显示，不再请求），
+     * 屏幕上于是出现一份**过期但看起来正常**的列表。这里补上关闭期间欠下的那次核对。
+     *
+     * `keepVisible = true` 是关键：列表已经在屏幕上，对账不该让它闪成整屏 spinner。
+     * [watchCurrentDirectory] 自带「同路径且监听还活着就返回」的短路，所以重复调用安全。
+     */
+    fun resumeFilesWatch() {
+        val path = _filesPath.value
+        watchCurrentDirectory(path)
+        fetchFiles(path, keepVisible = true)
+    }
+
+    /**
+     * 停掉目录监听。
+     *
+     * 侧栏一关（或切回「会话详情」页签）就该停：`ChatViewModel` 是 chat 作用域，侧栏关掉
+     * 不会走 [onCleared]，放任它活着会让每一帧变化都继续发 `list`——用户根本看不到那份
+     * 列表了。同时把 [watchPath] 置空，否则重新打开侧栏时 `watchPath == path` 的短路会
+     * 让监听再也起不来。
+     */
+    fun stopFilesWatch() {
+        filesWatchJob?.cancel()
+        filesWatchJob = null
+        watchPath = null
     }
 
     /** 从当前目录往上退一级；已经在根时什么都不做（避免把 `.` 再拼成 `..`）。 */
@@ -1788,6 +1912,7 @@ class ChatViewModel(
         projectionJob?.cancel()
         contextJob?.cancel()
         filesJob?.cancel()
+        filesWatchJob?.cancel()
         questionPollJob?.cancel()
         controlJob?.cancel()
         answerJob?.cancel()
@@ -1796,6 +1921,14 @@ class ChatViewModel(
 
     companion object {
         private const val MAX_BACKOFF_MS = 30_000L
+
+        /**
+         * 目录监听的变化合并窗口。
+         *
+         * 一次 `git checkout` 会连着推几十帧 `change`，每帧重新 `list` 一遍目录既没必要
+         * 也会把界面刷得发抖；攒一小会儿再拉一次，人眼看起来就是「跟着变」。
+         */
+        private const val FILES_WATCH_DEBOUNCE_MS = 350L
 
         /**
          * 草稿命名空间里标记「这组提问来自 `$events` waterfall」的前缀。

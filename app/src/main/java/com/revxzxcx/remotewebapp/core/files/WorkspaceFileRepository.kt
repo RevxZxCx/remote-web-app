@@ -5,6 +5,8 @@ import com.revxzxcx.remotewebapp.core.protocol.DshEndpoints
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
 import com.revxzxcx.remotewebapp.core.protocol.objOrNull
 import com.revxzxcx.remotewebapp.core.protocol.strOrNull
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -24,6 +26,32 @@ import kotlinx.serialization.json.put
  * 只有读方法；「编辑文件」在 App 里不存在，这是设计决定 D15。
  */
 class WorkspaceFileRepository(private val connection: DshConnection) {
+
+    /**
+     * 监听一个目录的直接子项变动（`workspaceFiles/changes`，Typert 的 **stream** 方法）。
+     *
+     * 服务端语义（从 `app.asar` 的 `WorkspaceChangeFeed.follow` 取证）：先推一帧
+     * `{kind:'ready'}` 表示监视已建立，之后**每次**该目标被观测到变化就推
+     * `{kind:'change', change:{absolutePath, version}}`；目标被删除时 `version` 换成
+     * `{absent:true}`。目录目标会被限定在工作区内，越界抛
+     * `workspace-file/outside-workspace`；底层 watch 不可用抛
+     * `workspace-file/watch-unsupported`。
+     *
+     * 帧里**不带**目录内容，只说明「这个路径变了」——所以接上它之后仍然要重新 `list`
+     * 一次，它省掉的是轮询，不是请求。
+     *
+     * @param path 相对工作区根的目录；根传 `.`（空串会被服务端拒）。
+     */
+    fun watchDirectory(sessionId: String, path: String): Flow<WorkspaceFileChange> =
+        connection.mux
+            .open(
+                DshEndpoints.WORKSPACE_FILES_CHANGES,
+                buildJsonObject {
+                    put(DshEndpoints.ARG_FILE_SCOPE, sessionId)
+                    put(DshEndpoints.ARG_PATH, path.ifEmpty { "." })
+                },
+            )
+            .mapNotNull { WorkspaceFileChange.parse(it) }
 
     /**
      * 读一段文本。

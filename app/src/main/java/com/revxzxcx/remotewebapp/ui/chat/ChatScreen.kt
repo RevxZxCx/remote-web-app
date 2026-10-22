@@ -391,17 +391,51 @@ fun ChatScreen(
     val vmFilesPath by viewModel.filesPath.collectAsState()
     val filesLoading by viewModel.filesLoading.collectAsState()
     val filesError by viewModel.filesError.collectAsState()
+    val filesRefreshing by viewModel.filesRefreshing.collectAsState()
 
     // 侧栏的页签与目录都在 [AppRoot]，本屏只负责「按需把数据取回来」。
     //
     // 放在这里而不是页签回调里，是为了覆盖「从文件页返回」这一路：那时 ChatViewModel 是
     // 新建的（`files` 为 null、`filesPath` 为空串），但用户期望看到离开前那一层目录，
     // 所以按提升上来的 [filesPath] 重新列一次。
-    // 侧栏开着时拦下系统返回键：这一层是「盖在对话上的一层」，返回先关它，
-    // 而不是直接退出会话（与首页抽屉的手感一致）。
-    BackHandler(enabled = sidebarOpen) { onSidebarOpenChange(false) }
+    // 侧栏开着时拦下系统返回键，且**分层**（R042 用户要求）：
+    //
+    // - 文件页签且不在根目录 → 返回上一级目录（与界面上那颗「上一级」箭头同一语义）；
+    // - 其余情况 → 关掉侧栏。
+    //
+    // 之前是一律关侧栏，于是在 `docs/dev` 里按返回会直接回到对话，用户得重新点开侧栏
+    // 再一层层点回来。注意判据取的是 `vmFilesPath`（浏览中实时的目录）而不是提升上来的
+    // 参数：后者在点进子目录的同一帧里还没更新。
+    BackHandler(enabled = sidebarOpen) {
+        when (val action = sidebarBackAction(sidebarTab, vmFilesPath)) {
+            is SidebarBackAction.GoUp -> {
+                viewModel.openFiles(action.target)
+                onFilesPathChange(action.target)
+            }
 
-    LaunchedEffect(sidebarOpen, sidebarTab, filesPath) {
+            SidebarBackAction.CloseSidebar -> onSidebarOpenChange(false)
+        }
+    }
+
+    LaunchedEffect(sidebarOpen, sidebarTab) {
+        if (sidebarOpen && sidebarTab == DetailTab.FILES) {
+            // 有关键的一层区别：缓存已经有内容时不能再走 openFiles（它命中缓存就直接
+            // 返回，既不发请求也不重启监听），关着的那段时间里发生的变化就永远补不上。
+            when (filesEntryAction(viewModel.files.value != null)) {
+                FilesEntryAction.Load -> viewModel.openFiles(filesPath)
+                FilesEntryAction.ResumeAndReconcile -> viewModel.resumeFilesWatch()
+            }
+        } else {
+            // 侧栏关掉、或切回「会话详情」页签：目录监听必须停。ChatViewModel 是 chat
+            // 作用域，侧栏关掉不会走 onCleared，放任它活着会让每一帧变化继续发 list。
+            viewModel.stopFilesWatch()
+        }
+    }
+
+    // 兜底：从独立的文件页返回时 ChatViewModel 是新建的（files 为 null、目录为空串），
+    // 用户期望看到离开前那一层，所以按提升上来的 [filesPath] 重新列一次。切目录本身由
+    // onOpenDirectory 直接调 openFiles，不依赖这里。
+    LaunchedEffect(filesPath) {
         if (sidebarOpen && sidebarTab == DetailTab.FILES && viewModel.files.value == null) {
             viewModel.openFiles(filesPath)
         }
@@ -946,6 +980,8 @@ fun ChatScreen(
                         viewModel.filesUp()
                         onFilesPathChange(parent)
                     },
+                    filesRefreshing = filesRefreshing,
+                    onRefreshFiles = viewModel::refreshFiles,
                     modifier = Modifier.align(Alignment.CenterEnd),
                 )
             }

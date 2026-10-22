@@ -1,9 +1,12 @@
 package com.revxzxcx.remotewebapp.ui.chat
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -20,11 +23,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -104,6 +111,8 @@ internal fun DetailSidebar(
     onOpenFile: (path: String, name: String) -> Unit,
     onFilesUp: () -> Unit,
     modifier: Modifier = Modifier,
+    filesRefreshing: Boolean = false,
+    onRefreshFiles: () -> Unit = {},
 ) {
     Surface(
         modifier = modifier
@@ -136,9 +145,11 @@ internal fun DetailSidebar(
                         path = filesPath,
                         loading = filesLoading,
                         error = filesError,
+                        refreshing = filesRefreshing,
                         onOpenDirectory = onOpenDirectory,
                         onOpenFile = onOpenFile,
                         onUp = onFilesUp,
+                        onRefresh = onRefreshFiles,
                     )
                 }
             }
@@ -772,21 +783,24 @@ private fun UsageCard(insights: ContextInsights) {
  * 点文件**不在这里预览**：交给已有的 `FileViewerScreen`（它已经处理了 md 渲染、
  * 代码高亮、图片、分页，再写一遍就是第二套要维护的渲染器）。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FilesTab(
     listing: WorkspaceFileListing?,
     path: String,
     loading: Boolean,
     error: String?,
+    refreshing: Boolean,
     onOpenDirectory: (String) -> Unit,
     onOpenFile: (path: String, name: String) -> Unit,
     onUp: () -> Unit,
+    onRefresh: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 6.dp),
+                .padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -813,56 +827,132 @@ private fun FilesTab(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            // 手动刷新：目录监听不可用时（老桌面端 / 平台不支持）这是唯一出路，
+            // 所以它常驻，不做「仅在失败时出现」的条件渲染。
+            Box(
+                Modifier
+                    .clip(MaterialTheme.shapes.extraSmall)
+                    .clickable(enabled = !refreshing && !loading, onClick = onRefresh)
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = "刷新文件列表",
+                    modifier = Modifier.size(15.dp),
+                    tint = if (refreshing || loading) {
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
         }
 
-        when {
-            loading && listing == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(Modifier.size(26.dp), strokeWidth = 2.dp)
-            }
+        // 下拉刷新（R042 用户要求）。
+        //
+        // 三个非列表分支（加载中 / 读失败 / 空目录）各自套了一层
+        // [verticalScroll]：`PullToRefreshBox` 靠**嵌套滚动**收手势，内容不可滚动时
+        // 手指下拉传不到它那里，指示器根本不会出现——而这三种恰恰是最需要「再拉一下
+        // 试试」的时候（目录刚建、刚才读失败）。给它们一个内容不足一屏的滚动容器就能
+        // 接住下拉，视觉上仍然是居中的一段文字。
+        PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = onRefresh,
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            when {
+                loading && listing == null -> PullHint(
+                    text = null,
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    CircularProgressIndicator(Modifier.size(26.dp), strokeWidth = 2.dp)
+                }
 
-            error != null -> Box(
-                Modifier.fillMaxSize().padding(20.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
+                error != null -> PullHint(
                     text = "读不到这个目录\n$error",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    textAlign = TextAlign.Center,
+                    error = true,
+                    modifier = Modifier.fillMaxSize(),
                 )
-            }
 
-            listing == null || listing.entries.isEmpty() -> Box(
-                Modifier.fillMaxSize().padding(20.dp),
+                listing == null || listing.entries.isEmpty() -> PullHint(
+                    text = "这个目录是空的。",
+                    modifier = Modifier.fillMaxSize(),
+                )
+
+                else -> {
+                    // 目录在前、文件在后，各自按名称排序：这是文件管理器最通行的排法，
+                    // 服务端返回的顺序不保证。
+                    val directories = listing.entries.filter { it.isDirectory }.sortedBy { it.name }
+                    val files = listing.entries.filterNot { it.isDirectory }.sortedBy { it.name }
+                    LazyColumn(Modifier.fillMaxSize()) {
+                        items(directories, key = { "d:${it.name}" }) { entry ->
+                            FileRow(
+                                name = entry.name,
+                                detail = "目录",
+                                isDirectory = true,
+                                onClick = { onOpenDirectory(joinPath(path, entry.name)) },
+                            )
+                        }
+                        items(files, key = { "f:${it.name}" }) { entry ->
+                            FileRow(
+                                name = entry.name,
+                                detail = entry.size?.let(::formatSize).orEmpty(),
+                                isDirectory = false,
+                                onClick = { onOpenFile(joinPath(path, entry.name), entry.name) },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 文件页里那些「不满一屏」的状态：加载中 / 读失败 / 空目录。
+ *
+ * 为什么要包一层 [verticalScroll]：`PullToRefreshBox` 靠**嵌套滚动**收手势，内容本身
+ * 不可滚动时手指下拉传不到它那里，指示器根本不会出现——而这三种恰恰是最想「再拉一下
+ * 试试」的时候（目录刚建出来、上一次读失败、刚切到文件页还没回来）。
+ *
+ * 用 [verticalScroll] 而不是单 item 的 `LazyColumn`：后者会给整块内容挂上「列表，1 项」
+ * 的集合语义，读屏用户听到的就不再是「加载中」或错误提示，而是一个只有一项的列表
+ * （`CircularProgressIndicator` 也会被当成列表项）。滚动容器只提供手势，不改变语义。
+ *
+ * 内层高度取 `maxHeight` 的 `heightIn(min = …)`：内容不足一屏时它撑满、文字仍然居中；
+ * 错误信息长到超过一屏时又能自然变高、可以滚起来看全。
+ */
+@Composable
+private fun PullHint(
+    modifier: Modifier = Modifier,
+    text: String? = null,
+    error: Boolean = false,
+    content: (@Composable () -> Unit)? = null,
+) {
+    BoxWithConstraints(modifier) {
+        val available = maxHeight
+        Box(
+            modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+        ) {
+            Box(
+                modifier = Modifier.fillMaxWidth().heightIn(min = available),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    text = "这个目录是空的。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            else -> {
-                // 目录在前、文件在后，各自按名称排序：这是文件管理器最通行的排法，
-                // 服务端返回的顺序不保证。
-                val directories = listing.entries.filter { it.isDirectory }.sortedBy { it.name }
-                val files = listing.entries.filterNot { it.isDirectory }.sortedBy { it.name }
-                LazyColumn(Modifier.fillMaxSize()) {
-                    items(directories, key = { "d:${it.name}" }) { entry ->
-                        FileRow(
-                            name = entry.name,
-                            detail = "目录",
-                            isDirectory = true,
-                            onClick = { onOpenDirectory(joinPath(path, entry.name)) },
-                        )
-                    }
-                    items(files, key = { "f:${it.name}" }) { entry ->
-                        FileRow(
-                            name = entry.name,
-                            detail = entry.size?.let(::formatSize).orEmpty(),
-                            isDirectory = false,
-                            onClick = { onOpenFile(joinPath(path, entry.name), entry.name) },
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    content?.invoke()
+                    if (text != null) {
+                        Text(
+                            text = text,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (error) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            textAlign = TextAlign.Center,
                         )
                     }
                 }
@@ -888,6 +978,58 @@ internal fun joinPath(parent: String, name: String): String =
  * 变异测试证明删掉它一条用例都不会红——它是死代码，所以不留。
  */
 internal fun parentPath(current: String): String = current.substringBeforeLast('/', "")
+
+/**
+ * 侧栏切到「文件」页签时该做什么。
+ *
+ * 两种情形看着都叫「打开文件页」，代价却完全不同：
+ *
+ * - 列表还是空的（刚进会话、或从独立文件页返回时 `ChatViewModel` 是新建的）→ 老老实实
+ *   列一次，用户愿意等那一圈。
+ * - 列表已经有内容（侧栏关过一次又打开）→ **不能**再走从零加载那条路：它命中缓存就
+ *   直接返回，既不发请求也不重启监听，于是「侧栏关着的那段时间」里发生的变化永远补不上，
+ *   屏幕上留着一份过期但看起来正常的列表。这时要的是「重启监听 + 静默对一次账」。
+ *
+ * 抽成纯函数是因为这条区别在真机上不可见——两种路径的画面**一模一样**，只有过一会儿
+ * 才看出差别（新的文件不出现）。判断要是写在 `LaunchedEffect` 里，就只能靠人眼守。
+ */
+internal enum class FilesEntryAction {
+    /** 从零列一次：有 spinner，成功后建立监听。 */
+    Load,
+
+    /** 缓存已在屏幕上：不闪 spinner，重启监听并把欠下的那次核对补上。 */
+    ResumeAndReconcile,
+}
+
+internal fun filesEntryAction(hasListing: Boolean): FilesEntryAction =
+    if (hasListing) FilesEntryAction.ResumeAndReconcile else FilesEntryAction.Load
+
+/**
+ * 系统返回键在侧栏里该做什么（R042 用户要求的分层）。
+ *
+ * 用户原话是「在子目录的时候，返回键应该回到上一级，只有在工作区根目录的时候，返回键
+ * 才关闭侧栏」。这个判断原本内联在 `ChatScreen` 的 `BackHandler` 里，一行 `if` 看着
+ * 无害，但它是**唯一**决定「按返回会不会把整个侧栏关掉」的地方——写错的表现是用户在
+ * 三层深的目录里按一次返回就回到对话，而且没有任何报错。抽成纯函数才测得动。
+ *
+ * 只认「文件页签 + 当前路径非空」两种情况，会话详情页签一律关侧栏：那里没有层级，
+ * 返回键再「向上」就没有意义了。
+ */
+internal fun sidebarBackAction(tab: DetailTab, currentPath: String): SidebarBackAction =
+    if (tab == DetailTab.FILES && currentPath.isNotEmpty()) {
+        SidebarBackAction.GoUp(parentPath(currentPath))
+    } else {
+        SidebarBackAction.CloseSidebar
+    }
+
+/** [sidebarBackAction] 的结果。`GoUp` 带着目标目录，避免调用方再算一次。 */
+internal sealed interface SidebarBackAction {
+    /** 退回上一级目录。 */
+    data class GoUp(val target: String) : SidebarBackAction
+
+    /** 关掉侧栏。 */
+    data object CloseSidebar : SidebarBackAction
+}
 
 /** 文件大小：与工作区文件页保持一致的口径（B / KB / MB）。 */
 internal fun formatSize(bytes: Long): String = when {

@@ -43,4 +43,42 @@ class SidebarPathTest {
         assertEquals("docs/dev", joinPath("docs", "dev"))
         assertEquals("docs", joinPath("", "docs"))
     }
+
+    @Test
+    fun backGoesUpWhileInsideADirectory() {
+        // R042 用户要求的核心一条：在子目录里按返回是「上一级」，不是关掉侧栏。
+        assertEquals(SidebarBackAction.GoUp(""), sidebarBackAction(DetailTab.FILES, "docs"))
+        assertEquals(SidebarBackAction.GoUp("docs"), sidebarBackAction(DetailTab.FILES, "docs/dev"))
+        assertEquals(
+            SidebarBackAction.GoUp("docs/dev"),
+            sidebarBackAction(DetailTab.FILES, "docs/dev/notes"),
+        )
+    }
+
+    @Test
+    fun backClosesSidebarOnlyAtWorkspaceRoot() {
+        // 根目录再按返回就是退无可退，这时关侧栏才符合直觉。
+        assertEquals(SidebarBackAction.CloseSidebar, sidebarBackAction(DetailTab.FILES, ""))
+    }
+
+    @Test
+    fun backOnSessionTabAlwaysClosesSidebar() {
+        // 会话详情页签没有层级概念；即使文件页签刚才停在深层目录，也不该在这里「向上」。
+        assertEquals(SidebarBackAction.CloseSidebar, sidebarBackAction(DetailTab.SESSION, ""))
+        assertEquals(SidebarBackAction.CloseSidebar, sidebarBackAction(DetailTab.SESSION, "docs/dev"))
+    }
+
+    @Test
+    fun emptyListingLoadsFromScratch() {
+        // 列表还没内容（刚进会话、或从独立文件页返回），只能老老实实列一次。
+        assertEquals(FilesEntryAction.Load, filesEntryAction(hasListing = false))
+    }
+
+    @Test
+    fun existingListingResumesInsteadOfSilentlyReturning() {
+        // 列表已在屏幕上（侧栏关过一次又打开）。这条是 R042 审查 P2 的回归：
+        // 走 openFiles 会命中缓存直接 return，既不请求也不重启监听，于是侧栏关着那段
+        // 时间里的变化永远补不上——画面上完全看不出来，只有「新文件不出现」这一种症状。
+        assertEquals(FilesEntryAction.ResumeAndReconcile, filesEntryAction(hasListing = true))
+    }
 }

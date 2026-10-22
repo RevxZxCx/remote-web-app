@@ -1,5 +1,9 @@
 package com.revxzxcx.remotewebapp.core.files
 
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+
 /**
  * `workspaceFiles/read` 的返回。
  *
@@ -64,6 +68,37 @@ sealed interface FileBytes {
             this === other || (other is Multipart && contentType == other.contentType && data.contentEquals(other.data))
 
         override fun hashCode(): Int = 31 * contentType.hashCode() + data.contentHashCode()
+    }
+}
+
+/**
+ * `workspaceFiles/changes` 的一帧。
+ *
+ * 服务端是 `WorkspaceFileWatchFrame = {kind:'ready'} | {kind:'change', change:{…}}`。
+ * `ready` 只表示「监视已建立」，不携带数据，解析时**故意丢掉**：调用方关心的是
+ * 「目录内容可能变了」，而不是握手本身。未知帧（服务端将来加字段）同样返回 null，
+ * 宁可少一次刷新也不要因为不认识一帧就把监听流打断。
+ */
+data class WorkspaceFileChange(
+    /** 变化目标的绝对路径；服务端给的是 `WorkspaceFileChange.absolutePath`。 */
+    val absolutePath: String,
+    /** 变化后的版本串；目标被删除时为 null。 */
+    val version: String?,
+) {
+    /** 目标是否已不存在（服务端给的是 `{absent:true}` 而不是 version）。 */
+    val absent: Boolean get() = version == null
+
+    companion object {
+        /** 解析一帧；`ready` 与未知帧返回 null。 */
+        fun parse(raw: JsonElement): WorkspaceFileChange? {
+            val obj = raw as? JsonObject ?: return null
+            if ((obj["kind"] as? JsonPrimitive)?.content != "change") return null
+            val change = obj["change"] as? JsonObject ?: return null
+            val path = (change["absolutePath"] as? JsonPrimitive)?.content ?: return null
+            // `absent:true` 时服务端不给 version；`version` 存在就取，缺了按删除处理。
+            val version = (change["version"] as? JsonPrimitive)?.content
+            return WorkspaceFileChange(absolutePath = path, version = version)
+        }
     }
 }
 
