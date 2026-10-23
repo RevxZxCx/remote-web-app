@@ -171,6 +171,29 @@ sealed interface ChatItem {
 ) : ChatItem
 
     /**
+     * 一条斜杠命令的执行记录（R045，用户 m27926 期间的连带发现）。
+     *
+     * 为什么必须自己渲染：`command/run` / `command/done` 是**独立的落盘事件**，
+     * 不挂在任何 turn 上（实测 `data` 只有 `commandId` / `name` / `args` / `source`，
+     * 没有 `turn`）。R043 之前 App 完全不认这两个事件，于是用户从输入区发 `/export`
+     * 时，命令确实被执行了（服务端事件里能看到 `kind:"success"` 与输出），但
+     * **界面上一个字都没有**——用户以为按钮没反应。
+     *
+     * [text] 是 `command/done` 的输出；[running] 为真表示只收到了 `command/run`，
+     * 结果还没回来（渲染成「执行中」）。
+     */
+    data class CommandResult(
+        override val seq: Long,
+        override val time: Long,
+        override val turn: Long = 0L,
+        val commandId: String,
+        val line: String,
+        val running: Boolean,
+        val succeeded: Boolean,
+        val text: String?,
+    ) : ChatItem
+
+    /**
      * 「这一轮改了哪些文件」的**占位卡片**（需求 FR-5.4）。
      *
      * ⚠️ 这条事件（`workspace/changes`）的 `data` **只有 `{turn}`**，文件清单并不在事件里：

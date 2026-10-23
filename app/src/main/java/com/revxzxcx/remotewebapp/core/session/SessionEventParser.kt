@@ -63,6 +63,8 @@ class SessionEventParser {
         "tool/call" -> toolCallItem(event)
         "tool/result" -> toolResultItem(event)
         "turn/end" -> turnEndNotice(event)
+        "command/run" -> commandRunItem(event)
+        "command/done" -> commandDoneItem(event)
         "workspace/changes" -> changesCard(event)
         "session/title" -> titleNotice(event)
         "compaction/summary" -> ChatItem.Notice(
@@ -72,6 +74,48 @@ class SessionEventParser {
             eventType = event.type,
         )
         else -> null
+    }
+
+    /**
+     * `command/run` —— 一条斜杠命令开始执行（R045）。
+     *
+     * 先落一张「执行中」的卡：`command/done` 可能几毫秒后才到，也可能永远不到
+     * （用户中途取消、命令内部抛出）。没有这张占位卡，用户点完 `/export` 到结果
+     * 回来之间界面完全静止，与「按钮没反应」无法区分。
+     */
+    private fun commandRunItem(event: SessionEvent): ChatItem? {
+        val run = CommandExecutionParser.parseRun(event.data) ?: return null
+        return ChatItem.CommandResult(
+            seq = event.seq,
+            time = event.time,
+            commandId = run.commandId,
+            line = run.line,
+            running = true,
+            succeeded = false,
+            text = null,
+        )
+    }
+
+    /**
+     * `command/done` —— 命令结算。
+     *
+     * ⚠️ 这条事件**不带 `name`**（只有 `commandId` / `kind` / `text`），所以这里无法
+     * 自己拼出 `/xxx`：卡片靠 [ChatReducer] 按 `commandId` 与 `command/run` 那条合并
+     * （见 `ChatReducer.onEvent` 的命令合并分支）。解析器仍要为「只看到 done、没看到 run」
+     * 的情况产出条目——例如中途连上 follow 流时窗口正好从 done 开始，此时显示结果本身
+     * 仍比什么都不显示好。
+     */
+    private fun commandDoneItem(event: SessionEvent): ChatItem? {
+        val done = CommandExecutionParser.parseDone(event.data) ?: return null
+        return ChatItem.CommandResult(
+            seq = event.seq,
+            time = event.time,
+            commandId = done.commandId,
+            line = "",
+            running = false,
+            succeeded = done.succeeded,
+            text = done.text,
+        )
     }
 
     /**

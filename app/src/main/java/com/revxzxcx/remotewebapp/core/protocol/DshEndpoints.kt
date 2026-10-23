@@ -75,6 +75,20 @@ object DshEndpoints {
     const val COMMANDS_LIST = "commands/list"
     const val FILE_REFERENCES_LIST = "fileReferences/list"
 
+    /**
+     * 执行一条斜杠命令（`commands/execute`，R045）。
+     *
+     * 与 [COMMANDS_LIST] 同属 `commands` 服务，`inputs` 的 wire 名同样是 `agentId`。
+     * 参数里还有 `line`（完整的一行，含斜杠与前导参数）与 `submittedAttachments`
+     * （图片/文件回执，纯命令调用时传空数组）。
+     *
+     * **为什么 App 必须自己调它**：R043 把「发送」一律走了 [SESSION_PROMPT]，斜杠行
+     * 于是被当作普通文本投进模型上下文；服务端的命令解析器虽然也会执行它（结果落
+     * `command/run` / `command/done`），但模型同时也收到了一条无意义的 `/export`。
+     * 桌面端是「一路执行命令、一路不发给模型」，App 必须一致。
+     */
+    const val COMMANDS_EXECUTE = "commands/execute"
+
     // -------------------------------------------------------------- workspace
 
     const val WORKSPACE_CREATE = "workspace/create"

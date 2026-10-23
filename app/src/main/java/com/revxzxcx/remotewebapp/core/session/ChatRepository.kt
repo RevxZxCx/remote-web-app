@@ -6,7 +6,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import java.util.UUID
 
 /**
@@ -89,6 +92,31 @@ class ChatRepository(
             ChatArgs.prompt(requestId, sessionId, text, mode, attachments, clientTimeZone),
         )
         requestId
+    }
+
+    /**
+     * 执行一条斜杠命令（`commands/execute`，R045）。
+     *
+     * @param line 完整的一行，含斜杠与前导参数（`/export`、`/goal 把测试补全`）。
+     * @return 命令的结果；**`null` 表示服务端不认这条命令**——descriptor 的 result 是
+     *   `union([undefined, {commandId, result}])`，命中不了任何已注册命令时服务端回
+     *   `{ok:true}` 而**没有** `value`，`callRaw` 于是给出 `JsonNull`。
+     *   这不是错误（不抛异常），调用方要自己决定怎么提示。
+     */
+    suspend fun executeCommand(
+        sessionId: String,
+        line: String,
+        submittedAttachments: JsonArray = JsonArray(emptyList()),
+    ): CommandExecution? = withContext(Dispatchers.IO) {
+        val raw = connection.typert.callRaw(
+            DshEndpoints.COMMANDS_EXECUTE,
+            buildJsonObject {
+                put("agentId", JsonPrimitive(ComposerCatalogRepository.agentIdOf(sessionId)))
+                put("line", JsonPrimitive(line))
+                put("submittedAttachments", submittedAttachments)
+            },
+        )
+        CommandExecutionParser.parse(raw)
     }
 
     /** 中止当前生成（`session/cancel` → `{accepted:true}`）。 */

@@ -33,6 +33,7 @@ import com.revxzxcx.remotewebapp.core.session.replayPendingContext
 import com.revxzxcx.remotewebapp.core.session.FileUploadRepository
 import com.revxzxcx.remotewebapp.core.session.ComposerCatalogRepository
 import com.revxzxcx.remotewebapp.core.session.CommandCatalogParser
+import com.revxzxcx.remotewebapp.core.session.isExecutableCommand
 import com.revxzxcx.remotewebapp.core.session.FileReference
 import com.revxzxcx.remotewebapp.core.session.SlashCommand
 import com.revxzxcx.remotewebapp.core.session.ImageLimits
@@ -153,6 +154,14 @@ class ChatViewModel(
     private var commandsJob: Job? = null
 
     /**
+     * 斜杠行的分流任务（[dispatchSlash]）。
+     *
+     * 与 [commandsJob] 分开：那个是「拉清单」，这个是「等清单回来再决定这条怎么发」。
+     * 连发两条斜杠消息时后一条要取代前一条的判断，否则两条都可能落到旧状态上。
+     */
+    private var commandDispatchJob: Job? = null
+
+    /**
      * 拉一次命令清单。
      *
      * **失败只降级命令段**，不把整个「+」面板禁掉（见 `ComposerAddSheet` 的 KDoc）：
@@ -177,6 +186,66 @@ class ChatViewModel(
             } finally {
                 _commandsLoading.value = false
             }
+        }
+    }
+
+    /**
+     * 以斜杠开头的行的分流：认得的命令走 `commands/execute`，不认得的按普通文本发。
+     *
+     * 必须等命令清单真正到手再判——清单拉取是异步的，若拿空清单立刻判定，
+     * 所有斜杠行都会落到「不认得」分支（这正是 R045 设备验收抓到的缺陷）。
+     */
+    private fun dispatchSlash(text: String) {
+        // ⚠️ 不能 `commandDispatchJob?.cancel()`：上一条正在 `ensureCommands()` 的网络
+        // 等待里，取消它等于把那条用户输入直接扔掉——既没执行也没发出，全程无声
+        // （R045 审查 P1）。改成串行排队：后一条等前一条判完再判。
+        val previous = commandDispatchJob
+        commandDispatchJob = viewModelScope.launch {
+            previous?.join()
+            val commands = ensureCommands()
+            val known = commands.map { it.name }.toSet()
+            if (isExecutableCommand(text, known)) {
+                if (!runCommandNow(text)) {
+                    // 上一条命令还在执行：说一声，别让用户以为按钮失灵（审查 P2）。
+                    _attachNotice.value = "上一条命令还在执行，这条先留着了。"
+                }
+                return@launch
+            }
+            // 服务端确实不认识这条：按普通文本发（用户可能就是想讨论一个以斜杠
+            // 开头的东西，不能因为不认识就吞掉他的消息）。
+            // 先发再提示：`sendAsText` 成功路径会清 `attachNotice`（审查 P2-2），
+            // 提示若先写就会被几百毫秒后的那次清理抹掉。
+            // 只有真的受理了才敢说「已发出」：`sendAsText` 在生成中或有待答交互时
+            // 会早退，那时它自己已经写了提示，这里再覆盖成「已发出」就是误导
+            // （R045 三轮审查 P2）。
+            if (sendAsText(text, clearNotice = false)) {
+                _attachNotice.value = if (commands.isEmpty()) {
+                    "命令清单读不到，这条按普通消息发出。"
+                } else {
+                    "服务端不认识 ${text.substringBefore(' ')}，已按普通消息发出。"
+                }
+            }
+        }
+    }
+
+    /** 拿到命令清单：已有就复用，没有就同步拉一次（失败返回空表，由调用方降级）。 */
+    private suspend fun ensureCommands(): List<SlashCommand> {
+        if (_commands.value.isNotEmpty()) return _commands.value
+        commandsJob?.let { if (it.isActive) it.join() }
+        if (_commands.value.isNotEmpty()) return _commands.value
+        _commandsLoading.value = true
+        return try {
+            composerCatalog.loadCommands(sessionId).also {
+                _commands.value = it
+                _commandsError.value = null
+            }
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (cause: Exception) {
+            _commandsError.value = describe(cause)
+            emptyList()
+        } finally {
+            _commandsLoading.value = false
         }
     }
 
@@ -487,6 +556,14 @@ class ChatViewModel(
     /** 「编辑/删除/插队」排队消息的协程（`session/updateQueue`）。 */
     private var queueJob: Job? = null
 
+    /**
+     * 斜杠命令执行的协程（`commands/execute`，R045）。
+     *
+     * 与 [sendJob] 分开：两者走不同 RPC、失败语义也不同（命令失败不该把「发送失败」
+     * 的错误条绑到重发要走上）。同一时刻只允许一条命令在途，重复点等于重复执行。
+     */
+    private var commandJob: Job? = null
+
     private var changesJob: Job? = null
     private var cacheJob: Job? = null
 
@@ -791,18 +868,106 @@ class ChatViewModel(
      * 用户没法同时打字）。UI 已经把输入区换掉了，这里是第二道防线——防止以后有人
      * 加了第二条发送入口（比如快捷键）绕过 UI。
      */
+    /**
+     * 执行一条斜杠命令（R045）。
+     *
+     * 命令结果**不靠本地追加卡片**：服务端执行完会往会话日志里写 `command/run` 与
+     * `command/done` 两条事件，经由已经在跑的 `session/follow` 流回到 App，
+     * 由 `SessionEventParser` + [ChatReducer] 渲染成 [ChatItem.CommandResult]。
+     * 本地再造一张卡会与它们重复（服务端那条的 seq 才是真的）。
+     *
+     * 但「服务端不认这条命令」时**不会有任何事件**（descriptor 的 result 是
+     * `union([undefined, …])`），此时必须由这里给出可见反馈，否则用户点了没反应。
+     */
+    private fun runCommandNow(line: String): Boolean {
+        if (commandJob?.isActive == true) return false
+        commandJob = viewModelScope.launch {
+            try {
+                val execution = repository.executeCommand(sessionId, line)
+                // ⚠️ 清理必须放在「确实受理」之后：`execution == null` 表示服务端根本
+                // 没接这条命令（本地清单过期、或该命令此刻不可执行）。先清草稿再判，
+                // 用户既没结果也没了原文，只能凭记忆重打（R045 审查 P2）。
+                if (execution != null) {
+                    if (_draft.value.trim() == line) {
+                        _draft.value = ""
+                        pendingDraft = null
+                        draftJob?.cancel()
+                        cache?.let { store ->
+                            if (ownerId.isNotBlank()) store.clearDraft(ownerId, sessionId)
+                        }
+                    }
+                    _references.value = emptyList()
+                    _attachNotice.value = null
+                    _state.value = _state.value.copy(error = null, sendError = null)
+                } else {
+                    // 服务端回了 `{ok:true}` 但没有 value：这条命令不在它的注册表里。
+                    // 不是异常，但必须说一声——否则界面上完全没变化。草稿与引用原样保留。
+                    _attachNotice.value = "这条命令没有执行：服务端不认识 ${line.substringBefore(' ')}。"
+                }
+            } catch (cause: kotlinx.coroutines.CancellationException) {
+                throw cause
+            } catch (cause: Exception) {
+                _state.value = _state.value.copy(
+                    sendError = "命令没能发出：${cause.message ?: cause.javaClass.simpleName}",
+                )
+            }
+        }
+        return true
+    }
+
     fun send() {
         // ⚠️ 必须是 `composedText()` 而不是 `_draft.value`：选中的文件引用是以
         // `@path` 后缀拼进正文发出去的（[composedText] 的 KDoc 有解释）。首版这里
         // 读的是草稿，chip 在界面上看得见、消息里却没有，引用功能等于装饰
         // （R043 审查 P1-1）。
         val text = composedText().trim()
+        // 命令识别只看草稿原文：`composedText()` 会把引用拼成 ` @path` 后缀，若拿它
+        // 判定，`/export` 加一个引用就变成 `/export @docs/a.md`，`@path` 会被当成
+        // 命令参数发给 `commands/execute`——而引用语义只对 `session/prompt` 有效
+        // （R045 审查 P3）。
+        val draftLine = _draft.value.trim()
         val attachments = _pending.value
         if (text.isEmpty() && attachments.isEmpty()) return
-        if (sendJob?.isActive == true) return
+        // 斜杠命令走另一条 RPC（R045）。必须放在 `session/prompt` 之前：一旦发出去，
+        // 命令文本会进模型上下文，而结果只落在 `command/done` 事件里——用户既污染了
+        // 对话，又看不到任何输出。判据要求命令在 `commands/list` 里认得，
+        // 不认得的 `/foo` 仍按普通文本发（用户可能就是要讨论一个以斜杠开头的东西）。
+        val commandLine = com.revxzxcx.remotewebapp.ui.chat.commandCandidate(
+            draft = draftLine,
+            referenceCount = _references.value.size,
+            attachmentCount = attachments.size,
+        )
+        if (commandLine != null) {
+            // 直接打字发送时命令清单可能还没拉过（`loadCommands` 原本只在打开加号
+            // 面板时调用），`_commands` 为空会让 `isExecutableCommand` 恒假——
+            // 于是 `/skill-stats` 被当普通文本发给模型，污染一轮对话又看不到输出
+            // （R045 设备验收抓到的真缺陷）。清单没到就先拉、**等它回来**再判；
+            // 不等待的话空清单立刻落到「不认得」分支，等于没修。
+            dispatchSlash(commandLine)
+            return
+        }
+        sendAsText(text)
+    }
+
+    /** [send] 的非命令分支：按普通消息发出去（`session/prompt`）。 */
+    /**
+     * 按普通消息发出（`session/prompt`）。
+     *
+     * @param clearNotice 发送成功后是否顺手清掉 `attachNotice`。默认清——那是上一条
+     *   动作留下的提示，新消息发出去就该换掉。**只有一种情况允许传 false**：调用方
+     *   在这之后紧接着写一条自己的提示（`dispatchSlash` 的「不认识这条命令」就是），
+     *   否则那条提示会被这里的清理抹掉、用户什么也看不到（R045 一轮审查 P2-2）。
+     *   传 false 而不补写提示，会让一个过期提示永久挂在输入区上方。
+     */
+    private fun sendAsText(text: String, clearNotice: Boolean = true): Boolean {
+        val attachments = _pending.value
+        // 返回值 = 「这条消息真的被受理了」。调用方靠它决定要不要写「已发出」这类提示，
+        // 否则被早退的分支会被上一句提示盖掉，用户看到「已按普通消息发出」而实际没发
+        // （R045 三轮审查 P2）。
+        if (sendJob?.isActive == true) return false
         if (interactive.value != null) {
             _attachNotice.value = "先回答上面的请求，再发新消息。"
-            return
+            return false
         }
         // T5 设备验收：发送是网络调用，期间「发送」按钮必须进入不可点的加载态。
         // 否则用户看到按钮一直亮着，会反复点（每次都白跑一次 RPC）。
@@ -856,7 +1021,7 @@ class ChatViewModel(
                 // 引用与草稿同生命周期：草稿都清了，chip 必须一起清，否则下一条
                 // 消息会把上一条的引用再发一遍（R043 审查 P1-1 的连带问题）。
                 _references.value = emptyList()
-                _attachNotice.value = null
+                if (clearNotice) _attachNotice.value = null
                 _state.value = _state.value.copy(error = null, sendError = null)
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 // 取消不是发送失败：`onCleared`/`retry` 会取消在途的发送，此时不该把
@@ -874,6 +1039,7 @@ class ChatViewModel(
                 _state.value = _state.value.copy(sending = false)
             }
         }
+        return true
     }
 
     // ------------------------------------------------- 排队队列（用户 m21177 第 4 条）

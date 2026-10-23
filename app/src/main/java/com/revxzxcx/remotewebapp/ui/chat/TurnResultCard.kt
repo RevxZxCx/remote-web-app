@@ -34,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -158,7 +159,7 @@ internal fun TurnResultCard(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(Color(0xFF0A121D), RoundedCornerShape(10.dp))
+                            .background(errorBlockBg(), RoundedCornerShape(10.dp))
                             .clickable { expanded = !expanded }
                             .padding(horizontal = 8.dp, vertical = 7.dp),
                     ) {
@@ -167,7 +168,7 @@ internal fun TurnResultCard(
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = FontFamily.Monospace,
                             // 原文常带引号、花括号、request_id：等宽 + 独立底色 = 「这是机器输出」。
-                            color = Color(0xFFC8D8EC),
+                            color = errorBlockFg(),
                             maxLines = if (expanded) Int.MAX_VALUE else COLLAPSED_ERROR_LINES,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -339,6 +340,67 @@ internal fun hintOf(outcome: TurnOutcome): String = when (outcome) {
     is TurnOutcome.Completed -> ""
 }
 
+/**
+ * 落在 [tone] 底色上的前景色。
+ *
+ * 不能按亮度二分：浅色主题的 `tertiary` 是 `#F2C14E`（亮度 0.576 > 0.5），二分法会
+ * 把「继续写」胶囊的字取成 `background`，实测对比度只有 1.56:1——比原来写死白色
+ * 的 1.68:1 还差（R045 审查 P2）。改成在两个候选里按实际对比度择优，谁高用谁。
+ */
+@Composable
+private fun onToneOf(tone: Color): Color {
+    // 候选集必须包含主题为**这块底色**定义的前景色，否则择优也选不出对的：
+    // `tertiary = #F2C14E` 上白色只有 1.68:1、`background` 只有 1.56:1，两者都不过 AA，
+    // 而主题本来就为它备了 `onTertiary = #3A2A00`（约 7:1）。同理失败态用 `onError`
+    // （R045 三轮审查 P2）。
+    val candidates = listOf(
+        MaterialTheme.colorScheme.onTertiary,
+        MaterialTheme.colorScheme.onError,
+        Color.White,
+        MaterialTheme.colorScheme.background,
+    )
+    return candidates.maxByOrNull { contrastRatio(it, tone) } ?: Color.White
+}
+
+/**
+ * WCAG 相对对比度：(L1 + 0.05) / (L2 + 0.05)，L 取较亮者。
+ *
+ * 用与 [luminance] 同一套相对亮度公式，避免再引一个色彩库依赖。
+ */
+private fun contrastRatio(a: Color, b: Color): Float {
+    val la = a.luminance()
+    val lb = b.luminance()
+    val hi = maxOf(la, lb)
+    val lo = minOf(la, lb)
+    return (hi + 0.05f) / (lo + 0.05f)
+}
+
+/**
+ * 错误原文块的底色。
+ *
+ * 早先写死 `Color(0xFF0A121D)`：深色主题下没问题，但浅色主题里卡片是白底，
+ * 中间糊一块近乎纯黑的方块，字色又被写死成 `#C8D8EC` 的浅蓝——观感像另开了一个
+ * 暗色页面（用户 m27926 第 1 条配图）。
+ *
+ * 取 `surfaceVariant` 而不是 `surfaceContainerLowest` / `surfaceContainerHighest`：
+ * 后两个令牌本工程 [Theme.kt] 从未定义，会落到 Material3 内置基线（深色 `#0F0D13`、
+ * 浅色 `#E6E0E9`），是中性**紫灰**而不是本 App 的蓝灰 ramp——色相只是从「蓝黑」换成
+ * 「紫黑」，问题没解决。这与 [Theme.kt] 里为 tertiary 记录过的同类事故同源
+ * （R044 四轮审查 P3）。`surfaceVariant` 两套主题都显式定义，且比 surface 各偏一档：
+ * 深色 `#1A2942` 相对 `#111C2B` 抬高一档（内嵌面板），浅色 `#E9EFF7` 相对 `#FFFFFF`
+ * 压一档（灰底块），都是「与卡片同族但可区分」的效果。
+ */
+@Composable
+private fun errorBlockBg(): Color = MaterialTheme.colorScheme.surfaceVariant
+
+/**
+ * 错误原文块的字色。
+ *
+ * 深色主题下是浅蓝灰（机器输出的观感），浅色主题下用 `onSurface` 保证 4.5:1。
+ */
+@Composable
+private fun errorBlockFg(): Color = MaterialTheme.colorScheme.onSurface
+
 /** 主色胶囊按钮（与 Composer 的发送键同一套形状语言）。 */
 @Composable
 private fun PrimaryPill(text: String, onClick: () -> Unit, tone: Color) {
@@ -357,7 +419,10 @@ private fun PrimaryPill(text: String, onClick: () -> Unit, tone: Color) {
                 text = text,
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.Medium,
-                color = Color.White,
+                // 之前写死 `Color.White`。tone 不一定是深色——浅色主题下 tertiary 是
+                // #C08A12 那种琥珀、onSurfaceVariant 是 #45586D，白字压上去对比度不够。
+                // 按底色亮度反推，深底白字、浅底深字。
+                color = onToneOf(tone),
             )
         }
     }

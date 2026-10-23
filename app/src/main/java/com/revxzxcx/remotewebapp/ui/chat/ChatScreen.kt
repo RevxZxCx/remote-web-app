@@ -2659,6 +2659,12 @@ internal fun ChatItemRow(
                     onRetryDropsAttachments(item.seq),
             )
         }
+
+        // R045：斜杠命令的执行记录。命令结果不是模型输出，但用户同样需要看见——
+        // 早前 App 只把 `/export` 当普通文本发出去，命令确实执行了，界面却一个字没有。
+        is ChatItem.CommandResult -> Column(modifier = modifier.fillMaxWidth()) {
+            CommandResultCard(item = item)
+        }
     }
 }
 

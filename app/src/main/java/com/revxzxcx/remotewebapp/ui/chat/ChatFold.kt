@@ -388,7 +388,9 @@ fun foldChatItems(items: List<ChatItem>): List<ChatRow> {
 
     for (item in items) {
         val independent = when (item) {
-            is ChatItem.User, is ChatItem.Notice, is ChatItem.Changes, is ChatItem.TurnResult -> true
+            is ChatItem.User, is ChatItem.Notice, is ChatItem.Changes,
+            is ChatItem.TurnResult, is ChatItem.CommandResult,
+            -> true
             is ChatItem.Assistant -> item.hasReply()
             else -> false
         }

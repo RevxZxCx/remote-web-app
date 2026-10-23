@@ -2,6 +2,7 @@ package com.revxzxcx.remotewebapp.ui.chat
 
 import com.revxzxcx.remotewebapp.core.session.ChatItem
 import com.revxzxcx.remotewebapp.core.session.ContentBlock
+import com.revxzxcx.remotewebapp.core.session.TurnOutcome
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -259,6 +260,21 @@ class ChatFoldTest {
         )
     private fun notice(seq: Long) = ChatItem.Notice(seq = seq, time = 0L, turn = 1L, text = "第 1 轮结束")
     private fun changes(seq: Long) = ChatItem.Changes(seq = seq, time = 0L, turn = 1L)
+    private fun commandResult(seq: Long) = ChatItem.CommandResult(
+        seq = seq,
+        time = 0L,
+        commandId = "cmd-$seq",
+        line = "/skill-stats",
+        running = false,
+        succeeded = true,
+        text = "No skills are managed by this plugin yet.",
+    )
+    private fun turnResult(seq: Long) = ChatItem.TurnResult(
+        seq = seq,
+        time = 0L,
+        turn = 1L,
+        outcome = TurnOutcome.Truncated,
+    )
 
     @Test
     fun `空列表折成空行列表`() {
@@ -323,6 +339,21 @@ class ChatFoldTest {
         val rows = foldChatItems(listOf(toolCall(1), interrupted))
         assertEquals(2, rows.size)
         assertEquals(9L, rows[1].key)
+    }
+
+    @Test
+    fun `命令结果卡与轮次结局卡都是分组边界`() {
+        // 两张卡都是「一眼要看见」的独立信息。不设边界的话它们会被折进相邻的
+        // 工具调用组里，界面上只剩折叠行的一行摘要——R045 设备验收就是这么发现
+        // 「/skill-stats 执行成功但用户只看到『已完成分析』」的。
+        val rows = foldChatItems(
+            listOf(toolCall(1), commandResult(2), toolCall(3), turnResult(4), toolCall(5)),
+        )
+        assertEquals(5, rows.size)
+        assertEquals(2L, rows[1].key)
+        assertEquals(4L, rows[3].key)
+        assertTrue(rows[1] is ChatRow.Single)
+        assertTrue(rows[3] is ChatRow.Single)
     }
 
     @Test

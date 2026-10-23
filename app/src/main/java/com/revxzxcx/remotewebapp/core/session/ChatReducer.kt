@@ -240,7 +240,9 @@ object ChatReducer {
         // `distinctBy` 不只是洁癖：`ChatScreen` 用 `key = { it.seq }` 渲染
         // `LazyColumn`，重复 key 会直接抛 `IllegalArgumentException`。服务端窗口
         // 理论上不会重复，但这一行是零成本的保险（R003 P1-1 同类问题）。
-        val items = (older + window).distinctBy { it.seq }.sortedBy { it.seq }
+        val items = mergeCommandPairs(
+            (older + window).distinctBy { it.seq }.sortedBy { it.seq },
+        )
         // 权限状态从快照窗口的信封里折叠出来。三个权限事件都不占行，所以窗口里可能有
         // 好几条；按 seq 升序折叠，最后一条生效（桌面端就是这样显示的）。
         // 只扫窗口而不是全量 items：窗口之外的旧权限设置已被服务端覆盖，再折一遍只会
@@ -463,7 +465,15 @@ object ChatReducer {
         // 同 seq 的新条目必须**替换**旧条目。写成 `state.items + item` 再 `distinctBy` 会保留
         // 首次出现的那份（旧内容），于是一条被重新投递、内容已更新的同 seq 事件被静默丢弃
         // （R006 P3-13）。
-        val items = (state.items.filterNot { it.seq == item.seq } + item).sortedBy { it.seq }
+        //
+        // 斜杠命令是**两条事件**（`command/run` 与 `command/done`），各自有独立的 seq，
+        // 而 `command/done` 不带命令名。所以这里按 `commandId` 把它们并成一张卡：
+        // done 到达时接管 run 那条的 `line`，并**顶掉** run 的位置（保留 done 的 seq，
+        // 因为排序键必须是「结果出现的时间」）。不合并的话界面上会留下两张卡，
+        // 一张永远停在「执行中」（R045）。
+        val (commandBase, commandItem) = mergeCommandResult(state.items, item)
+        val items = (commandBase.filterNot { it.seq == commandItem.seq } + commandItem)
+            .sortedBy { it.seq }
 
         return state.copy(
             items = items,
@@ -481,6 +491,58 @@ object ChatReducer {
             // 真的渲染出内容了才清错误条；否则会把重连提示一并抹掉。
             error = null,
         )
+    }
+
+    /**
+     * 把「已完成但仍有对应 run 卡」的命令结果收成一条（R045）。
+     *
+     * 实时路径上 [mergeCommandResult] 在 done 到达时就把 run 摘掉了；但历史窗口
+     * （`session/page` 的首屏与翻页）是**成批**进来的，不经过那条路径——探针会话
+     * 里 `command/run seq=30` 与 `command/done seq=31` 同时落在窗口里，界面上就是
+     * 一张「执行中」永远转 + 一张「已完成」，而日志里这条命令其实早就结束了。
+     *
+     * 按 commandId 保留 done、丢掉同 id 的 run；done 的 `line` 为空时从 run 抄回来
+     * （`command/done` 不带 name，历史回放时没有别处能补）。
+     */
+    private fun mergeCommandPairs(items: List<ChatItem>): List<ChatItem> {
+        val commands = items.filterIsInstance<ChatItem.CommandResult>()
+        if (commands.size < 2) return items
+        val doneById = commands.filter { !it.running }.associateBy { it.commandId }
+        if (doneById.isEmpty()) return items
+        val runById = commands.filter { it.running }.associateBy { it.commandId }
+        // 只处理「同一个 commandId 既有 run 又有 done」的，别的一律原样保留：
+        // 只有 run 的（还在执行）与只有 done 的（历史里 run 被裁掉了）都正常。
+        val paired = runById.keys intersect doneById.keys
+        if (paired.isEmpty()) return items
+        return items.mapNotNull { item ->
+            if (item !is ChatItem.CommandResult) return@mapNotNull item
+            if (item.commandId !in paired) return@mapNotNull item
+            if (item.running) return@mapNotNull null
+            if (item.line.isNotEmpty()) return@mapNotNull item
+            item.copy(line = runById[item.commandId]?.line.orEmpty())
+        }
+    }
+
+    /**
+     * 把 `command/done` 与它对应的 `command/run` 合并成一条（R045）。
+     *
+     * `command/done` 只带 `commandId`，没有命令名；名字在 `command/run` 上。两条事件的
+     * seq 不同，直接都留着会让界面上出现两张卡：一张永远停在「执行中」，一张只有结果。
+     * 所以 done 到达时把 run 的 `/name args` 抄进 done，并把 run 那条从列表里去掉。
+     *
+     * 纯函数：不改状态、不缓存，返回值就是最终列表与最终条目。
+     */
+    private fun mergeCommandResult(
+        items: List<ChatItem>,
+        item: ChatItem,
+    ): Pair<List<ChatItem>, ChatItem> {
+        if (item !is ChatItem.CommandResult || item.running) return items to item
+        val run = items.firstOrNull {
+            it is ChatItem.CommandResult && it.commandId == item.commandId && it.running
+        } as? ChatItem.CommandResult ?: return items to item
+        // done 自带 line（历史回放时可能两条都补齐了）就保留它，只负责把 run 移走。
+        val merged = if (item.line.isEmpty()) item.copy(line = run.line) else item
+        return items.filterNot { it is ChatItem.CommandResult && it.commandId == item.commandId && it.running } to merged
     }
 
     /** 一条瞬时流式帧。 */
