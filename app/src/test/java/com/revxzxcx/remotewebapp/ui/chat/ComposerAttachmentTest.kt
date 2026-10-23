@@ -1,5 +1,6 @@
 package com.revxzxcx.remotewebapp.ui.chat
 
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -206,35 +207,52 @@ class ComposerAttachmentTest {
     }
 
     @Test
-    fun `没有待发送附件时不出现附件卡片`() {
+    fun `没有待发送附件时不出现缩略图`() {
         setComposer()
-        compose.onNodeWithText("图片 · shot.png").assertDoesNotExist()
-        compose.onNodeWithText("文件 · notes.md").assertDoesNotExist()
+        compose.onAllNodesWithContentDescription("移除 shot.png").assertCountEquals(0)
+        compose.onAllNodesWithContentDescription("移除 notes.md").assertCountEquals(0)
     }
 
+    /**
+     * R046 ②（用户 m31204）之后附件不再是「宽卡片 + 文字 + 右侧 ×」：图片与文件都渲染成
+     * **一张纯缩略图**，删除按钮是浮在右上角的小圆徽标，`contentDescription = "移除 <name>"`。
+     *
+     * 旧用例断言的是 `onNodeWithText("图片 · shot.png")`，换形态后那个文本节点消失，三条一起红。
+     * 现在改按**无障碍描述**定位——它同时是这条改动真正要守的东西：读屏用户听到的是
+     * 「移除 shot.png」而不是一个孤零零的「×」。
+     */
     @Test
-    fun `图片与文件附件分别渲染成卡片`() {
+    fun `图片与文件附件各渲染成一个带移除按钮的缩略图`() {
         setComposer(pending = listOf(image, file))
-        compose.onNodeWithText("图片 · shot.png").assertIsDisplayed()
-        compose.onNodeWithText("文件 · notes.md").assertIsDisplayed()
+        // 审查 P3：原来只写了两条 `assertDoesNotExist("图片 · shot.png")`，而那个文本
+        // 在新形态下**本来就不会存在**（`setComposer` 里没有任何地方能生成它），断言恒真
+        // ——用户第 ② 条真正要的「纯缩略图、没有宽背景、没有文字标签」反而没被守住。
+        //
+        // 改成三条正向断言：
+        //  1) 缩略图本体以 `contentDescription = "图片：<name>"` 暴露（读屏可读出「这是一张图」）；
+        //  2) 每个附件有且只有一个缩略图（不是「卡片 + 缩略图」两层）；
+        //  3) 移除徽标挂在缩略图右上角的独立热区上。
+        compose.onNodeWithContentDescription("图片：shot.png").assertExists()
+        compose.onAllNodesWithContentDescription("图片：", substring = true).assertCountEquals(1)
+        compose.onAllNodesWithContentDescription("文件：", substring = true).assertCountEquals(1)
+        compose.onNodeWithContentDescription("移除 shot.png").assertExists()
+        compose.onNodeWithContentDescription("移除 notes.md").assertExists()
     }
 
     @Test
-    fun `点卡片的叉号删掉点的那一个`() {
+    fun `点缩略图的移除徽标删掉点的那一个`() {
         val removed = mutableListOf<Int>()
         setComposer(pending = listOf(image, file), onRemove = { removed += it })
-        // 两张卡片的「×」文本完全相同，只能按位置取：第二个 = 第二张（文件）。
-        assertEquals(2, compose.onAllNodesWithText("×").fetchSemanticsNodes().size)
-        compose.onAllNodesWithText("×")[1].performClick()
+        compose.onNodeWithContentDescription("移除 notes.md").performClick()
         compose.waitForIdle()
         assertEquals(listOf(1), removed)
     }
 
     @Test
-    fun `点第一张卡片的叉号删的是第一张`() {
+    fun `点第一张缩略图的移除徽标删的是第一张`() {
         val removed = mutableListOf<Int>()
         setComposer(pending = listOf(image, file), onRemove = { removed += it })
-        compose.onAllNodesWithText("×")[0].performClick()
+        compose.onNodeWithContentDescription("移除 shot.png").performClick()
         compose.waitForIdle()
         assertEquals(listOf(0), removed)
     }

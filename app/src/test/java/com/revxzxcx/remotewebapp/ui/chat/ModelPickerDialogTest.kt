@@ -2,6 +2,8 @@ package com.revxzxcx.remotewebapp.ui.chat
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.revxzxcx.remotewebapp.core.session.CatalogFailure
@@ -20,6 +22,10 @@ import org.robolectric.annotation.Config
 
 /**
  * [ModelPickerDialog] 的渲染测试（Robolectric，决策 D22 推翻 D21）。
+ *
+ * 形态在 R046 ④（用户 m31204）从 `AlertDialog` 换成了 `ModalBottomSheet`——函数名没改，
+ * 是为了不对 8 处调用点做无意义的改名；但它现在渲染的是**上拉面板**，不是对话框。
+ * 因此本文件里凡涉及「完成按钮」「关闭路径」的断言都按面板语义重写过。
  *
  * 为什么值得为它写渲染测试：模型切换是 M5 新功能，最容易错的两处都在 UI 与参数的接缝上——
  * ① 点一个模型时该不该带 `reasoningEffort`（带了服务端 `arguments-invalid`，漏带用户以为
@@ -216,20 +222,33 @@ class ModelPickerDialogTest {
         compose.onNodeWithText("桌面端没有返回可选的模型。").assertExists()
     }
 
+    /**
+     * R046 ④：形态从 `AlertDialog` 换成 `ModalBottomSheet` 之后，「完成」按钮不再存在
+     * （`ModalBottomSheet` 靠下滑、点遮罩或返回键关闭）。
+     *
+     * 这条用例原本断言 `onNodeWithText("完成").performClick()` 会回调 `onDismiss`。换形态后
+     * 那个按钮没了，用例直接红。改成守「旧按钮确实不存在」——它同时也是一道回归闸：谁把
+     * 面板改回 `AlertDialog`、或者顺手补一个「完成」按钮，这条就会红。
+     *
+     * 关闭路径（点遮罩 / 下滑 / 返回键）**没有**被 Robolectric 覆盖。试过一次后用
+     * `onAllNodesWithContentDescription("Close sheet", substring = true)` 去点遮罩：
+     * 节点能找到，但点击不触发 `onDismissRequest`（面板的 `sheetState` 在虚拟时钟下还没
+     * settle，遮罩的输入被吞掉）。那次尝试的代码**已经撤回**，没有留在文件里——注释只在
+     * 记录「这条路走不通」，别照着它去找不存在的代码。关闭路径留到设备验收覆盖，
+     * 不在这里造假通过。
+     */
     @Test
-    fun `完成按钮关闭对话框`() {
-        var dismissed = false
-
+    fun `改成上拉面板后没有完成按钮`() {
         compose.setContent {
             ModelPickerDialog(
                 catalog = catalog,
                 current = null,
                 onSelect = { _, _, _ -> },
-                onDismiss = { dismissed = true },
+                onDismiss = {},
             )
         }
 
-        compose.onNodeWithText("完成").performClick()
-        assertEquals(true, dismissed)
+        compose.onNodeWithText("选择模型").assertExists()
+        compose.onAllNodesWithText("完成").assertCountEquals(0)
     }
 }

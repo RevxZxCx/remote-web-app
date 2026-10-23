@@ -31,7 +31,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -47,6 +46,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -655,7 +656,24 @@ internal data class PermissionIconLook(
     val autoApprove: Boolean,
 )
 
-/** 审批权限面板：只读展示当前策略，并说明为什么手机端改不了。 */
+/**
+ * 审批权限面板：只读展示当前策略，并说明为什么手机端改不了。
+ *
+ * ## 为什么不用 `AlertDialog`（R046 ⑤，用户 m31204）
+ *
+ * 用户原话：「权限按钮点击后弹出的窗口可以不做形式的变动，依旧显示弹窗，但是整体配色和
+ * app 风格不搭，你需要重构一下权限窗口的表现。」
+ *
+ * `AlertDialog` 用的是 material3 的 `DialogTokens`：表面色取 `surfaceContainerHigh`、
+ * 圆角 28dp、没有描边。本工程的表面是手写的 `surface`（`#111C2B` / 白），圆角体系是
+ * 6/10/14/20/28 里的 **20dp**，卡片一律「1dp `outline` 描边 + 轻微投影」——
+ * 这些都是 `Theme.kt` 与 `Shape.kt` 里显式定义的，`AlertDialog` 一个都不取。
+ * 于是它在深色下偏灰、浅色下偏白，看上去像另一套 App 的弹窗。
+ *
+ * 形态上仍是弹窗（用户明确说不改形态），只是把外壳换成工程自己的：
+ * `Dialog(usePlatformDefaultWidth = false)` + 自绘 `Surface(20dp, outline 描边, 12dp 投影)`
+ * + 带图标的标题行 + 等宽策略卡 + 主色实心按钮。
+ */
 @Composable
 internal fun PermissionSheet(
     permission: SessionPermission,
@@ -663,32 +681,115 @@ internal fun PermissionSheet(
     error: String?,
     onDismissRequest: () -> Unit,
 ) {
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismissRequest,
-        title = { Text("审批权限") },
-        text = {
-            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                Text(
-                    text = permission.summary(),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontFamily = FontFamily.Monospace,
-                )
-                val mode = permission.sandboxMode ?: permission.preset
-                if (mode != null || permission.approvalPolicy != null) {
-                    Spacer(Modifier.height(2.dp))
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        // 审查 P2（R046 第二轮）：换壳时**漏掉了旧 `AlertDialog` 内容列的 `verticalScroll`**。
+        // 旧实现（HEAD:Approvals.kt:666-670）在内容列上有 `verticalScroll`，`AlertDialog` 自己
+        // 也带一层可滚容器；改成自绘 `Dialog` 后两层都没了，于是内容一长（`error` 分支直接拼
+        // 服务端消息、没有 `maxLines`；再叠加系统字体放大到 2.0 倍）底部「知道了」按钮会被
+        // 窗口约束裁到可视区外，且**滚不动** —— 用户只剩按返回键一条路。
+        //
+        // 修法与提问卡 [ComposerShell] 同一套：正文单独滚动、动作钉住。
+        // 高度上限按本对话框拿到的可用高度算，不写死常量（写死会在字体放大时再次裁掉）。
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            // 固定开销：上下各 24dp 呼吸位 + 内容 18dp 上下 padding + 标题行 30dp
+            // + 标题下 12dp + 正文与按钮之间 16dp + 按钮 40dp = 194dp，再留 8dp 余量。
+            val bodyMaxHeight = (maxHeight - 202.dp).coerceAtLeast(120.dp)
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.88f)
+                .padding(vertical = 24.dp),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 0.dp,
+            border = BorderStroke(
+                1.dp,
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+            ),
+            shadowElevation = 12.dp,
+        ) {
+            Column(modifier = Modifier.padding(18.dp)) {
+                // 标题行：图标 + 标题。图标取的是沙箱/策略本身的语义（锁、警告、勾），
+                // 与输入区那枚 [PermissionChip] 用的是同一套判据，用户点进来能对上号。
+                val look = permissionIcon(permission)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (look.autoApprove) {
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f)
+                                },
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = look.icon,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = if (look.autoApprove) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
                     Text(
-                        text = buildString {
-                            mode?.let { append(it.label) }
-                            permission.approvalPolicy?.let {
-                                if (isNotEmpty()) append(" · ")
-                                append(it.label)
-                            }
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = "审批权限",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
                 }
-                Spacer(Modifier.height(8.dp))
+
+                Spacer(Modifier.height(12.dp))
+
+                // 正文（策略卡 + 两句说明 + 可选错误）单独滚动，高度到上限才滚。
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = bodyMaxHeight)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                // 策略本体：等宽字体 + surfaceVariant 底。它是这块面板里唯一的「数据」，
+                // 用卡片包起来与上面那句说明分开，读的时候不用分辨哪行是策略哪行是解释。
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                    tonalElevation = 0.dp,
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 11.dp, vertical = 9.dp)) {
+                        Text(
+                            text = permission.summary(),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        val mode = permission.sandboxMode ?: permission.preset
+                        if (mode != null || permission.approvalPolicy != null) {
+                            Spacer(Modifier.height(3.dp))
+                            Text(
+                                text = buildString {
+                                    mode?.let { append(it.label) }
+                                    permission.approvalPolicy?.let {
+                                        if (isNotEmpty()) append(" · ")
+                                        append(it.label)
+                                    }
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
                 Text(
                     text = if (pendingCount > 0) {
                         "现在有 $pendingCount 个请求等你处理，已经占住输入框。"
@@ -696,8 +797,9 @@ internal fun PermissionSheet(
                         "现在没有等待授权的请求。"
                     },
                     style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(6.dp))
                 Text(
                     text = "策略只能在桌面端改，手机端只读。改完之后这里会自动跟上" +
                         "（会话日志里会记一条事件）。",
@@ -712,10 +814,26 @@ internal fun PermissionSheet(
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
+                }
+
+                Spacer(Modifier.height(16.dp))
+                // 主色实心胶囊：工程里所有「唯一的确认动作」都是这个形态（见 `AppButtons.kt`），
+                // `AlertDialog` 默认的右下角文字按钮在本工程里只用于「取消」这类次要动作。
+                Button(
+                    onClick = onDismissRequest,
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    shape = RoundedCornerShape(999.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                    ),
+                ) {
+                    Text("知道了", style = MaterialTheme.typography.labelLarge)
+                }
             }
-        },
-        confirmButton = { TextButton(onClick = onDismissRequest) { Text("知道了") } },
-    )
+        }
+        }
+    }
 }
 
 // ---- 内部小工具 --------------------------------------------------------------

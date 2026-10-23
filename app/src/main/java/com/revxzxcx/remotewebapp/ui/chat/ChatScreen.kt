@@ -74,6 +74,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -121,6 +123,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -429,6 +432,15 @@ fun ChatScreen(
 
             SidebarBackAction.CloseSidebar -> onSidebarOpenChange(false)
         }
+    }
+
+    // R046 ③ 审查 P1：面板从 `Dialog` 降级成普通 Composable 后，丢掉了 `Dialog` 自带的
+    // 「返回键关闭」这条退出路径——不补的话按返回会直接退出整个会话，比「关不掉面板」
+    // 更糟。注册在侧栏那条之后：Compose 的 `BackHandler` 后注册者优先，于是面板展开时
+    // 返回键先收面板，侧栏展开时仍然先收侧栏。
+    BackHandler(enabled = showReferencePicker) {
+        showReferencePicker = false
+        viewModel.clearReferenceResults()
     }
 
     LaunchedEffect(sidebarOpen, sidebarTab) {
@@ -948,7 +960,21 @@ fun ChatScreen(
                             references = references,
                             onAddReference = viewModel::addReference,
                             onRemoveReference = viewModel::removeReference,
-                            onPickReference = { showReferencePicker = true },
+                            onPickReference = {
+                                showReferencePicker = true
+                                viewModel.searchReferences("")
+                            },
+                            referencePickerOpen = showReferencePicker,
+                            referenceResults = referenceResults,
+                            referenceLoading = referenceLoading,
+                            referenceError = referenceError,
+                            // 面板里打字即搜；`ReferencePickerPanel` 内自己管 query 与目录，
+                            // 这里只把「搜什么」转给 ViewModel（它负责取消在途请求）。
+                            onSearchReferences = viewModel::searchReferences,
+                            onDismissReferencePicker = {
+                                showReferencePicker = false
+                                viewModel.clearReferenceResults()
+                            },
                         )
                 }
 
@@ -1027,22 +1053,6 @@ fun ChatScreen(
     // `let` 里，于是模型目录还没到时整块不执行，用户点「引用」面板关掉、
     // 选择器却永远不出现（设备验收 m27460 就是这样发现的）。引用与模型目录
     // 毫无关系，没有理由被它的可见性门控。
-    if (showReferencePicker) {
-        ReferencePickerDialog(
-            results = referenceResults,
-            loading = referenceLoading,
-            error = referenceError,
-            selected = references,
-            onSearch = { viewModel.searchReferences(it) },
-            onAdd = { reference -> viewModel.addReference(reference) },
-            onRemove = { reference -> viewModel.removeReference(reference) },
-            onDismiss = {
-                showReferencePicker = false
-                viewModel.clearReferenceResults()
-            },
-        )
-    }
-
     state.catalog?.let { catalog ->
         if (showModelPicker) {
             ModelPickerDialog(
@@ -1169,7 +1179,7 @@ internal fun ModelBar(
 }
 
 /**
- * 模型选择对话框。
+ * 模型选择面板（R046 ④，用户 m31204：改成与「＋」相同的上拉形态）。
  *
  * 拆成独立的 `internal` Composable 而不是内联在 [ChatScreen] 里，是为了能用 Robolectric
  * 渲染测试直接驱动它（M5-5）：目录解析（[ModelCatalog]）与「点一行该发出什么参数」
@@ -1177,7 +1187,24 @@ internal fun ModelBar(
  *
  * 交互是**点完即生效**：点模型行立刻回调 [onSelect] 并关闭。没有「确定」按钮——
  * 多一步确认对「只是想看看有哪些模型」的用户是负担，而选错的代价只是再点一次。
+ *
+ * ## 为什么从 AlertDialog 换成 ModalBottomSheet
+ *
+ * 用户原话：「当前点击加号会展示一个上拉的界面，这个设计很好，我希望你把这个展示应用于
+ * 模型选择界面，点击模型按钮也会像这样上拉展开一个界面。注意做好相关适配。」
+ *
+ * 同一个输入区上的两个入口（「＋」与模型胶囊）用两种完全不同的弹出方式，会让「点这里会
+ * 发生什么」变成要记的事。适配上有三点必须留意：
+ * 1. `skipPartiallyExpanded = true` —— 模型列表是**层级的**（分组 + 每组多行 + 推理档），
+ *    半展开只有屏幕一半高，用户一进来就得先上滑一次才看得全；
+ * 2. 列表高度用显式的 `heightIn(max = 480.dp)` 给 `verticalScroll` 一个有界视口。
+ *    这里**不能**用 `weight(1f, fill = false)`：`ModalBottomSheet` 的内容槽按内容自适应
+ *    高度、没有可分配余量，`weight` 在这种父级里基本退化（第一轮实现踩过，见下方
+ *    1224 行附近的注释）。480dp 也**不是**随手定的——360×640 的小屏上弹层可用高度约
+ *    560dp，减去标题行与底部留白后剩下的就是这个量级，再大会把面板顶成整屏；
+ * 3. 顶部加一条拖拽把手（material3 的默认实现），提示「这是可以下滑关掉的」。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ModelPickerDialog(
     catalog: ModelCatalog,
@@ -1185,14 +1212,29 @@ internal fun ModelPickerDialog(
     onSelect: (provider: String, model: String, effort: String?) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        title = { Text("选择模型") },
-        text = {
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+            Text(
+                text = "选择模型",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 4.dp),
+            )
+            // 审查 P2：`ModalBottomSheet` 的内容槽按内容自适应高度，外层 Column 没有定高，
+            // `weight(1f, fill = false)` 分配不到可分配空间（在这里基本退化）。模型条目
+            // 一多（多 provider × 每组若干模型 × 展开的推理档）面板会被顶成整屏。
+            // 用显式 `heightIn(max = ...)` 给 `verticalScroll` 一个有界视口。
             Column(
                 modifier = Modifier
-                    .heightIn(max = 360.dp)
-                    .verticalScroll(rememberScrollState()),
+                    .fillMaxWidth()
+                    .heightIn(max = 480.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp),
             ) {
                 if (catalog.groups.isEmpty()) {
                     Text(
@@ -1292,9 +1334,8 @@ internal fun ModelPickerDialog(
                     )
                 }
             }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
-    )
+        }
+    }
 }
 
 /**
@@ -1378,8 +1419,21 @@ internal fun Composer(
     references: List<FileReference> = emptyList(),
     onAddReference: (FileReference) -> Unit = {},
     onRemoveReference: (FileReference) -> Unit = {},
-    /** 打开引用选择器（由调用方弹一个可搜索的文件列表）。 */
+    /** 打开引用选择器（由调用方在输入框正上方展开一个可搜索的文件列表）。 */
     onPickReference: () -> Unit = {},
+    /**
+     * 引用选择器是否展开（R046 ③，用户 m31204）。
+     *
+     * 面板画在输入框**正上方**、与输入框同宽，而不是弹 Dialog —— 原型
+     * （`docs/R043-效果图.html` 第 5 节）里它是 `.dock` 里的兄弟块，靠 `box-shadow:
+     * 0 -10px 34px` 表现「从输入框长出来」。开关状态仍由调用方持有，这里只负责摆位置。
+     */
+    referencePickerOpen: Boolean = false,
+    referenceResults: List<FileReference> = emptyList(),
+    referenceLoading: Boolean = false,
+    referenceError: String? = null,
+    onSearchReferences: (String) -> Unit = {},
+    onDismissReferencePicker: () -> Unit = {},
 ) {
     if (interactive != null) {
         InteractiveWindow(
@@ -1483,7 +1537,7 @@ internal fun Composer(
     )
     // 四周留白让输入框「浮起来」；收起态给多一点横向留白，展开态给满，
     // 这样形态变化时看的是框在长大，而不是框在平移。
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(
@@ -1493,6 +1547,38 @@ internal fun Composer(
                 bottom = 8.dp,
             ),
     ) {
+        // R046 ③：引用选择器是输入框**正上方**的展开面板（用户 m31204）。
+        // ⚠️ 必须放在 `Surface` **外面**、作为外层 `Column` 的第一个孩子：
+        // `Surface` 的 content 内部按 `Box` 叠放，面板与输入行做兄弟会互相覆盖
+        // （本轮设备验收实锤——面板标题被输入行压住、搜索框只露一半）。
+        // 它自带向上投射的阴影与描边，视觉上是「从输入框长出来的一块」，
+        // 而不是盖住整屏的窗口；也不参与输入框 `cornerRadius` 的展开动画。
+        androidx.compose.animation.AnimatedVisibility(
+            visible = referencePickerOpen,
+            enter = androidx.compose.animation.fadeIn(
+                androidx.compose.animation.core.tween(Motion.FAST),
+            ) + androidx.compose.animation.expandVertically(
+                androidx.compose.animation.core.tween(Motion.FAST),
+            ),
+            exit = androidx.compose.animation.fadeOut(
+                androidx.compose.animation.core.tween(Motion.FAST),
+            ) + androidx.compose.animation.shrinkVertically(
+                androidx.compose.animation.core.tween(Motion.FAST),
+            ),
+        ) {
+            Box(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+                ReferencePickerPanel(
+                    results = referenceResults,
+                    loading = referenceLoading,
+                    error = referenceError,
+                    selected = references,
+                    onSearch = onSearchReferences,
+                    onAdd = onAddReference,
+                    onRemove = onRemoveReference,
+                    onDismiss = onDismissReferencePicker,
+                )
+            }
+        }
         Surface(
             color = MaterialTheme.colorScheme.surfaceVariant,
             shape = RoundedCornerShape(cornerRadius),
@@ -1501,6 +1587,7 @@ internal fun Composer(
             shadowElevation = 8.dp,
             modifier = Modifier.fillMaxWidth(),
         ) {
+
             Column(modifier = Modifier.fillMaxWidth()) {
                 // ---- 只在展开态出现：附件行 ----
                 AnimatedVisibility(
@@ -1546,19 +1633,49 @@ internal fun Composer(
                 // 回到原分支 —— 表现为「点输入框毫无反应、永远展不开」（设备 uiautomator 实测：
                 // 连点四次、输入文字都不进 draft）。现在只有 ＋ 与 发送 两根**兄弟**在条件里，
                 // 输入框的位置不变，焦点、光标、选区与 IME 全部保住。
+                // R046 ①（用户 m31204）：「输入框的可输入部分……离父组件有一段比较长的
+                // 间隔，我希望这个间隔可以小一些，最好输入区域能和「+」按钮的左边对齐，
+                // 和发送按钮的右边对齐」。
+                //
+                // 旧实现展开态在这里叠了 `start/end = 14.dp`，而底排（＋ 所在那行）只从
+                // `8.dp` 起算，输入控件所在 `Row` 又再加 `6.dp`，`TextField` 自身还有左右
+                // 各 16dp 的 contentPadding —— 三段相加把文字推到距容器左缘 36dp，
+                // 而 ＋ 的左缘只有 8dp。收起态则因为这三个值都是 0 + 6dp 而恰好对齐。
+                //
+                // 现在展开态在这里**不叠任何内边距**（只剩 6dp 顶部呼吸位）。对齐靠一个
+                // 更简单的事实：`TextField`（String 重载）**没有** `contentPadding` 形参，
+                // 它内部固定用 `TextFieldDefaults.contentPaddingWithoutLabel()` = 左右各
+                // 16dp。与其把它改成 `BasicTextField` + `DecorationBox`（本文件下面那段
+                // KDoc 记着为什么不用 BasicTextField），不如**让底排也用 16dp**：两行取
+                // 同一个 16dp，文字左缘就与 ＋ 左缘重合、右缘与发送键右缘重合。
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(
-                            start = if (expanded) 14.dp else 0.dp,
-                            end = if (expanded) 14.dp else 0.dp,
-                            top = if (expanded) 10.dp else 0.dp,
-                        ),
+                        .padding(top = if (expanded) 6.dp else 0.dp),
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(start = 6.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                            // R046 ①：**展开态这里必须是 0**。
+                            //
+                            // 底排（＋ 那一行）的左右内边距是 16dp，所以 ＋ 的左缘距容器 16dp；
+                            // 而 `TextField` 自身还有 16dp 的 `contentPadding`，正文左缘 =
+                            // 这一行的 padding + 16dp。设备实测（1080px / 480dpi）：
+                            // 这一行写 16dp 时 ＋ 左缘 x=102、光标左缘 x=240，差 138px ≈ 46dp，
+                            // 正是「16（行）+ 16（TextField）+ 14（旧的外层）」叠出来的。
+                            // 三次设备定标（同一屏、同一字号）：写 16dp → 文字比 ＋ 右移 138px；
+                            // 写 0 → 文字比 ＋ 左移 30px；**写 10dp → 两者左缘同在 x=102，gap=0**。
+                            // 即每减 1dp 文字左移约 10.5px，过零点落在 10dp 附近。
+                            // 所以这里取 10dp —— 不是推算出来的（曾按「16 − 10 = 6dp 正好抵掉
+                            // TextField 那 16dp」写过一版错误注释），而是实测扫出来的值。
+                            //
+                            // 收起态仍是 6dp：那时 ＋ 与发送键就在这一行的两侧，需要一圈呼吸位。
+                            .padding(
+                                start = if (expanded) 10.dp else 6.dp,
+                                end = if (expanded) 10.dp else 6.dp,
+                                top = if (expanded) 0.dp else 6.dp,
+                                bottom = 6.dp,
+                            ),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         // 🔴 收起态的 ＋ 与发送必须**等下面那排的退出动画播完**再出现
@@ -1585,6 +1702,9 @@ internal fun Composer(
                             fieldInteraction = fieldInteraction,
                             onDraftChange = onDraftChange,
                             onSend = onSend,
+                            // R046 ①：展开态 `fillMaxWidth()` 即可——水平留白由外层
+                            // Surface（0）与 `ComposerField` 自己的 `contentPadding`
+                            // 共同决定；收起态仍要 6dp，因为 ＋ 与发送键就在同一行的两侧。
                             modifier = if (expanded) {
                                 Modifier.fillMaxWidth()
                             } else {
@@ -1629,7 +1749,10 @@ internal fun Composer(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(start = 8.dp, end = 8.dp, top = 2.dp, bottom = 8.dp),
+                            // R046 ①：与上面输入行取同一个 16dp —— ＋ 的左缘因此与正文
+                            // 左缘齐平，发送键的右缘与正文右缘齐平（旧值是 8dp，
+                            // 比正文的左内边距小 8dp，看起来「正文缩在里面、按钮贴边」）。
+                            .padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         // 用户 m44550：「将加号按钮移动到最左边，这样显得整体更为协调一些」。
@@ -1914,47 +2037,62 @@ private fun ComposerSendButton(
     }
 }
 
-/** 待发送附件的一行小卡片。 */
+/**
+ * 待发送附件的一行**纯缩略图**（R046 ②，用户 m31204）。
+ *
+ * 用户原话：「增加图片后，图片会有一个很宽的背景，并且显示×在背景的最右边，实际这个
+ * 空白没有任何作用。应该优化为图片显示为单缩略图无背景，并且删除按钮『×』浮在图片
+ * 缩略图右上角。文件也有这样的问题，你需要一起修复。」
+ *
+ * 旧实现是一个宽 220dp 上限的 `Surface` 卡片：左侧 36dp 缩略图 + 中间「图片 · 名字」 +
+ * 右侧远处一个 `TextButton("×")`。卡片底色与输入区同色、宽度又被文件名撑开，于是在
+ * 只有一张图时留下一条几十到两百 dp 的**空白**——用户看到的就是「很宽的背景」。
+ *
+ * 现在去掉卡片容器，只留 56dp 的缩略图本身；`×` 是浮在缩略图**右上角**的 18dp 圆形徽标，
+ * 一半压在图上、一半探出。文件名不再常驻显示——它仍通过 `contentDescription` 交给读屏，
+ * 发送后的回执里也能看到。
+ */
 @Composable
 private fun PendingAttachmentsRow(
     pending: List<PromptAttachment>,
     onRemove: (Int) -> Unit,
 ) {
     LazyRow(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        // 徽标从缩略图边缘探出 `RemoveBadgeOverhang`(3dp)，所以轨道四周必须留出不小于
+        // 这个值的余量，否则第一张与最后一张的 × 会被 `LazyRow` 的边界切掉（审查 P2：
+        // 这里曾写成 2dp < 3dp，首尾仍被切 1dp）。
+        contentPadding = PaddingValues(
+            horizontal = RemoveBadgeOverhang + 1.dp,
+            vertical = RemoveBadgeOverhang + 1.dp,
+        ),
     ) {
         itemsIndexed(pending, key = { index, item -> "$index-${item.receiptId ?: item.name ?: ""}" }) { index, item ->
-            Surface(
-                color = MaterialTheme.colorScheme.surface,
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.widthIn(max = 220.dp),
-            ) {
-                Row(
-                    modifier = Modifier.padding(start = 4.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    // 图片给真缩略图，文件给一个图标占位——T5 设备验收：早先两种都是
-                    // 一行文字，用户完全看不出自己挂上去的是什么。
-                    PendingAttachmentThumb(item)
-                    Text(
-                        text = when (item.kind) {
-                            PromptAttachment.Kind.IMAGE -> "图片 · ${item.name ?: "未命名"}"
-                            PromptAttachment.Kind.FILE -> "文件 · ${item.name ?: "未命名"}"
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 1,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    TextButton(
-                        onClick = { onRemove(index) },
-                        modifier = Modifier.padding(start = 2.dp),
-                    ) { Text("×") }
-                }
-            }
+            PendingAttachmentThumb(
+                item = item,
+                onRemove = { onRemove(index) },
+            )
         }
     }
 }
+
+/** R046 ②：缩略图边长（用户要求「单缩略图无背景」，边长比旧卡片里的 36dp 更立得住）。 */
+private val ThumbnailSize = 56.dp
+
+/** R046 ②：圆角半径，与输入框的 12dp、胶囊的 20dp 同族但更小——它是「图」，不是「卡」。 */
+private val ThumbnailShape = RoundedCornerShape(10.dp)
+
+/** R046 ②：删除徽标直径。18dp 是可点最小视觉尺寸，触达靠外层的 padding 补到 40dp 以上。 */
+private val RemoveBadgeSize = 18.dp
+
+/** R046 ②：徽标从缩略图边缘探出多少，决定外层 Box 要留的余量。 */
+private val RemoveBadgeOverhang = 3.dp
+
+/** R046 ② 审查 P3：徽标的触达层边长。视觉仍是 [RemoveBadgeSize]，手指不必对准 18dp。 */
+private val RemoveBadgeHitSize = 48.dp
 
 /**
  * 待发送附件的缩略图。
@@ -1965,7 +2103,10 @@ private fun PendingAttachmentsRow(
  * 本地文件的接口，`fileUploads/upload` 之后内容只在桌面端）。
  */
 @Composable
-private fun PendingAttachmentThumb(item: PromptAttachment) {
+private fun PendingAttachmentThumb(
+    item: PromptAttachment,
+    onRemove: (() -> Unit)? = null,
+) {
     val isImage = item.kind == PromptAttachment.Kind.IMAGE
     val bitmap = produceState<ImageBitmap?>(
         initialValue = null,
@@ -1976,34 +2117,109 @@ private fun PendingAttachmentThumb(item: PromptAttachment) {
             null
         } else {
             withContext(Dispatchers.Default) {
-                // 缩略图宽度 96px：屏幕上它只有 36dp 宽，2x 密度下 72px 已够，96 留余量。
-                decodeScaled(item.data.fromBase64(), maxWidth = 96)?.asImageBitmap()
+                // 缩略图宽度 192px：屏幕上是 56dp，3x 密度下需要 168px，192 留余量。
+                decodeScaled(item.data.fromBase64(), maxWidth = 192)?.asImageBitmap()
             }
         }
     }
-    Box(
-        modifier = Modifier
-            .padding(end = 6.dp)
-            .size(36.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant),
-        contentAlignment = Alignment.Center,
-    ) {
-        val current = bitmap.value
-        if (current != null) {
-            Image(
-                bitmap = current,
-                contentDescription = "附件预览",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop,
-            )
-        } else {
-            Text(
-                text = if (isImage) "图" else "📎",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    val name = item.name ?: "未命名"
+    val label = when (item.kind) {
+        PromptAttachment.Kind.IMAGE -> "图片：$name"
+        PromptAttachment.Kind.FILE -> "文件：$name"
+    }
+    // 外层 Box 不裁剪：× 徽标要探出缩略图右上角，父级 clip 会把它切掉一半。
+    Box(modifier = Modifier.size(ThumbnailSize + RemoveBadgeOverhang * 2)) {
+        Box(
+            modifier = Modifier
+                .size(ThumbnailSize)
+                .align(Alignment.Center)
+                .clip(ThumbnailShape)
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                // 描述挂在**容器**上而不是里面的 `Image` 上：文件附件走的是 `Text` 占位
+                // 分支，那里根本没有 Image，描述就会丢——读屏用户听到的只是一串扩展名
+                // 字母，不知道挂上去的是哪个文件（审查 P3 改成正向断言后才暴露出来）。
+                //
+                // 用 `clearAndSetSemantics` 而不是 `semantics`：后者是**合并**语义，容器里
+                // `Text(extensionLabel(...))` 的文本仍会作为独立节点暴露，文件附件于是变成
+                // 两站——先念「文件：notes.md」，再念一个孤零零的「MD」（第二轮审查 P3）。
+                .clearAndSetSemantics { contentDescription = label },
+            contentAlignment = Alignment.Center,
+        ) {
+            val current = bitmap.value
+            if (current != null) {
+                // `contentDescription = null`：描述已由容器提供，这里再给一次会让读屏
+                // 把同一句念两遍，也会让 `onAllNodesWithContentDescription("图片：")`
+                // 的数量翻倍。
+                Image(
+                    bitmap = current,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                )
+            } else {
+                // 文件没有可渲染的本地内容（D15：内容只在桌面端），用扩展名当占位字，
+                // 比一个 📎 更能说明「我挂上去的是哪个文件」。
+                Text(
+                    text = extensionLabel(name, isImage),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
         }
+        if (onRemove != null) {
+            // 触达层 48dp、视觉仍 18dp（审查 P3：原先 `clickable` 直接挂在 18dp 的圆上，
+            // 远低于 48dp 最小触控标准）。48dp 层对齐到外层 Box 的右上角、视觉圆再对齐到
+            // 这一层的右上角，于是圆的位置与尺寸不变，多出来的是向左、向下的热区
+            // （62dp 的外层 Box 装得下 48dp，不会越界丢事件）。缩略图本身没有点击行为，
+            // 被这块热区盖住不损失任何操作。
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .size(RemoveBadgeHitSize)
+                    .clickable(onClick = onRemove),
+                contentAlignment = Alignment.TopEnd,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(RemoveBadgeSize)
+                        .clip(CircleShape)
+                        // 底色用 surface 再描一圈 outline：无论压在深色照片还是浅色文档上，
+                        // 徽标都能与背景分开（否则在浅色图片右上角只剩一个看不见的 ×）。
+                        .background(MaterialTheme.colorScheme.surface)
+                        .border(
+                            width = 1.dp,
+                            color = MaterialTheme.colorScheme.outlineVariant,
+                            shape = CircleShape,
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "移除 $name",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        // 12dp 字形放进 18dp 圆里，四周各留 3dp，视觉上比撑满更轻。
+                        modifier = Modifier.size(12.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 文件缩略图里的占位字：取扩展名前 4 个字符大写（`README.md` → `MD`、
+ * `archive.tar.gz` → `GZ`）；没有扩展名时退回「文件」的「件」。
+ *
+ * 只对非图片生效——图片解不出来时说明字节坏了，那时显示「图」比显示扩展名更诚实。
+ */
+private fun extensionLabel(name: String, isImage: Boolean): String {
+    if (isImage) return "图"
+    val ext = name.substringAfterLast('.', missingDelimiterValue = "")
+    return if (ext.isBlank() || ext.length == name.length) {
+        "件"
+    } else {
+        ext.take(4).uppercase()
     }
 }
 
