@@ -134,6 +134,7 @@ import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.core.changes.ChangesEntry
 import com.revxzxcx.remotewebapp.core.protocol.isHealthy
 import com.revxzxcx.remotewebapp.core.session.ChatItem
+import com.revxzxcx.remotewebapp.core.session.CommandShortcuts
 import com.revxzxcx.remotewebapp.core.session.FileReference
 import com.revxzxcx.remotewebapp.core.session.SlashCommand
 import com.revxzxcx.remotewebapp.core.session.AskQuestion
@@ -1883,29 +1884,28 @@ internal fun Composer(
                 //    （`/export` 这类会产生副作用），而落进输入框随时可以改或删。
                 onApplyCommand(command, "")
             },
+            // 快捷入口一律**先查服务端清单**，清单里没有才退回本地兜底。
+            //
+            // 审查 R048 P1（用户 m32662 点名「目标指令、计划指令」）：这里原本手写死一个
+            // `SlashCommand`，`plan` 那条写的是 `hint = null` —— 而服务端真实注册的是
+            // `plan | input.hint = "[off|message]" | attachments = true`。于是
+            // `insertion` 判定它「不吃参数」、不补尾空格，用户点「计划模式」再打
+            // 「重构登录」就得到 `/plan重构登录`：既不是命令也不是参数，整行被当普通消息
+            // 发给模型 —— 正是本阶段要修的那个 bug，在最该生效的入口上漏掉了。
+            //
+            // 兜底仍要写：`commands/list` 是异步拉的，冷启动后立刻点「＋」时清单为空。
+            // 兜底的 `hint` 必须与服务端一致，否则又回到「手写与服务端分叉」的老路。
             onSetGoal = {
                 showAttachSheet = false
                 onApplyCommand(
-                    SlashCommand(
-                        name = "goal",
-                        description = "设置或查看目标",
-                        hint = "[<objective>|clear|edit <objective>|pause|resume]",
-                        acceptsAttachments = true,
-                        definitionId = "@deepseek-ai/dsh-command-goal",
-                    ),
+                    commands.firstOrNull { it.name == "goal" } ?: CommandShortcuts.goal,
                     "",
                 )
             },
             onPlanMode = {
                 showAttachSheet = false
                 onApplyCommand(
-                    SlashCommand(
-                        name = "plan",
-                        description = "计划模式",
-                        hint = null,
-                        acceptsAttachments = false,
-                        definitionId = "@deepseek-ai/dsh-plan-mode",
-                    ),
+                    commands.firstOrNull { it.name == "plan" } ?: CommandShortcuts.plan,
                     "",
                 )
             },

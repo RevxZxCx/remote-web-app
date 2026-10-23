@@ -27,8 +27,9 @@ data class SlashCommand(
     val name: String,
     val description: String,
     /**
-     * 参数提示，来自 `input.hint`。为 `null` 表示这条命令**不吃参数**，
-     * 选中即发送——此时面板不该给参数输入框（否则用户以为必须填点什么）。
+     * 参数提示，来自 `input.hint`。为 `null` 通常意味着这条命令不吃参数——这是**启发式**，
+     * 不是保证：`/n`、`/y` 没有 `input.hint` 却要求 `#编号`（见 [insertion] 的「已知缺口」）。
+     * 面板只据它决定是否显示那行参数提示；选中命令只写草稿，从不直接发送。
      */
     val hint: String?,
     /** `input.attachments == true`：这条命令允许同时挂附件。 */
@@ -36,8 +37,34 @@ data class SlashCommand(
     /** 核心命令的注册 id；插件命令没有。 */
     val definitionId: String?,
 ) {
-    /** 输入框里该显示的文本（`/goal `，带尾空格方便直接接参数）。 */
+    /** 显示用的命令文本（`/goal`）。**不带尾空格**：面板列表按行渲染，尾部空白只会让对齐发虚。 */
     val trigger: String get() = "/$name"
+
+    /**
+     * 插进输入框的文本：吃参数的命令带一个**尾空格**，不吃参数的不带。
+     *
+     * 为什么要有这一格空白（R048，用户 m32662「这些都需要打一个空格的，你的设计中会自动完成
+     * 这个空格操作吗」）：选中命令后光标落在末尾、用户紧接着要打参数，若正文是 `/goal` 而光标
+     * 贴着 `l`，第一下敲出来的字符会粘成 `/goal完成`——既不是命令也不是参数。
+     *
+     * 判据取 [hint]，是一层**启发式**而不是保证：多数命令用 `input.hint` 声明参数形态，但
+     * 插件命令可以不声明却仍然吃参数。实测（`commands/list`，19 条）里就有反例——`/n` 与 `/y`
+     * 的描述写着「多项时 /n #编号」，却没有 `input` 字段，于是这里按「不吃参数」处理，用户从
+     * 面板选中它们再打 `#1` 会粘成 `/n#1`。这是**已知缺口**，唯一干净的方向是服务端在
+     * `input.hint` 之外补一个「是否吃参数」的显式标记——靠猜描述文本（正则匹配 `#` 或
+     * `<…>`）不可靠：描述是给人看的，措辞随时会变，而且一旦猜错就是静默多发一个空格。
+     * 在服务端补上标记之前，这里保持现状（宁可少数几条命令少一个空格，也不引入猜测）。
+     *
+     * 空格的去处：发送走 `composedText().trim()`、命令识别走 `trim()`，服务端拿到的行永远不带
+     * 这个尾空格。但**草稿落盘不 trim**（`DshCache.writeDraft` 只做 `take(DRAFT_MAX_CHARS)`
+     * 与判空），所以尾空格会随草稿存进 SQLite。
+     *
+     * 不要指望「冷启动恢复后光标停在这个空格之后」：`restoreDraft()` 只写 `_draft`、不碰
+     * `draftSelection`，而后者是 `ChatScreen` 里 `rememberSaveable(TextRange.Zero)` 的，真正的
+     * 冷启动下取 0——恢复出来的草稿光标在**开头**。只有 `onApplyCommand` / `addReference` /
+     * `removeReference` 这三条路径才会把光标送到末尾。
+     */
+    val insertion: String get() = if (hint != null) "/$name " else "/$name"
 }
 
 /**
@@ -80,8 +107,8 @@ internal object CommandCatalogParser {
             SlashCommand(
                 name = name,
                 description = obj.string("description").orEmpty(),
-                // hint 为空串等于没提示：命令吃不吃参数看的是有没有 hint，
-                // 空串当「有 hint」会让面板给一个什么都不说的输入框。
+                // hint 为空串等于没提示：面板只据 hint 是否为空决定要不要显示那行参数提示，
+                // 空串当「有 hint」会让面板显示一行什么都没说的提示。
                 hint = input?.string("hint")?.takeIf { it.isNotBlank() },
                 acceptsAttachments = (input?.get("attachments") as? JsonPrimitive)?.content == "true",
                 definitionId = obj.string("definitionId"),
@@ -89,11 +116,47 @@ internal object CommandCatalogParser {
         }
     }
 
-    /** 把选中的命令拼成要发出去的那条文本。 */
+    /**
+     * 把选中的命令拼成落进输入框的那条文本。
+     *
+     * 空参分支返回 [SlashCommand.insertion]（吃参数的命令带尾空格），不接受「裸 trigger」——
+     * 见那条属性的 KDoc：没有这个空格，用户接着打字会把参数粘到命令名上。
+     */
     fun compose(command: SlashCommand, argument: String): String {
         val arg = argument.trim()
-        return if (arg.isEmpty()) command.trigger else "${command.trigger} $arg"
+        return if (arg.isEmpty()) command.insertion else "${command.trigger} $arg"
     }
+}
+
+/**
+ * 输入区「＋」面板里两个快捷入口的兜底命令。
+ *
+ * 快捷入口**先查服务端清单**（`commands.firstOrNull { it.name == … }`），只在清单还没拉回来时
+ * 用这里的定义兜底。兜底必须与服务端一致，否则 `insertion` 的判据会分叉——R048 审查 P1 就是
+ * 这么来的：兜底里 `plan` 写成 `hint = null`，于是「计划模式」插入的 `/plan` 不带尾空格，
+ * 用户打参数就得到 `/plan重构登录`，整行被当普通消息发出去。
+ *
+ * 放在这里（而不是留在 `ChatScreen` 的 lambda 里）是为了让单测能直接断言这两条命令吃参数、
+ * 插入文本带尾空格——写在 Composable 里就只能靠设备验收。
+ */
+internal object CommandShortcuts {
+    /** `/goal`：服务端 `input.hint = "[<objective>|clear|edit <objective>|pause|resume]"`、`attachments = true`。 */
+    val goal = SlashCommand(
+        name = "goal",
+        description = "设置或查看目标",
+        hint = "[<objective>|clear|edit <objective>|pause|resume]",
+        acceptsAttachments = true,
+        definitionId = "@deepseek-ai/dsh-command-goal",
+    )
+
+    /** `/plan`：服务端 `input.hint = "[off|message]"`、`attachments = true`。 */
+    val plan = SlashCommand(
+        name = "plan",
+        description = "计划模式",
+        hint = "[off|message]",
+        acceptsAttachments = true,
+        definitionId = "@deepseek-ai/dsh-plan-mode",
+    )
 }
 
 /** `fileReferences/list` 的解析。形状同 [CommandCatalogParser]：外面套一层 `value`。 */

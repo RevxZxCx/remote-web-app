@@ -34,10 +34,16 @@ class ComposerCatalogParserTest {
         assertEquals(2, commands.size)
         assertEquals("goal", commands[0].name)
         assertEquals("/goal", commands[0].trigger)
+        // 吃参数的命令，插进输入框时带一个尾空格（R048，用户 m32662）。
+        assertEquals("/goal ", commands[0].insertion)
         assertEquals("[<objective>|clear]", commands[0].hint)
         assertTrue(commands[0].acceptsAttachments)
         assertEquals("plan", commands[1].name)
         assertNull(commands[1].hint)
+        // 没有 hint 按「不吃参数」处理——这是**启发式**（见 `SlashCommand.insertion` 的
+        // KDoc）：`/n`、`/y` 没有 `input.hint` 却要求 `#编号`，也会落进这个分支。
+        // 不补空格的实际收益只是编辑器里不多个空尾空格；发送前会 `trim()`，服务端收不到它。
+        assertEquals("/plan", commands[1].insertion)
         assertTrue(!commands[1].acceptsAttachments)
     }
 
@@ -109,11 +115,63 @@ class ComposerCatalogParserTest {
     }
 
     @Test
-    fun composeWithoutArgumentIsBareTrigger() {
-        // 末尾不留空格：多出来的空格会进服务端的命令解析器，
-        // 对 `clear`/`pause` 这类无参命令是噪声。
-        val command = SlashCommand("goal", "设定目标", null, false, null)
-        assertEquals("/goal", CommandCatalogParser.compose(command, "   "))
+    fun composeWithoutArgumentKeepsTrailingSpaceForArgumentCommands() {
+        // 吃参数的命令必须留一个尾空格（R048，用户 m32662）：光标落在末尾、
+        // 用户接着打参数，没有这个空格就会粘成 `/goal完成`。
+        val command = SlashCommand("goal", "设定目标", "[<objective>]", false, null)
+        assertEquals("/goal ", CommandCatalogParser.compose(command, "   "))
+    }
+
+    @Test
+    fun composeWithoutArgumentLeavesBareTriggerForParameterlessCommands() {
+        // 不吃参数（`hint == null`）的命令不补空格：`/clear` 后面本来就什么都不该有，
+        // 留个空尾空格只是编辑器里的噪声（发送前 `trim()`，服务端根本收不到它）。
+        //
+        // 注意这是启发式：`/n`、`/y` 没有 `input.hint` 却要求 `#编号`，它们会落进这个分支
+        // ——见 `SlashCommand.insertion` 的 KDoc「已知缺口」。
+        val command = SlashCommand("clear", "清空", null, false, null)
+        assertEquals("/clear", CommandCatalogParser.compose(command, ""))
+    }
+
+    @Test
+    fun composeWithArgumentKeepsSingleSpace() {
+        // 带参分支不受影响：`/goal 完成 R043`，命令与参数之间恰好一个空格。
+        val command = SlashCommand("goal", "设定目标", "[<objective>]", false, null)
+        assertEquals("/goal 完成 R043", CommandCatalogParser.compose(command, "  完成 R043  "))
+    }
+
+    // -------------------------------------------------------------- 快捷入口
+
+    @Test
+    fun shortcutGoalInsertsTrailingSpace() {
+        // 审查 R048 P1：兜底里曾写 `hint = null`，于是「计划模式」插入的 `/plan` 不带
+        // 尾空格，用户打参数就粘成 `/plan重构登录`。这两条必须一直带尾空格。
+        assertEquals("/goal ", CommandShortcuts.goal.insertion)
+        assertEquals("/plan ", CommandShortcuts.plan.insertion)
+    }
+
+    @Test
+    fun shortcutFallbacksMatchServerRegistration() {
+        // 服务端 `commands/list` 实测（2026-10-23）：
+        //   goal | definitionId=@deepseek-ai/dsh-command-goal | hint="[<objective>|clear|edit <objective>|pause|resume]" | att=true
+        //   plan | definitionId=@deepseek-ai/dsh-plan-mode     | hint="[off|message]"                                    | att=true
+        //
+        // 逐字断言，不只看「不为空」：审查 R048 第二轮抓到 plan 的 definitionId 被写成
+        // `@deepseek-ai/dsh-command-plan`（asar 里 0 次，真值是 `dsh-plan-mode` 40 次），
+        // 当时因为测试只断言了尾空格与 attachments，这个倒退没被拦住。
+        assertEquals("[<objective>|clear|edit <objective>|pause|resume]", CommandShortcuts.goal.hint)
+        assertEquals("@deepseek-ai/dsh-command-goal", CommandShortcuts.goal.definitionId)
+        assertTrue(CommandShortcuts.goal.acceptsAttachments)
+
+        assertEquals("[off|message]", CommandShortcuts.plan.hint)
+        assertEquals("@deepseek-ai/dsh-plan-mode", CommandShortcuts.plan.definitionId)
+        assertTrue(CommandShortcuts.plan.acceptsAttachments)
+    }
+
+    @Test
+    fun composeOnShortcutKeepsSpaceForArguments() {
+        // 端到端：点「计划模式」后正文必须是 `/plan `，接着打「重构登录」才是命令 + 参数。
+        assertEquals("/plan ", CommandCatalogParser.compose(CommandShortcuts.plan, ""))
     }
 
     // ---------------------------------------------------------------- 引用
