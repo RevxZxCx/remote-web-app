@@ -179,6 +179,14 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.SpanStyle
 import com.revxzxcx.remotewebapp.ui.theme.LocalStatusRunning
 
 /**
@@ -309,6 +317,21 @@ fun ChatScreen(
 
     // R043：引用选择器（「+」面板 → 引用文件）。
     var showReferencePicker by rememberSaveable { mutableStateOf(false) }
+
+    // R047 ②（用户 m32024）：输入框的光标/选区。
+    //
+    // 必须是 `rememberSaveable`：旋转屏幕后文本还在（`draft` 在 ViewModel 里），
+    // 光标不能跳回开头。也不能放进 ViewModel——它是纯粹的 UI 瞬时状态，
+    // 进程重建时 `SavedStateHandle` 之外没有语义。
+    var draftSelection by rememberSaveable(stateSaver = TextRangeSaver) {
+        mutableStateOf(TextRange.Zero)
+    }
+    // 输入法正在组词的区间（审查 R047 P1）。必须**逐帧原样回传**给 `TextFieldValue`：
+    // `CoreTextField` 每次重组都会拿它与 `EditingBuffer` 里的组词区间比对，只要不一致
+    // 就 `commitComposition()` 并把 `composition = null` 推给输入法，结果是中文拼音每敲
+    // 一键都打断组词。不进 `rememberSaveable`——组词是输入法会话内的瞬时状态，重建后
+    // 本就不该恢复。
+    var draftComposition by remember { mutableStateOf<TextRange?>(null) }
     val approvals by viewModel.approvals.collectAsState()
     val approvalError by viewModel.approvalError.collectAsState()
     val interactive by viewModel.interactive.collectAsState()
@@ -956,10 +979,36 @@ fun ChatScreen(
                             onLoadCommands = { viewModel.loadCommands() },
                             onApplyCommand = { command, argument ->
                                 viewModel.applyCommand(command, argument)
+                                // R047 ②：命令插到正文后光标要落在**末尾**（用户紧接着
+                                // 要打参数），而不是被 `TextField` 复位到开头。正文由
+                                // ViewModel 立刻算好，这里读回来定光标——先定位再重组，
+                                // 避免中间帧里光标在 0。
+                                draftSelection = caretAtEnd(viewModel.draft.value)
+                                // 整段替换正文后旧组词区间不再成立，先清掉，
+                                // 免得下一次比对把刚插入的命令判成「组词中」。
+                                draftComposition = null
                             },
                             references = references,
-                            onAddReference = viewModel::addReference,
-                            onRemoveReference = viewModel::removeReference,
+                            onAddReference = { reference ->
+                                viewModel.addReference(reference)
+                                // 引用同样插在末尾，光标跟着走到末尾。
+                                draftSelection = caretAtEnd(viewModel.draft.value)
+                                draftComposition = null
+                            },
+                            onRemoveReference = { reference ->
+                                viewModel.removeReference(reference)
+                                // 审查 R047（第二轮）P2：移除同样会改正文，光标必须跟着走。
+                                // `removeReferenceToken` 删掉 token 和它前面那一个空格，文本
+                                // 变短后旧的 `draftSelection` 会被 `TextFieldValue` 的
+                                // `coerceIn(0, length)` 夹到中间——`看 @a.md @b.md` 删前者会停在
+                                // `@b.md` 里，用户接着打字就插进了 token 内部。
+                                draftSelection = caretAtEnd(viewModel.draft.value)
+                                draftComposition = null
+                            },
+                            draftSelection = draftSelection,
+                            onDraftSelectionChange = { draftSelection = it },
+                            draftComposition = draftComposition,
+                            onDraftCompositionChange = { draftComposition = it },
                             onPickReference = {
                                 showReferencePicker = true
                                 viewModel.searchReferences("")
@@ -1415,10 +1464,20 @@ internal fun Composer(
     commandsError: String? = null,
     onLoadCommands: () -> Unit = {},
     onApplyCommand: (SlashCommand, String) -> Unit = { _, _ -> },
-    /** 已选文件引用；会拼成 `@path` 随正文发出。 */
+    /**
+     * 已选引用（正文 `@path` token 的投影）。
+     *
+     * R047 ③ 起引用就是正文的一部分，**不再**在发送时拼后缀（旧实现那样会发出去两份）。
+     * 这个列表只给引用选择器回显「已选哪几个」，正文本身才是唯一事实来源。
+     */
     references: List<FileReference> = emptyList(),
     onAddReference: (FileReference) -> Unit = {},
     onRemoveReference: (FileReference) -> Unit = {},
+    draftSelection: TextRange = TextRange.Zero,
+    onDraftSelectionChange: (TextRange) -> Unit = {},
+    /** 输入法组词区间（审查 R047 P1），见 `draftComposition` 的说明。 */
+    draftComposition: TextRange? = null,
+    onDraftCompositionChange: (TextRange?) -> Unit = {},
     /** 打开引用选择器（由调用方在输入框正上方展开一个可搜索的文件列表）。 */
     onPickReference: () -> Unit = {},
     /**
@@ -1697,6 +1756,10 @@ internal fun Composer(
                         }
                         ComposerField(
                             draft = draft,
+                            selection = draftSelection,
+                            composition = draftComposition,
+                            onSelectionChange = onDraftSelectionChange,
+                            onCompositionChange = onDraftCompositionChange,
                             generating = generating,
                             expanded = expanded,
                             fieldInteraction = fieldInteraction,
@@ -1728,12 +1791,6 @@ internal fun Composer(
                         }
                     }
                 }
-
-                // R043：已选文件引用排在输入框上方（引用是消息的一部分，不是附件）。
-                ReferenceChips(
-                    references = references,
-                    onRemove = onRemoveReference,
-                )
 
                 // ---- 底排（仅展开态）：权限图标 + 模型胶囊 + ＋ + 发送 ----
                 // 用户 m42277 定案：权限只留图标（它本来就只读，多写几个字只是占宽度），
@@ -1889,6 +1946,63 @@ private fun AttachButton(onClick: () -> Unit) {
 }
 
 /**
+ * R047 ②③：把正文里的斜杠命令与 `@path` 引用染成主色等宽字体。
+ *
+ * 为什么用 `VisualTransformation` 而不是「拆成多个 Text 拼一行」：输入框只有一个
+ * 光标，拆开拼就得自己接管光标、点击定位、长按选择与输入法组词，等于重写一个大半的
+ * `TextField`。视觉变换只换样式、不动字符数（[OffsetMapping.Identity]），所以光标、
+ * 选区、`ImeAction`、无障碍朗读全部原样可用。
+ *
+ * 判据在 [inlineHighlightRanges]（纯函数，单测见 `ComposerReferenceTextTest` 里
+ * 「inlineHighlightRanges」那一组），这里只负责把区间刷成样式。
+ */
+@Composable
+private fun rememberComposerHighlight(): VisualTransformation {
+    // 审查 R047 P2-3：原来写死 `Color(0xFF5AA2FF)`（深色主题的 primary），在浅色主题的
+    // `background #F4F7FB` 上对比度只有 2.43:1，反而比正文更难认。`VisualTransformation`
+    // 的 lambda 不是 `@Composable`、拿不到组合上下文，所以在这里（组合内）读一次主题色，
+    // 用 `remember(accent)` 把它闭包进去。
+    val accent = MaterialTheme.colorScheme.primary
+    return remember(accent) {
+        VisualTransformation { text ->
+            val ranges = inlineHighlightRanges(text.text)
+            if (ranges.isEmpty()) {
+                TransformedText(text, OffsetMapping.Identity)
+            } else {
+                val annotated = buildAnnotatedString {
+                    append(text.text)
+                    ranges.forEach { span ->
+                        addStyle(
+                            style = SpanStyle(
+                                color = accent,
+                                fontFamily = FontFamily.Monospace,
+                            ),
+                            start = span.start,
+                            end = span.end,
+                        )
+                    }
+                }
+                TransformedText(annotated, OffsetMapping.Identity)
+            }
+        }
+    }
+}
+
+/**
+ * `TextRange` 的存档器。
+ *
+ * 不用 `TextRange.Saver`——这一版 compose-ui 没有公开它（`Unresolved reference
+ * 'Saver'`）。两个 Int 拆开存最直白：`SavedStateHandle` 里就是一个长度 2 的列表。
+ */
+private val TextRangeSaver = listSaver<TextRange, Int>(
+    save = { listOf(it.start, it.end) },
+    restore = { TextRange(it[0], it[1]) },
+)
+
+/** 把正文末尾当作光标位置（插入命令/引用后光标落在这里）。 */
+private fun caretAtEnd(text: String): TextRange = TextRange(text.length)
+
+/**
  * R028 ④：输入控件用 `TextField` + **全透明容器色/指示线色**，而不是 `OutlinedTextField`。
  *
  * 用户原话要求「输入区域也不用明显的分割线，主要是需要体现整体感和设计感」，
@@ -1903,6 +2017,10 @@ private fun AttachButton(onClick: () -> Unit) {
 @Composable
 private fun ComposerField(
     draft: String,
+    selection: TextRange,
+    composition: TextRange?,
+    onSelectionChange: (TextRange) -> Unit,
+    onCompositionChange: (TextRange?) -> Unit,
     generating: Boolean,
     expanded: Boolean,
     fieldInteraction: MutableInteractionSource,
@@ -1910,9 +2028,29 @@ private fun ComposerField(
     onSend: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // R047 ②（用户 m32024「光标会显示在命令的开头而不是结尾」）：
+    // `TextField` 的 String 重载没有 selection 参数，外部整段替换正文（插入命令、
+    // 插入引用）时 Compose 只能把光标复位到开头。改用 `TextFieldValue` 重载，
+    // 光标位置交给外部持有——插入命令时置到末尾，用户自己打字时按 `onValueChange`
+    // 回传的 `it.selection` 走。
+    val fieldValue = remember(draft, selection, composition) {
+        TextFieldValue(text = draft, selection = selection, composition = composition)
+    }
     TextField(
-        value = draft,
-        onValueChange = onDraftChange,
+        value = fieldValue,
+        onValueChange = { next ->
+            // 审查 R047 P1：`composition` 必须原样回传。`CoreTextField` 每次重组都会把
+            // 我们的 `TextRange` 与 `EditingBuffer` 里正在进行的组词区间比对，只要
+            // `composition` 对不上就走 `commitComposition()` 并把 `composition = null`
+            // 同步给输入法——结果是中文拼音每敲一键都打断组词。
+            // 顺序：先报组词与选区（它们不触发正文重算），最后再报文本。
+            onCompositionChange(next.composition)
+            onSelectionChange(next.selection)
+            // 审查 R047 P3-6：无条件回传。曾经写成 `if (next.text != draft)`，而 `draft`
+            // 是本次组合捕获的旧值——同一帧内先敲后删（净结果等于旧值）时条件不成立，
+            // 这次编辑就丢了。受控组件应当无条件上报，`_draft` 在值相同时不发新值。
+            onDraftChange(next.text)
+        },
         modifier = modifier.heightIn(min = 40.dp, max = 160.dp),
         placeholder = {
             Text(
@@ -1928,6 +2066,9 @@ private fun ComposerField(
         maxLines = 6,
         shape = RoundedCornerShape(12.dp),
         interactionSource = fieldInteraction,
+        // R047 ②：把正文里的斜杠命令与 `@path` 引用染成主色等宽字体（DSH 桌面端同样处理）。
+        // `OffsetMapping.Identity`——只换样式不换字符数，光标与选区的下标因此仍然成立。
+        visualTransformation = rememberComposerHighlight(),
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
         keyboardActions = KeyboardActions(onSend = { onSend() }),
         // 四色透明：不画容器、不画指示线。分隔交给留白与投影（R028 ④）。

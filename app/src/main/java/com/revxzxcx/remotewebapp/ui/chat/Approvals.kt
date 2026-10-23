@@ -693,7 +693,13 @@ internal fun PermissionSheet(
         //
         // 修法与提问卡 [ComposerShell] 同一套：正文单独滚动、动作钉住。
         // 高度上限按本对话框拿到的可用高度算，不写死常量（写死会在字体放大时再次裁掉）。
-        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        // 审查（R047 ①，用户 m32024「权限弹窗没有居中，整体偏左」）：`BoxWithConstraints`
+        // 默认 `contentAlignment = Alignment.TopStart`，而 `Dialog(usePlatformDefaultWidth = false)`
+        // 下它铺满整个窗口 —— 里面 `Surface(fillMaxWidth(0.88f))` 于是贴左。必须显式居中。
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
             // 固定开销：上下各 24dp 呼吸位 + 内容 18dp 上下 padding + 标题行 30dp
             // + 标题下 12dp + 正文与按钮之间 16dp + 按钮 40dp = 194dp，再留 8dp 余量。
             val bodyMaxHeight = (maxHeight - 202.dp).coerceAtLeast(120.dp)

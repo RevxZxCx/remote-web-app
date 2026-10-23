@@ -21,7 +21,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -43,9 +42,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.revxzxcx.remotewebapp.core.session.FileReference
 import com.revxzxcx.remotewebapp.core.session.SlashCommand
-import com.revxzxcx.remotewebapp.ui.theme.bubbleShape
 import com.revxzxcx.remotewebapp.ui.theme.chipShape
 import com.revxzxcx.remotewebapp.ui.theme.pillShape
 
@@ -432,55 +429,3 @@ private fun SearchField(query: String, onQueryChange: (String) -> Unit, placehol
     }
 }
 
-/**
- * 已选引用的胶囊行（用户 m21625/m26743 里说的「添加各种内容」的可视化）。
- *
- * 引用**不会**直接进消息正文，而是拼成 `@path` 追加在草稿末尾——那是桌面端的写法，
- * 也是服务端唯一认识的引用语法（`@` 在输入框里同样打开 `fileReferences` 源）。
- */
-@Composable
-internal fun ReferenceChips(
-    references: List<FileReference>,
-    onRemove: (FileReference) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    if (references.isEmpty()) return
-    Row(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        references.forEach { reference ->
-            Row(
-                modifier = Modifier
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), bubbleShape)
-                    .padding(start = 8.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    imageVector = if (reference.isDirectory) Icons.Default.List else Icons.Default.Info,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(12.dp),
-                )
-                Spacer(Modifier.width(4.dp))
-                Text(
-                    text = reference.path.substringAfterLast('/'),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.heightIn(max = 16.dp),
-                )
-                Icon(
-                    imageVector = Icons.Default.Clear,
-                    contentDescription = "移除引用 ${reference.path}",
-                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
-                    modifier = Modifier
-                        .size(14.dp)
-                        .clickable { onRemove(reference) },
-                )
-            }
-        }
-    }
-}

@@ -147,7 +147,16 @@ class ChatViewModel(
     private val _commandsError = MutableStateFlow<String?>(null)
     val commandsError: StateFlow<String?> = _commandsError.asStateFlow()
 
-    /** 已经选好的文件引用（会拼成 `@path` 追加在消息末尾）。 */
+    /**
+     * 当前正文里出现的引用（R047 ③）。
+     *
+     * **不再是独立于草稿的一份状态**：引用就是正文里的 `@path` token，这份列表是它的
+     * 投影，只给选择器回显「已选」用。R043 那版把它当成独立集合、发送时再拼后缀，
+     * 于是界面上是输入框下面一排胶囊、点掉胶囊却不影响正文——两处状态迟早分叉
+     * （用户 m32024 第 3 条要求照 DSH 把引用渲染在正文里）。
+     *
+     * 由 [onDraftChange] 每次从文本重算，不从别处写。
+     */
     private val _references = MutableStateFlow<List<FileReference>>(emptyList())
     val references: StateFlow<List<FileReference>> = _references.asStateFlow()
 
@@ -261,8 +270,10 @@ class ChatViewModel(
      * 已经加过的不重复加（同一个文件引用两次没有意义，还会让服务端解析出两段）。
      */
     fun addReference(reference: FileReference) {
-        if (_references.value.any { it.path == reference.path }) return
-        _references.value = _references.value + reference
+        // R047 ③：引用写进正文（`@path`），不再是另一份列表。
+        onDraftChange(
+            com.revxzxcx.remotewebapp.ui.chat.insertReferenceToken(_draft.value, reference.path),
+        )
     }
 
     // -------------------------------------------------- 引用选择器（R043）
@@ -310,7 +321,9 @@ class ChatViewModel(
     }
 
     fun removeReference(reference: FileReference) {
-        _references.value = _references.value.filterNot { it.path == reference.path }
+        onDraftChange(
+            com.revxzxcx.remotewebapp.ui.chat.removeReferenceToken(_draft.value, reference.path),
+        )
     }
 
     /**
@@ -327,12 +340,13 @@ class ChatViewModel(
             ?: false
 
     /**
-     * 发出去的那条消息：草稿 + 引用后缀。
+     * 发出去的那条消息。
      *
-     * 引用不单独走一个 RPC，而是**拼进正文**——`session/prompt` 只吃文本，没有
-     * 「附带引用列表」这种参数（`ChatArgs.prompt` 只有 text/attachments）。
+     * R047 ③ 起引用已经在草稿正文里（`@path` token），所以这里**原样返回草稿**——
+     * 再拼一次后缀会把同一个引用发两遍。保留这个函数是因为 `send()` 与
+     * `retrySend()` 都按它取名，语义仍是「真正要发出去的那段文本」。
      */
-    fun composedText(): String = composeOutgoingText(_draft.value, _references.value)
+    fun composedText(): String = _draft.value
 
     /**
      * 全局连接状态（需求 FR-4.4），直接取自唯一的载波。
@@ -713,7 +727,14 @@ class ChatViewModel(
         if (ownerId.isBlank()) return
         draftRestoreJob = viewModelScope.launch {
             val saved = store.readDraft(ownerId, sessionId) ?: return@launch
-            if (_draft.value.isEmpty()) _draft.value = saved
+            if (_draft.value.isEmpty()) {
+                _draft.value = saved
+                // R047 审查 P3-5：`_references` 是草稿正文的投影，恢复草稿也必须在
+                // 这里重算一次——否则冷启动恢复出的正文含 `@path` 时，选择器仍显示
+                // 「已选 0 项」，投影不变式被这条岔路破坏。不走 `onDraftChange`
+                // 是因为那会多排一次落盘（刚读回来的内容不需要再写一遍）。
+                _references.value = com.revxzxcx.remotewebapp.ui.chat.referenceTokens(saved)
+            }
         }
     }
 
@@ -727,6 +748,9 @@ class ChatViewModel(
      */
     fun onDraftChange(text: String) {
         _draft.value = text
+        // R047 ③：引用是正文的投影，每次文本变化都重算（token 被删掉就自动消失）。
+        _references.value =
+            com.revxzxcx.remotewebapp.ui.chat.referenceTokens(text)
         pendingDraft = text
         val store = cache ?: return
         if (ownerId.isBlank()) return
@@ -916,15 +940,17 @@ class ChatViewModel(
     }
 
     fun send() {
-        // ⚠️ 必须是 `composedText()` 而不是 `_draft.value`：选中的文件引用是以
-        // `@path` 后缀拼进正文发出去的（[composedText] 的 KDoc 有解释）。首版这里
-        // 读的是草稿，chip 在界面上看得见、消息里却没有，引用功能等于装饰
-        // （R043 审查 P1-1）。
+        // 发送的就是草稿原文本身：R047 ③ 起引用是正文里的 `@path` token，不再有
+        // 「另存一份引用列表、发送时拼后缀」这一步（[composedText] 的 KDoc 有解释），
+        // 所以这里和 `_draft.value` 是同一份内容。仍走 `composedText()` 是为了保留
+        // 唯一入口——将来若再引入「界面显示 ≠ 实际发出」的字段，只改它一处。
+        //
+        // 历史：R043 曾把引用拼成 `@path` 后缀追加在草稿后面，那时这里读草稿会让
+        // 界面上的 chip 看得见、消息里却没有（R043 审查 P1-1）。
         val text = composedText().trim()
-        // 命令识别只看草稿原文：`composedText()` 会把引用拼成 ` @path` 后缀，若拿它
-        // 判定，`/export` 加一个引用就变成 `/export @docs/a.md`，`@path` 会被当成
-        // 命令参数发给 `commands/execute`——而引用语义只对 `session/prompt` 有效
-        // （R045 审查 P3）。
+        // 命令识别用草稿原文。带 `@路径` 时 `commandCandidate` 会返回 null ——
+        // `commands/execute` 没有引用参数，发过去只会把 `@path` 当命令参数吞掉
+        // （R045 审查 P3 / R047 ③）。
         val draftLine = _draft.value.trim()
         val attachments = _pending.value
         if (text.isEmpty() && attachments.isEmpty()) return
@@ -934,7 +960,6 @@ class ChatViewModel(
         // 不认得的 `/foo` 仍按普通文本发（用户可能就是要讨论一个以斜杠开头的东西）。
         val commandLine = com.revxzxcx.remotewebapp.ui.chat.commandCandidate(
             draft = draftLine,
-            referenceCount = _references.value.size,
             attachmentCount = attachments.size,
         )
         if (commandLine != null) {
@@ -2372,19 +2397,20 @@ class ChatViewModel(
 }
 
 /**
- * 把草稿与选中的文件引用拼成真正发出去的那条文本。
+ * 从正文里扫出引用 token（R047 ③）。
  *
- * 抽成顶层纯函数只为一个理由：这是**引用功能唯一的实质逻辑**，而 [ChatViewModel]
- * 的构造依赖真 `AppContainer`（Keystore + Room），在 JVM 单测里造不出来。R043 首版
- * `send()` 读的是草稿、`composedText()` 一个调用点都没有，结果「引用」在界面上看得见、
- * 消息里却没有（审查 P1-1 就是这么漏掉的）——把这行逻辑拿出来单测，才不会第二次漏。
+ * 与 `inlineHighlightRanges` 里的 Reference 分支同一条判据（`@` 必须在词首），
+ * 但这里返回结构化对象而不是下标——选择器要回显「已选哪几项」。
  *
- * 引用以 ` @path` 后缀拼在正文末尾：`session/prompt` 只吃文本，没有「附带引用列表」
- * 这种参数（`ChatArgs.prompt` 只有 text/attachments）。
+ * `isDirectory` 只能猜：`@docs/` 结尾带斜杠视为目录，其它按文件。服务端
+ * `fileReferences/list` 不回传引用之后的使用方式，界面上也只是个图标差别。
  */
-internal fun composeOutgoingText(draft: String, references: List<FileReference>): String {
-    if (references.isEmpty()) return draft
-    val suffix = references.joinToString(" ") { "@${it.path}" }
-    val base = draft.trimEnd()
-    return if (base.isEmpty()) suffix else "$base $suffix"
-}
+internal fun referenceTokens(text: String): List<FileReference> =
+    com.revxzxcx.remotewebapp.ui.chat.inlineHighlightRanges(text)
+        .asSequence()
+        .filter { it.kind == com.revxzxcx.remotewebapp.ui.chat.InlineSpanKind.Reference }
+        .map { text.substring(it.start, it.end).removePrefix("@") }
+        .filter { it.isNotBlank() }
+        .distinct()
+        .map { FileReference(path = it, isDirectory = it.endsWith("/")) }
+        .toList()
