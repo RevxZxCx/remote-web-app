@@ -54,6 +54,43 @@ data class SessionSummary(
     val lastPromptAt: Long? = null,
     /** `projections.values.modelSelection.lastUsed?.model`，仅用于副标题展示。 */
     val lastModel: String? = null,
+    /**
+     * `projections.values.userQuestions.active` 非空，或 `inbox` 的 `next-turn` / `next-step`
+     * 非空 —— 即「有东西在等人」，R049 用来画琥珀状态点。
+     *
+     * 两个都收在同一个布尔里而不是分开两个：列表行只有一个位置放状态点，
+     * 而「等回答」与「有排队」对用户的含义相同（这个会话需要我看一眼）。
+     */
+    val awaitingAttention: Boolean = false,
+    /**
+     * 「这个会话刚跑完，用户还没来看」的提醒标记（R049，用户 m32994 + m33325 纠正）。
+     *
+     * **不是 `session/list` 的字段**，也**不是「跑完了」的同义词**：官方 README 记着
+     * 「"New task completed" unread marking is local viewing state — completion-time >
+     * last-seen never reaches the host」，服务端两边都不给。
+     *
+     * 由 `HomeViewModel` 经 `CompletionLedger` 从事件流边沿写入：跑起来 → 灭；
+     * 跑完（上一刻在跑）且用户没在看它 → 亮；用户进会话看过 → 灭。进程重启即失效。
+     * 判据详见 [CompletionLedger] 的类 KDoc。
+     */
+    val completionUnread: Boolean = false,
+
+    /**
+     * 「这个会话上一轮跑挂了，用户还没来看」的提醒标记（R049）。
+     *
+     * 与 [completionUnread] 同构、同来源、同生命周期：也**不是** `session/list` 的字段，
+     * 也**不是「历史上失败过」**，而是一次性提醒。由 `CompletionLedger` 从
+     * `api-session/error` 写入：失败 → 亮；用户进会话看过 / 它重新跑起来 → 灭。
+     */
+    val failureUnread: Boolean = false,
+
+    /**
+     * 失败提醒的原因文本（`api-session/error` 的第二项，服务端拼好的 user-safe 描述）。
+     *
+     * 只在 [failureUnread] 为真时有意义，且只给读屏与将来的悬停提示用：列表行不展示长文本。
+     * 空串表示这次失败没带原因——红点照样该亮，文案只是附加信息。
+     */
+    val failureReason: String = "",
 ) : Parcelable {
     /** 是不是子代理会话。子代理不参与工作区列表（`workspace.sessionIds` 里没有它们）。 */
     val isSubagent: Boolean get() = origin == SUBAGENT_ORIGIN

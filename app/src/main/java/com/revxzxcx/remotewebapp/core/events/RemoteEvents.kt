@@ -145,7 +145,8 @@ sealed interface RemoteEventFrame {
  * 帧是 `{"type":"emit","event":"api-session/added","args":[…]}`，`args` 是数组：
  * - `api-session/added` → `[summary]`，`summary` 与 `session/list` 的条目**同形状**
  *   （实测含 `sessionId`/`updatedAt`/`running`/`blank`/`cwd`/`projections` 全套）；
- * - `api-session/removed` / `status` / `activity` / `error` → `[sessionId, …]`。
+ * - `api-session/removed` / `status` / `activity` / `error` → `[sessionId, …]`
+ *   （`error` 的第二项是失败原因文本，见 [SessionNotification.Error]）。
  *
  * ## 为什么 `activity` 也要接
  * 它是**唯一**能覆盖「标题变了 / 排序位置变了」的信号：标题在
@@ -165,6 +166,16 @@ sealed interface SessionNotification {
 
     /** 会话有新活动（`updatedAt` 变化）：标题与排位可能一起变，需要重拉全量。 */
     data class Activity(val sessionId: String, val updatedAt: Long) : SessionNotification
+
+    /**
+     * 一轮跑挂了（R049）。
+     *
+     * 签名 `'api-session/error'(sessionId, message)`，`message` 是服务端拼好的
+     * 「user-safe failure chain」。为什么要接它：`session/list` 的顶层没有 outcome 字段，
+     * `turnOutline` 每项也只有 `turn`/`seq`/`prompt`/`response`——**列表侧拿不到「这一轮失败了」**，
+     * 而这是列表行画红点的唯一来源。
+     */
+    data class Error(val sessionId: String, val message: String) : SessionNotification
 
     companion object {
         /**
@@ -189,6 +200,11 @@ sealed interface SessionNotification {
                     val id = idOf(args) ?: return null
                     val at = (args.getOrNull(1) as? JsonPrimitive)?.content?.toLongOrNull() ?: return null
                     Activity(id, at)
+                }
+                "api-session/error" -> {
+                    val id = idOf(args) ?: return null
+                    // 消息缺失也要认：红点该亮就得亮，文案只是提示。空串比丢掉整条事件安全。
+                    Error(id, (args.getOrNull(1) as? JsonPrimitive)?.content.orEmpty())
                 }
                 else -> null
             }

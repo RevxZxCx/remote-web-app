@@ -261,6 +261,26 @@ fun AppRoot(container: AppContainer) {
                 } else {
                     val session = openSession
                     val file = openFile
+
+                    // 列表页的 ViewModel 提到这一层（R049）：它现在还要负责「完成/失败
+                    // 未读提醒」的账本，必须**在会话里也活着**——否则用户进会话期间跑完
+                    // 的那一轮没有观测者，等回到列表时「上一刻在跑」这个边沿已经丢了，
+                    // 绿点永远不会点亮。放到 Paired 这一层后它与聊天页共享同一个实例
+                    // （Activity 的 ViewModelStore），进出会话都不重建。
+                    val homeVm: HomeViewModel = viewModel(
+                        key = "home-${current.credential.deviceId}",
+                        factory = HomeViewModel.factory(
+                            connection = connection,
+                            cache = container.cache,
+                            ownerId = container.ownerId,
+                        ),
+                    )
+
+                    // 进入会话即「看过了」：账本把这条会话的两枚未读提醒熄灭并同步进列表。
+                    // 看文件（`file != null`）也算，那是同一个会话的内容。
+                    LaunchedEffect(session?.sessionId) {
+                        homeVm.onSessionOpened(session?.sessionId)
+                    }
                     when {
                         openDebug -> {
                             // key 带 deviceId（R018 P2-2）：DebugViewModel 构造时捕获
@@ -295,17 +315,9 @@ fun AppRoot(container: AppContainer) {
                             }                        }
 
                         session == null -> {
-                            val vm: HomeViewModel = viewModel(
-                                key = "home-${current.credential.deviceId}",
-                                factory = HomeViewModel.factory(
-                                    connection = connection,
-                                    cache = container.cache,
-                                    ownerId = container.ownerId,
-                                ),
-                            )
                             ScreenTransition(route = "home") {
                                 HomeScreen(
-                                    viewModel = vm,
+                                    viewModel = homeVm,
                                     onUnpair = { pendingUnpair = true },
                                     onOpenSession = { summary, _ ->
                                         openSession = summary

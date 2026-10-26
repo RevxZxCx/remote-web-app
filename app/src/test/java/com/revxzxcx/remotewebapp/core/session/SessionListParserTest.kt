@@ -170,6 +170,62 @@ class SessionListParserTest {
     }
 
     @Test
+    fun `有活跃提问时标记为需要关注`() {
+        // R049：`userQuestions.active` 非空 = 有提问在等回答。
+        val s = parser.parse(
+            obj(
+                """{"items":[{"sessionId":"s1","projections":{"values":{
+                    "userQuestions":{"active":[{"callId":"c1"}],"settled":[]}}}}]}""",
+            ),
+        ).items.single()
+        assertTrue(s.awaitingAttention)
+    }
+
+    @Test
+    fun `有排队消息时标记为需要关注`() {
+        // `inbox.next-turn` 是「排队但还没发出去」的用户消息。
+        val s = parser.parse(
+            obj(
+                """{"items":[{"sessionId":"s1","projections":{"values":{
+                    "inbox":{"next-turn":[{"id":"m1"}],"next-step":[]}}}}]}""",
+            ),
+        ).items.single()
+        assertTrue(s.awaitingAttention)
+    }
+
+    @Test
+    fun `空提问与空排队不算需要关注`() {
+        val s = parser.parse(
+            obj(
+                """{"items":[{"sessionId":"s1","projections":{"values":{
+                    "userQuestions":{"active":[],"settled":[]},
+                    "inbox":{"next-turn":[],"next-step":[]}}}}]}""",
+            ),
+        ).items.single()
+        assertFalse(s.awaitingAttention)
+    }
+
+    @Test
+    fun `没有投影时不标记需要关注`() {
+        val s = parser.parse(obj("""{"items":[{"sessionId":"s1"}]}""")).items.single()
+        assertFalse(s.awaitingAttention)
+    }
+
+    @Test
+    fun `两条未读提醒都不从 session list 解析`() {
+        // `session/list` 顶层只有 8 个字段，既没有 outcome 也没有「用户看没看过」。
+        // 即便服务端将来塞同名字段进来，这里也不该认——两个标记只由 CompletionLedger
+        // 从事件流边沿写入（R049，用户 m33325：「这个点不是常驻的」）。
+        val s = parser.parse(
+            obj(
+                """{"items":[{"sessionId":"s1","completionUnread":true,"failureUnread":true}]}""",
+            ),
+        ).items.single()
+        assertFalse(s.completionUnread)
+        assertFalse(s.failureUnread)
+    }
+
+    @Test
     fun `topLevel 排除子代理并按时间降序`() {
         val result = parser.parse(
             obj(

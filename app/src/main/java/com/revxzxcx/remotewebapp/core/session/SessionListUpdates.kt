@@ -53,8 +53,17 @@ internal object SessionListUpdates {
     ): List<SessionSummary> {
         val index = items.indexOfFirst { it.sessionId == sessionId }
         if (index < 0) return items
-        if (items[index].running == running) return items
-        return items.toMutableList().also { it[index] = it[index].copy(running = running) }
+        // R049：跑起来意味着用户已经让这个会话继续了，「跑完了没看」与「上一轮挂了」
+        // 两条提醒都该灭——新的结果会重新决定点亮什么。
+        val cleared = running && (items[index].completionUnread || items[index].failureUnread)
+        if (items[index].running == running && !cleared) return items
+        return items.toMutableList().also {
+            it[index] = if (running) {
+                it[index].copy(running = true, completionUnread = false, failureUnread = false)
+            } else {
+                it[index].copy(running = false)
+            }
+        }
     }
 
     /**
@@ -67,5 +76,101 @@ internal object SessionListUpdates {
     fun remove(items: List<SessionSummary>, sessionId: String): List<SessionSummary> {
         if (items.none { it.sessionId == sessionId }) return items
         return items.filterNot { it.sessionId == sessionId }
+    }
+
+    /**
+     * 只改某条会话的「跑完了，但用户还没看」提醒标记（R049）。
+     *
+     * 与 [patchRunning] 同构：事件只带一个 id，没有完整摘要可替换。找不到 id 时
+     * 原样返回——冷启动时序下凭空造一条摘要会带出 `updatedAt = 0` 的假行。
+     *
+     * 判据的**唯一出处**是 `CompletionLedger`；这里只负责把它的结论落到列表条目上。
+     */
+    fun patchUnreadFlags(
+        items: List<SessionSummary>,
+        sessionId: String,
+        completionUnread: Boolean,
+        failureUnread: Boolean,
+        failureReason: String = "",
+    ): List<SessionSummary> {
+        val index = items.indexOfFirst { it.sessionId == sessionId }
+        if (index < 0) return items
+        val current = items[index]
+        // 熄灭时一并清掉原因：留着会让下一条红点显示上一次失败的文案。
+        val reason = if (failureUnread) failureReason else ""
+        if (current.completionUnread == completionUnread &&
+            current.failureUnread == failureUnread &&
+            current.failureReason == reason
+        ) {
+            return items
+        }
+        return items.toMutableList().also {
+            it[index] = current.copy(
+                completionUnread = completionUnread,
+                failureUnread = failureUnread,
+                failureReason = reason,
+            )
+        }
+    }
+
+    /**
+     * 用账本记住的运行态纠正若干条会话的 `running`（R049 二审 P2 的另一半）。
+     *
+     * `session/list` 是 2.6 秒的一次性 RPC，返回时它内里的 `running` 可能已经过时：
+     * 请求发出后那条会话才开始跑，`api-session/status` 已把行 patch 成运行中，而快照
+     * 里仍是 `false`。直接整表覆盖会把小柱打回静止，且那条 `status=true` 已被消费，
+     * 之后不会再有事件纠正它——直到这一轮结束时 `status=false` 才「看起来正常」。
+     *
+     * @param updates 会话 id → 账本记住的运行态
+     */
+    fun patchRunningFromLedger(
+        items: List<SessionSummary>,
+        updates: Map<String, Boolean>,
+    ): List<SessionSummary> {
+        if (updates.isEmpty()) return items
+        val stale = items.any { item ->
+            updates[item.sessionId]?.let { it != item.running } == true
+        }
+        if (!stale) return items
+        return items.map { item ->
+            val authoritative = updates[item.sessionId] ?: return@map item
+            if (authoritative == item.running) item else item.copy(running = authoritative)
+        }
+    }
+
+    /**
+     * 把「本次运行期内的完成提醒」重新盖到一份新列表上（R049）。
+     *
+     * `session/list` 不带这个标记，所以每次全量重拉都会把
+     * [SessionSummary.completionUnread] 抹成默认 false。若不重新盖上，用户翻个页、
+     * 或某次 `api-session/activity` 触发的重拉，就会把刚亮的绿点擦掉——而那条会话
+     * 依然是「跑完了没人看」。
+     *
+     * @param items 新拉回来的列表
+     * @param completionIds 此刻亮着完成提醒的会话（`CompletionLedger.unreadIds()`）
+     * @param failureIds 此刻亮着失败提醒的会话（`CompletionLedger.failureIds()`）
+     */
+    fun carryUnreadFlags(
+        items: List<SessionSummary>,
+        completionIds: Set<String>,
+        failureIds: Set<String>,
+        failureReasons: Map<String, String> = emptyMap(),
+    ): List<SessionSummary> {
+        if (completionIds.isEmpty() && failureIds.isEmpty()) return items
+        val stale = items.any {
+            (it.sessionId in completionIds && it.completionUnread.not()) ||
+                (it.sessionId in failureIds && (it.failureUnread.not() || it.failureReason != failureReasons[it.sessionId].orEmpty()))
+        }
+        if (!stale) return items
+        return items.map {
+            val reason = if (it.sessionId in failureIds) failureReasons[it.sessionId].orEmpty() else ""
+            it.copy(
+                completionUnread = it.completionUnread || it.sessionId in completionIds,
+                failureUnread = it.failureUnread || it.sessionId in failureIds,
+                // 原因必须一起重盖：`session/list` 的新条目里这一项恒为空串，
+                // 只盖布尔会把读屏文案打回通用版（审查 P2）。
+                failureReason = reason,
+            )
+        }
     }
 }

@@ -54,6 +54,27 @@ private val DarkColors = darkColorScheme(
  */
 internal val LocalStatusRunning = staticCompositionLocalOf { Color(0xFF4ADE80) }
 
+/**
+ * 「上一轮跑挂了」的语义色（R049）。
+ *
+ * 不复用 `colorScheme.error`：那是给**文字与边框**用的错误色，深色主题下是
+ * `#FFB4AB`（偏粉的浅色），画一个 8dp 的状态点会显得发灰、不够「报警」。
+ * 这里要的是**深色主题下也亮得起来**的红，所以深浅两套各给一个值：
+ * 深色下用 `#FF6B6B`（在 `#111C2B` 上约 4.9:1），浅色下用 `#D93025`
+ * （在 `#FFFFFF` 上约 4.7:1，且比纯红更沉稳）。
+ *
+ * 与 [LocalStatusRunning] 同样用 CompositionLocal 而不是 `ColorScheme`，理由见上。
+ */
+internal val LocalStatusError = staticCompositionLocalOf { Color(0xFFFF6B6B) }
+
+/**
+ * 「需要你看一眼」的语义色（R049）：有提问等回答、或有排队消息没发出去。
+ *
+ * 取琥珀而不是黄：`#F2C14E` 在白底上只有 1.9:1 左右，做状态点太淡，
+ * 所以深色用 `#F5B942`、浅色用 `#B26A00`（后者在 `#FFFFFF` 上约 4.6:1）。
+ */
+internal val LocalStatusAttention = staticCompositionLocalOf { Color(0xFFF5B942) }
+
 private val LightColors = lightColorScheme(
     primary = Color(0xFF1F6FEB),
     onPrimary = Color(0xFFFFFFFF),
@@ -131,6 +152,8 @@ fun DshAssistantTheme(
     ) {
         CompositionLocalProvider(
             LocalStatusRunning provides if (darkTheme) Color(0xFF4ADE80) else Color(0xFF15803D),
+            LocalStatusError provides if (darkTheme) Color(0xFFFF6B6B) else Color(0xFFD93025),
+            LocalStatusAttention provides if (darkTheme) Color(0xFFF5B942) else Color(0xFFB26A00),
         ) {
             content()
         }

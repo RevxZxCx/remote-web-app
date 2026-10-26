@@ -11,6 +11,7 @@ import com.revxzxcx.remotewebapp.core.events.SessionNotification
 import com.revxzxcx.remotewebapp.core.protocol.CarrierState
 import com.revxzxcx.remotewebapp.core.protocol.MuxStats
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
+import com.revxzxcx.remotewebapp.core.session.CompletionLedger
 import com.revxzxcx.remotewebapp.core.session.SessionActionRepository
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
 import com.revxzxcx.remotewebapp.core.session.SessionListParser
@@ -211,6 +212,19 @@ class HomeViewModel(
     /** 复用它解析 `api-session/added` 推来的摘要（与 `session/list` 同形状）。 */
     private val listParser = SessionListParser()
 
+    /**
+     * 列表行「完成 / 失败」未读提醒的账本（R049，用户 m32994 + m33325 纠正）。
+     *
+     * 用户明确说过「这个点不是常驻的，而是一个完成的标记，提醒用户查看对话的」，
+     * 所以它是**一次性提醒**而不是状态：跑完（边沿）→ 亮；用户进来看了 → 灭；
+     * 又跑起来 → 灭。判据全部在 [CompletionLedger] 里，这里只负责把它接到事件流
+     * 与列表刷新上。
+     *
+     * 只在主线程读写（`observeSessionNotifications` 的 collect 与 `loadSessions` 都在
+     * `viewModelScope` 的默认调度器上），账本自身也不加锁，见其类 KDoc 的「线程」节。
+     */
+    private val ledger = CompletionLedger()
+
     init {
         warmStart()
         start()
@@ -334,6 +348,10 @@ class HomeViewModel(
             val current = _state.value
             if (current.networkArrived) return@launch
             val snapshot = cachedWorkspaces ?: current.snapshot
+            // 这里**不用** carryUnreadFlags 重盖未读标记：`warmStart()` 只在 init 里跑一次，
+            // 那一刻账本三份账必然全空（早退），而缓存表也没有 completionUnread /
+            // failureUnread / failureReason 这三列，读回来恒为默认值。包一层只会让后来者
+            // 误以为「缓存里带着未读标记」。等缓存真的持久化这几列时再加回来。
             val sessions = cachedSessions?.let { SessionListResult(items = it) } ?: current.sessions
             // 读完后再判一次：上面的读是挂起点，期间可能已有网络帧写入并置位。
             if (_state.value.networkArrived) return@launch
@@ -361,14 +379,20 @@ class HomeViewModel(
      * 的条目**同形状**（探针实测含 projections 全套），可以直接复用
      * [SessionListParser.summaryOf] 解析——增量已经够用了。
      *
-     * ## 四条事件各管一件事
+     * ## 五条事件各管一件事
      * - `added`：新建 / agent 创建或销毁（带完整摘要，标题也在里面）→ 直接 upsert；
-     * - `status`：`(sessionId, running)` → 就地打补丁，这是「小柱」的唯一更新源；
-     * - `removed`：会话真的被销毁 → 移出；
+     *   摘要里没有 App 侧的未读标记，所以 upsert 之后要按账本回填（R049 审查 P2）；
+     * - `status`：`(sessionId, running)` → 就地打补丁，这是「小柱」的唯一更新源，
+     *   也是完成提醒的边沿来源；
      * - `activity`：用户发了新消息（Host 只在 `user/message` 且 `source.kind == "user"`
      *   时发它）→ 去抖后重拉一次全量。理由：`activity` 只给 `updatedAt`，而排序与
      *   标题可能一起变，光靠它无法就地改；它出现的频率恰好是「人打了一句话」，
      *   去抖后重拉的开销可以接受。
+     * - `error`：这一轮跑挂了 → 记一枚红色未读提醒（R049）。`message` 经
+     *   `SessionSummary.failureReason` 送进 `SessionStatusDot` 的 `contentDescription`，
+     *   读屏能听到失败原因；列表行本身仍然不显示文字。
+     * - `removed`：会话被 Host 真正销毁 → 从列表里删掉，并用 `ledger.forget` 清掉它在
+     *   三份账里的残留（不清理会让一条同名新会话凭空继承旧提醒）。
      */
     private fun observeSessionNotifications() {
         notificationsJob = viewModelScope.launch {
@@ -381,8 +405,30 @@ class HomeViewModel(
                             applyRunning(notification.sessionId, notification.running)
                         is SessionNotification.Removed -> applyRemoved(notification.sessionId)
                         is SessionNotification.Activity -> scheduleSessionsRefresh()
+                        is SessionNotification.Error ->
+                            applyError(notification.sessionId, notification.message)
                     }
                 }
+        }
+    }
+
+    /**
+     * 用户进入了某个会话（`null` 表示回到列表页）。
+     *
+     * 由 `AppRoot` 在 `openSession` 置值 / 清空时调用。进入即「看过」：账本会把那条
+     * 会话的两枚未读提醒都熄灭并同步进列表，否则提醒只能靠「它自己再跑一轮」才消失。
+     */
+    fun onSessionOpened(sessionId: String?) {
+        ledger.setCurrentSession(sessionId)
+        if (sessionId != null) {
+            applySessions(
+                SessionListUpdates.patchUnreadFlags(
+                    items = _state.value.sessions.items,
+                    sessionId = sessionId,
+                    completionUnread = false,
+                    failureUnread = false,
+                ),
+            )
         }
     }
 
@@ -390,21 +436,71 @@ class HomeViewModel(
     private fun applyAddedSummary(summary: JsonObject) {
         // 解析失败绝不改状态：宁可少一条，也不要往列表里塞一条 sessionId 残缺的假会话。
         val parsed = listParser.summaryOf(summary) ?: return
-        applySessions(SessionListUpdates.upsert(_state.value.sessions.items, parsed))
+        // 服务端摘要里没有 completionUnread / failureUnread（那两个字段只在 App 侧账本里），
+        // 而 upsert 是**整条替换**，直接写回会把已经亮着的提醒抹掉。asar 里 `api-session/added`
+        // 不只在 `session/created` 时发，`agent/created` / `agent/disposed` 也会对主 agent
+        // 重发一次摘要，所以这条覆盖路径是常态，不是边界情况。
+        val merged = SessionListUpdates.upsert(_state.value.sessions.items, parsed)
+            .let {
+                SessionListUpdates.patchUnreadFlags(
+                    items = it,
+                    sessionId = parsed.sessionId,
+                    completionUnread = ledger.isUnread(parsed.sessionId),
+                    failureUnread = ledger.isFailureUnread(parsed.sessionId),
+                    failureReason = ledger.failureReason(parsed.sessionId),
+                )
+            }
+        applySessions(merged)
         cacheIncrementally { it.upsertSession(ownerId, parsed) }
     }
 
-    /** `api-session/status`：只翻运行态。 */
+    /**
+     * `api-session/status`：翻运行态，并把「跑完了没看」的提醒落定（R049）。
+     *
+     * 顺序要紧：先让账本判边沿（它会更新自己记住的上一态），再把运行态与它的结论
+     * 一次性写进列表。分两步写会让重组看到「已停下但仍标着运行中」的中间帧。
+     */
     private fun applyRunning(sessionId: String, running: Boolean) {
+        val completionUnread = ledger.observe(sessionId, running)
         val items = SessionListUpdates.patchRunning(_state.value.sessions.items, sessionId, running)
+            .let {
+                SessionListUpdates.patchUnreadFlags(
+                    items = it,
+                    sessionId = sessionId,
+                    completionUnread = completionUnread,
+                    failureUnread = ledger.isFailureUnread(sessionId),
+                    failureReason = ledger.failureReason(sessionId),
+                )
+            }
         applySessions(items)
         // 落盘只写这一条：`patchRunning` 在未知 id 上会原样返回，那时找不到条目就不写。
         items.firstOrNull { it.sessionId == sessionId }
             ?.let { patched -> cacheIncrementally { it.upsertSession(ownerId, patched) } }
     }
 
+    /**
+     * `api-session/error`：这条会话上一轮跑挂了（R049）。
+     *
+     * `session/list` 不返回 outcome，`running` 也已经翻成 false，之后不会再有事件说明
+     * 「它上次失败了」——所以失败必须由账本自己记一份，且同样是一次性提醒：
+     * 用户进会话看失败卡片、或它重新跑起来，就灭。
+     */
+    private fun applyError(sessionId: String, reason: String) {
+        val failureUnread = ledger.observeFailure(sessionId, reason)
+        applySessions(
+            SessionListUpdates.patchUnreadFlags(
+                items = _state.value.sessions.items,
+                sessionId = sessionId,
+                completionUnread = ledger.isUnread(sessionId),
+                failureUnread = failureUnread,
+                failureReason = ledger.failureReason(sessionId),
+            ),
+        )
+    }
+
     /** `api-session/removed`：会话被销毁。归档**不走这里**（见 [SessionListUpdates.remove]）。 */
     private fun applyRemoved(sessionId: String) {
+        ledger.forget(sessionId)
         applySessions(SessionListUpdates.remove(_state.value.sessions.items, sessionId))
         cacheIncrementally { it.deleteSession(ownerId, sessionId) }
     }
@@ -572,7 +668,32 @@ class HomeViewModel(
         sessionJob = viewModelScope.launch {
             _state.value = _state.value.copy(sessionsLoading = true, sessionsError = null)
             try {
-                val result = sessions.load()
+                // 权威全量里没有 outcome（`session/list` 顶层只有 8 个字段），
+                // 把本次运行期攒下的报错标记重新盖上（R049）。
+                //
+                // 纪元必须在**发起请求前**记下：这次 RPC 要飞 2.6 秒，期间可能收到
+                // 某条会话的 `status` 事件。种子若拿陈旧快照比对，会把「刚开始跑」
+                // 读成「跑完了」，还会把基线改回 false 吞掉真正的完成边沿（二审 P2）。
+                val epochAtRequest = ledger.currentEpoch()
+                val loaded = sessions.load().items
+                // 播种：把全量列表里各条会话的运行态补进账本（只补没见过的），
+                // 再把本次运行期亮着的两枚提醒重新盖上去。
+                val skipped = ledger.seed(loaded, sinceEpoch = epochAtRequest)
+                // 被纪元守卫跳过的条目，其 `running` 必须以账本为准回填：只保住账本
+                // 基线而不改列表，陈旧快照仍会把「刚开始跑」的行打回静止，而那条
+                // `status=true` 已被消费，之后没有事件会再纠正它（二审 P2）。
+                val corrected = SessionListUpdates.patchRunningFromLedger(
+                    items = loaded,
+                    updates = skipped.mapNotNull { id -> ledger.runningOf(id)?.let { id to it } }.toMap(),
+                )
+                val result = SessionListResult(
+                    items = SessionListUpdates.carryUnreadFlags(
+                        items = corrected,
+                        completionIds = ledger.unreadIds(),
+                        failureIds = ledger.failureIds(),
+                        failureReasons = ledger.failureReasons(),
+                    ),
+                )
                 _state.value = _state.value
                     .copy(
                         sessionsLoading = false,

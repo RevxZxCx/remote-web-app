@@ -36,6 +36,11 @@ hs_err_pid*.log
 keystore.properties
 secrets.properties
 
+# ---------- 本地工具与凭据（含真实 frp token，绝不入库） ----------
+tools/
+*.exe
+*.toml
+
 # ---------- 临时 ----------
 *.log
 *.tmp

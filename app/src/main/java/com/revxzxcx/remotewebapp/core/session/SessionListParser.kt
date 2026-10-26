@@ -49,6 +49,14 @@ class SessionListParser {
                 ?.takeIf { it > 0L },
             lastModel = values?.get("modelSelection").asObject()
                 ?.get("lastUsed").asObject()?.string("model"),
+            // R049：两个「有东西在等人」的信号。都是**投影里的数组**，非空即有。
+            // `userQuestions.active` 收的是「已经开始等待回答」的提问组；
+            // `inbox` 的两条队列是排队但还没发出去的用户消息。
+            awaitingAttention = values?.get("userQuestions").asObject()
+                ?.hasNonEmptyArray("active") == true ||
+                values?.get("inbox").asObject()?.let { inbox ->
+                    inbox.hasNonEmptyArray("next-turn") || inbox.hasNonEmptyArray("next-step")
+                } == true,
         )
     }
 
@@ -61,6 +69,10 @@ class SessionListParser {
 
     private fun JsonObject.string(key: String): String? =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+    /** 这个键是不是一个非空数组；键缺失或不是数组都算 false。 */
+    private fun JsonObject.hasNonEmptyArray(key: String): Boolean =
+        (this[key] as? JsonArray)?.isNotEmpty() == true
 
     private fun JsonObject.boolean(key: String): Boolean? =
         (this[key] as? JsonPrimitive)?.content?.toBooleanStrictOrNull()

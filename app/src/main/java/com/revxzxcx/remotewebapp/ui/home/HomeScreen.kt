@@ -92,6 +92,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
+import com.revxzxcx.remotewebapp.core.session.statusOf
 import com.revxzxcx.remotewebapp.core.workspace.Workspace
 import com.revxzxcx.remotewebapp.ui.common.AppIconButton
 import com.revxzxcx.remotewebapp.ui.common.SingleLineMarqueeText
@@ -99,6 +100,7 @@ import com.revxzxcx.remotewebapp.ui.common.AppMark
 import com.revxzxcx.remotewebapp.ui.common.CacheNotice
 import com.revxzxcx.remotewebapp.ui.common.ConnectionIndicator
 import com.revxzxcx.remotewebapp.ui.common.GeneratingGlyph
+import com.revxzxcx.remotewebapp.ui.common.SessionStatusDot
 import com.revxzxcx.remotewebapp.ui.common.GlyphSize
 import com.revxzxcx.remotewebapp.ui.common.OverflowItem
 import com.revxzxcx.remotewebapp.ui.common.OverflowMenuIconButton
@@ -693,6 +695,8 @@ private fun SessionRowItem(
     onUnpin: (String) -> Unit = {},
 ) {
     val summary = row.summary
+    // R049：列表行的状态点。判据在 `statusOf` 一处，UI 只负责画。
+    val status = statusOf(summary)
     // `rememberSaveable` 而不是 `remember`：旋屏会让 `remember` 复位、菜单弹到一半消失
     // （R012 P3-2）。与全工程其它 menuOpen（`HomeScreen.kt:385`）保持一致。
     var menuOpen by rememberSaveable { mutableStateOf(false) }
@@ -766,9 +770,11 @@ private fun SessionRowItem(
                 )
             }
         }
-        if (summary.running) {
-            GeneratingGlyph(size = GlyphSize.SM)
-        } else if (row.isArchived) {
+        // R049（用户 m32994）：状态从「跑/不跑」两态扩到四态——
+        // 进行中仍是三柱动画，完成是绿点，上一轮失败是红点，有提问/排队是琥珀点。
+        // 判据全在 `statusOf` 一处（`core/session/SessionActivity.kt`），这里只负责画。
+        SessionStatusDot(status = status, failureReason = summary.failureReason)
+        if (row.isArchived) {
             Text(
                 text = "归档",
                 style = MaterialTheme.typography.labelSmall,
@@ -1541,6 +1547,8 @@ private fun DrawerSessionRow(
     val pressTint = rememberPressTint(interactionSource = interactionSource)
     val archived = summary.sessionId in archivedIds
     val pinned = summary.sessionId in pinnedIds
+    // R049：状态点。判据在 `statusOf` 一处，与主区 `SessionRowItem` 共用。
+    val status = statusOf(summary)
     val barColor = when {
         pinned -> MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
         archived -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.55f)
@@ -1607,16 +1615,10 @@ private fun DrawerSessionRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (summary.running) {
-            // R017：静态绿点换成均衡器。这是最后一处「运行中」指示——原先三处
-            // （折叠分组 / 会话行 / 连接横幅）是呼吸动画，会话行这里反而是个静止点，
-            // 同一语义三种视觉，用户根本记不住哪个是哪个。
-            //
-            // 顺带修掉硬编码 `Color(0xFF4ADE80)`：R017 的 `statusRunning` token 让
-            // 它在浅色主题下也能保持 ≥3:1 对比度（原绿在白底上会发灰）。
-            Box(Modifier.padding(start = 6.dp)) {
-                GeneratingGlyph(size = GlyphSize.SM, tint = LocalStatusRunning.current)
-            }
+        // R049：四态状态标记。进行中仍是 R017 定的三柱动画（同一语义全 App 一种视觉），
+        // 完成/失败/待处理各是一枚小圆点，颜色见 `SessionStatusDot`。
+        Box(Modifier.padding(start = 6.dp)) {
+            SessionStatusDot(status = status, failureReason = summary.failureReason)
         }
         // 常驻的 ⋮：抽屉里此前只能长按唤出菜单，用户根本发现不了。
         //
