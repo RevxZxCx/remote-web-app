@@ -91,9 +91,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -177,22 +175,44 @@ fun HomeScreen(
     // 两处都是「浮起一层看数据」，不该暗到看不清底下的列表在哪。
     val ScrimAlpha = 0.42f
 
-    // 左缘手势带的像素宽度：手势层与单测共用 [EdgeWidth] 这一个真值来源。
-    val density = LocalDensity.current
-    val edgeWidthPx = with(density) { EdgeWidth.toPx() }
+    // R051：两条可滑动标识。分区规则本身看不见，所以首次进入时各在自己那一侧底角
+    // 放一条，「划过一次」就永久消失（落盘，冷启动不再教育第二遍）。
+    //
+    // 为什么用 `mutableStateOf` 包一层 prefs 读取：标记写盘后要立刻让这一侧消失，
+    // 只读 prefs 不会触发重组。
+    val context = LocalContext.current
+    val hintPrefs = remember { SwipeHintPreferences(context) }
+    var hintLeftVisible by remember { mutableStateOf(!hintPrefs.seen(SwipeSide.LEFT)) }
+    var hintRightVisible by remember { mutableStateOf(!hintPrefs.seen(SwipeSide.RIGHT)) }
 
     // R050：抽屉的开合补间。拖动时 `insightsReveal` 由手势**直接**改写，只有松手与
     // 按钮点击才走这里；两者不能抢——手势一开拖就 cancel 掉在飞的补间（见下面的
     // `onReveal`），否则手指在拖、动画在跑，面板会来回抖。
     var insightsJob by remember { mutableStateOf<Job?>(null) }
-    fun settleInsights(open: Boolean) {
+    /**
+     * @param viaSwipe 这次开合是不是手势触发的。
+     *
+     * 只有手势才该把「右半屏」那条提示标记为已看。顶栏 ◔ 按钮走的是同一个函数，若不加
+     * 这个区分，一个只用按钮、始终没学过右半屏左滑的用户，第一次点按钮就把提示永久
+     * 抹掉了（审查 P3 抓到）——而提示存在的意义正是教这个手势。
+     */
+    fun settleInsights(open: Boolean, viaSwipe: Boolean = false) {
         insightsJob?.cancel()
         // 圆点是「有新数据」的提醒，不是常驻状态（R049 用户 m33325 的口径）。
         // 「打开抽屉即清除」这条**必须挂在 settleInsights 里**，不能只写在按钮回调上：
         // 抽屉有两条打开路径（顶栏按钮、右滑手势），只标在按钮那条会让手势打开后
         // 圆点还亮着——用户已经看到了全部数据却被继续提醒，是这个提醒唯一会变成
         // 噪声的方式。放在这里两条路径自动共享同一处真值。
-        if (open) viewModel.markInsightsSeen()
+        if (open) {
+            viewModel.markInsightsSeen()
+            // 右半屏这条提示「划过一次就消失」：判据是「手势把抽屉真的滑开了」，
+            // 不是「手指碰了一下右半屏」（碰一下又放弃的用户还没学会这个手势），
+            // 也不是「抽屉被打开了」（点按钮打开的人根本没做手势，见 viaSwipe）。
+            if (viaSwipe && hintRightVisible) {
+                hintPrefs.markSeen(SwipeSide.RIGHT)
+                hintRightVisible = false
+            }
+        }
         insightsJob = scope.launch {
             animate(
                 initialValue = insightsReveal,
@@ -200,6 +220,28 @@ fun HomeScreen(
                 animationSpec = tween(durationMillis = Motion.MEDIUM, easing = Motion.Emphasized),
             ) { value, _ -> insightsReveal = value }
         }
+    }
+
+    // 左半边那条提示的「划过一次就消失」。判据同样是「抽屉真的开了」，不是「手指碰了
+    // 左半屏一下」——抽屉的右滑由它自己的 `anchoredDraggable` 处理，我们收不到回调，
+    // 只能看开合状态。碰一下又放弃的用户还没学会这个手势，提示留着才是有用的。
+    //
+    // 但「抽屉开了」不等于「用户划过」。☰ 按钮打开的必须排除，否则只用按钮的人
+    // 第一次点就把提示永久抹掉了（与右半屏同一条审查 P3）。抽屉的右滑由它自己的
+    // `anchoredDraggable` 处理、我们收不到回调，只能退一步看「这次是不是按钮开的」。
+    //
+    // **这是瞬时的「本次来源」，不是「这个人点没点过按钮」**：第一版写成了后者
+    // （`menuButtonUsed` 置位后永不复位），结果是先点过一次 ☰ 的用户，之后真的用
+    // 右滑拉出抽屉时提示也不会消失——从一个极端翻到另一个极端（第二轮审查 P3）。
+    var drawerOpenedByButton by remember { mutableStateOf(false) }
+    LaunchedEffect(drawerState.isOpen) {
+        if (drawerState.isOpen && hintLeftVisible && !drawerOpenedByButton) {
+            hintPrefs.markSeen(SwipeSide.LEFT)
+            hintLeftVisible = false
+        }
+        // 无论这次是不是按钮开的，来源标记都在本次开合里消费掉，
+        // 下一次开抽屉重新判定。
+        drawerOpenedByButton = false
     }
 
     // 系统返回键要**先收抽屉再退首页**（与 R028 ② 给会话抽屉定的规矩一致）：
@@ -262,7 +304,11 @@ fun HomeScreen(
                         TopAppBar(
                             navigationIcon = {
                                 AppIconButton(
-                                    onClick = { scope.launch { drawerState.open() } },
+                                    onClick = {
+                                        // 这条提示教的是「右滑」，点按钮不算学会（审查 P3）。
+                                        drawerOpenedByButton = true
+                                        scope.launch { drawerState.open() }
+                                    },
                                     contentDescription = "会话列表",
                                 ) {
                                     Icon(Icons.Default.Menu, contentDescription = null)
@@ -401,21 +447,27 @@ fun HomeScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(padding)
-                        // 右滑开洞察。**必须挂在这里**（Scaffold 内容根），不能挂到外面那个
-                        // 包住 `ModalNavigationDrawer` 的 Box 上——`PointerEventPass.Main`
-                        // 由叶子向根派发，挂在外面时抽屉的 `anchoredDraggable` 先拿到事件，
-                        // 每一次右滑都被它吃掉，洞察永远打不开（真机实测复现过）。
+                        // 右半屏左滑开洞察（R051 用户 m36530 定的分区）。
+                        // **必须挂在这里**（Scaffold 内容根），不能挂到外面那个包住
+                        // `ModalNavigationDrawer` 的 Box 上——`PointerEventPass.Main` 由叶子
+                        // 向根派发，挂在外面时抽屉的 `anchoredDraggable` 先拿到事件，右半屏
+                        // 的手势会被它吃掉（T076 真机实测复现过）。
+                        //
+                        // 左半屏不归这里管（判据在 [swipeSide]），那半边的右滑由抽屉自己
+                        // 的 `anchoredDraggable` 处理，做得比我们好。
                         .insightsSwipe(
-                            edgeWidthPx = edgeWidthPx,
                             reveal = { insightsReveal },
                             onReveal = { next ->
                                 // 手指接管，把在飞的补间掐掉（否则动画与手指互相覆盖，面板会抖）。
                                 insightsJob?.cancel()
                                 insightsReveal = next
                             },
-                            onSettle = { open -> settleInsights(open) },
+                            onSettle = { open -> settleInsights(open, viaSwipe = true) },
                         ),
                 ) {
+                    // 两条可滑动标识贴在内容区底角（R051 原型第 4 节）。
+                    // 放在 Column **内部**、且排在所有内容之后，让它们盖在列表上方而不是
+                    // 被列表挤走；用 `fillMaxSize` 的 Box 包住整列，两条各自贴自己的角。
                     state.error?.let { error ->
                         // 配色跟随主题（早先是硬编码深红底 + 亮红字，浅色主题下与整个界面不协调）。
                         Surface(
@@ -541,6 +593,12 @@ fun HomeScreen(
             }
         }
 
+        // 两条可滑动标识（R051）。放在 `ModalNavigationDrawer` **之后**、洞察浮层
+        // **之前**：这样它们盖在列表之上，又会被打开后的洞察抽屉盖住，不需要额外的
+        // 可见性判断。这一层不吞事件——没有 clickable / pointerInput 的 Box 不参与
+        // 手势竞争，右半屏左滑照样能落到下面那层手势上（提示显示时也必须能滑）。
+        SwipeHints(showLeft = hintLeftVisible, showRight = hintRightVisible)
+
         // 遮罩 + 抽屉本体。与 Scaffold 平级（同在 Box 内），否则会被 padding 让出一截。
         if (insightsVisible) {
             Box(modifier = Modifier.fillMaxSize()) {
@@ -550,6 +608,25 @@ fun HomeScreen(
                         // 遮罩透明度跟着揭开比例走：拖到一半时遮罩也是半暗，
                         // 用户能同时看见「正在揭开什么」和「下面是什么」。
                         .background(Color.Black.copy(alpha = ScrimAlpha * insightsReveal))
+                        // 抽屉开着时**反向滑（右半屏右滑）收起**——A 方案。
+                        //
+                        // 这个修饰符必须**再挂一次**在遮罩上：抽屉打开后遮罩盖在内容区
+                        // 之上并带 `clickable`，命中的是遮罩这一层，下面 Column 上那份
+                        // 手势收不到任何事件。同一个实现两处复用即可——`revealAfterDrag`
+                        // 对负位移照样成立（1 → 0.7 → 0），不需要第二套「收起」逻辑。
+                        .insightsSwipe(
+                            reveal = { insightsReveal },
+                            onReveal = { next ->
+                                insightsJob?.cancel()
+                                insightsReveal = next
+                            },
+                            onSettle = { open -> settleInsights(open, viaSwipe = true) },
+                            // **必须显式传 COLLAPSE**。省略时默认是 REVEAL，而 REVEAL
+                            // 在左半屏起手会整段早退（让给会话抽屉）——遮罩只在抽屉左侧
+                            // 露出约 40dp 一条窄缝，起点必然落在左半屏，于是这一整份手势
+                            // 是死代码：手指从缝里起手也收不起抽屉（审查 P2 抓到）。
+                            mode = SwipeMode.COLLAPSE,
+                        )
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,
@@ -574,11 +651,25 @@ fun HomeScreen(
                     },
                     modifier = Modifier
                         .align(Alignment.TopEnd)
+                        // 抽屉已开时的「反向滑收起」（A 方案）。必须挂在抽屉**本体**上：
+                        // 抽屉宽 320dp、在 360dp 屏上占 89%，遮罩只剩约 40dp 一条缝，
+                        // 手指几乎总落在抽屉上；遮罩那份手势在抽屉下面收不到事件
+                        // （真机实测：从抽屉上起手右滑，面板纹丝不动）。
+                        .insightsSwipe(
+                            reveal = { insightsReveal },
+                            onReveal = { next ->
+                                insightsJob?.cancel()
+                                insightsReveal = next
+                            },
+                            onSettle = { open -> settleInsights(open, viaSwipe = true) },
+                            mode = SwipeMode.COLLAPSE,
+                        )
                         .graphicsLayer { translationX = (1f - insightsReveal) * size.width },
                 )
             }
         }
     }
+
     // 退出配对的确认框已上移到 AppRoot 层统一渲染（R018 P1-1）：本屏的「退出」、
     // 错误横幅与 ConnectionBanner 的「重新配对」走的是同一个 onUnpair，
     // 而 AppRoot 层的框是三屏共用的唯一一处。这里只留 onUnpair 的直接调用。

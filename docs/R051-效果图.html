@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>R051 效果图 · 首页手势分区（左半屏右滑 / 右半屏左滑）</title>
+<style>
+:root{
+  --primary:#5AA2FF; --onPrimary:#04121F;
+  --background:#0B1420; --onBackground:#E6EFFA;
+  --surface:#111C2B; --onSurface:#E6EFFA;
+  --surfaceVariant:#1A2942; --onSurfaceVariant:#9BB0C8;
+  --outline:#31485F; --outlineVariant:#22334A;
+  --tertiary:#F2C14E; --running:#4ADE80; --error:#FF8A80;
+  --r-xs:6px; --r-sm:10px; --r-md:14px; --r-lg:20px; --r-xl:28px; --r-pill:999px;
+  --t-fast:140ms; --t-med:240ms; --t-slow:360ms;
+  --ease:cubic-bezier(.2,0,0,1);
+  --c-system:#615FFF; --c-tools:#FE9A00; --c-user:#00C950; --c-inject:#AD46FF;
+  --c-skill:#FF6900; --c-assistant:#2B7FFF; --c-tool:#00BBA7;
+  --c-ttft:#2B7FFF; --c-reason:#8E51FF; --c-text:#F6339A;
+  --c-toolarg:#FE9A00; --c-toolsx:#00BBA7; --c-other:#90A1B9;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#060B12;color:var(--onBackground);
+  font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:13px;line-height:1.6;padding:28px 24px 80px}
+.wrap{max-width:1640px;margin:0 auto}
+h1{font-size:19px;font-weight:600;letter-spacing:.2px}
+.sub{color:var(--onSurfaceVariant);font-size:12px;margin-top:6px;line-height:1.8}
+.sub code{font-family:ui-monospace,monospace;font-size:11px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+section{margin-top:40px}
+h2{font-size:14px;font-weight:600;color:var(--primary);display:flex;align-items:center;gap:8px}
+h2 .n{width:20px;height:20px;border-radius:50%;background:rgba(90,162,255,.14);
+  border:1px solid rgba(90,162,255,.4);font-size:11px;display:flex;
+  align-items:center;justify-content:center;color:var(--primary);flex:0 0 20px}
+.note{color:var(--onSurfaceVariant);font-size:11.5px;line-height:1.85;margin-top:8px}
+.note b{color:var(--onSurface);font-weight:600}
+.note code{font-family:ui-monospace,monospace;font-size:10.5px;background:var(--surfaceVariant);
+  padding:1px 4px;border-radius:3px;color:var(--primary)}
+.row{display:flex;gap:26px;align-items:flex-start;flex-wrap:wrap;margin-top:16px}
+
+/* ── 手机框（与 R050 同源） ── */
+.phone{width:360px;flex:0 0 360px;background:var(--background);
+  border-radius:22px;border:1px solid var(--outlineVariant);
+  overflow:hidden;box-shadow:0 22px 60px rgba(0,0,0,.6);
+  display:flex;flex-direction:column;min-height:640px;position:relative}
+.status{height:26px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 13px;font-size:9.5px;color:var(--onSurfaceVariant);letter-spacing:.3px;flex:0 0 auto}
+.topbar{height:46px;display:flex;align-items:center;gap:8px;padding:0 6px 0 4px;
+  border-bottom:1px solid var(--outlineVariant);flex:0 0 auto}
+.tb-btn{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;color:var(--onSurface);position:relative}
+.tb-mid{flex:1;min-width:0}
+.tb-t1{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb-t2{font-size:9.5px;color:var(--onSurfaceVariant);margin-top:1px}
+.badge{position:absolute;right:5px;bottom:5px;width:5px;height:5px;
+  border-radius:50%;background:var(--primary);box-shadow:0 0 0 2px var(--background)}
+.hlist{flex:1;padding:8px 10px;display:flex;flex-direction:column;gap:6px;overflow:hidden}
+.ws{border:1px solid var(--outlineVariant);border-radius:var(--r-md);background:var(--surface);
+  padding:9px 11px;display:flex;align-items:center;gap:9px}
+.ws .ic{width:22px;height:22px;border-radius:var(--r-xs);background:rgba(90,162,255,.16);
+  display:flex;align-items:center;justify-content:center;color:var(--primary);font-size:10px;flex:0 0 22px}
+.ws .t{flex:1;min-width:0}
+.ws .t1{font-size:12px;font-weight:600}
+.ws .t2{font-size:9.5px;color:var(--onSurfaceVariant);margin-top:1px}
+.pills{display:flex;gap:4px;flex:0 0 auto}
+.pill{font-size:8.5px;padding:1.5px 6px;border-radius:var(--r-pill);
+  background:var(--surfaceVariant);color:var(--onSurfaceVariant);
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+.pill.arc{color:var(--tertiary)}
+
+/* ── 分区标注 ── */
+.zone{position:absolute;top:0;bottom:0;width:50%;pointer-events:none}
+.zone-l{left:0;background:linear-gradient(90deg,rgba(90,162,255,.22),rgba(90,162,255,.03))}
+.zone-r{right:0;background:linear-gradient(270deg,rgba(74,222,128,.20),rgba(74,222,128,.03))}
+.midline{position:absolute;top:0;bottom:0;left:50%;width:0;
+  border-left:1.5px dashed rgba(230,239,250,.42)}
+.ztag{position:absolute;top:50%;transform:translateY(-50%);
+  font-size:9px;font-weight:600;letter-spacing:.5px;padding:4px 7px;border-radius:var(--r-pill)}
+.ztag-l{left:8px;color:var(--primary);background:rgba(4,18,31,.82);
+  border:1px solid rgba(90,162,255,.55)}
+.ztag-r{right:8px;color:var(--running);background:rgba(4,18,31,.82);
+  border:1px solid rgba(74,222,128,.55)}
+.zarrow{position:absolute;top:50%;font-size:22px;line-height:1;opacity:.92}
+.zarrow-l{left:52px;color:var(--primary);transform:translateY(-50%)}
+.zarrow-r{right:52px;color:var(--running);transform:translateY(-50%)}
+
+/* ── 底角滑动标识 ── */
+.hint{position:absolute;bottom:14px;display:flex;align-items:center;gap:5px;
+  font-size:9.5px;border-radius:var(--r-pill);padding:4px 9px;
+  animation:hintPulse 2.4s var(--ease) infinite}
+.hint .ar{font-size:11px;line-height:1}
+.hint-l{left:10px;color:var(--primary);background:rgba(90,162,255,.12);
+  border:1px solid rgba(90,162,255,.4)}
+.hint-r{right:10px;color:var(--running);background:rgba(74,222,128,.12);
+  border:1px solid rgba(74,222,128,.4)}
+@keyframes hintPulse{0%,100%{opacity:.62}50%{opacity:1}}
+
+/* ── 手势矩阵 ── */
+.matrix{width:100%;border-collapse:separate;border-spacing:0;margin-top:14px;
+  font-size:11.5px}
+.matrix th{text-align:left;font-weight:600;color:var(--onSurfaceVariant);
+  font-size:10.5px;letter-spacing:.3px;padding:8px 10px;
+  border-bottom:1px solid var(--outline)}
+.matrix td{padding:9px 10px;border-bottom:1px solid var(--outlineVariant);vertical-align:top}
+.matrix tr:last-child td{border-bottom:0}
+.matrix .k{font-family:ui-monospace,monospace;font-size:10.5px;color:var(--primary);white-space:nowrap}
+.matrix .ok{color:var(--running);font-weight:600}
+.matrix .wait{color:var(--tertiary);font-weight:600}
+.matrix .die{color:var(--onSurfaceVariant)}
+.matrix .c-gray{color:var(--onSurfaceVariant)}
+.chip{display:inline-block;font-size:9.5px;padding:1.5px 7px;border-radius:var(--r-pill);
+  background:var(--surfaceVariant);color:var(--onSurfaceVariant);white-space:nowrap}
+.chip.ok{background:rgba(74,222,128,.16);color:var(--running)}
+.chip.wait{background:rgba(242,193,78,.16);color:var(--tertiary)}
+
+/* ── 三帧跟手演示 ── */
+.frames{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;margin-top:16px}
+.frame{width:220px;flex:0 0 220px}
+.frame .cap{font-size:10.5px;color:var(--onSurfaceVariant);margin-top:7px;line-height:1.6}
+.frame .cap b{color:var(--onSurface)}
+.mini{width:220px;height:390px;background:var(--background);border-radius:18px;
+  border:1px solid var(--outlineVariant);overflow:hidden;position:relative}
+.mini .mbar{height:26px;border-bottom:1px solid var(--outlineVariant);
+  display:flex;align-items:center;padding:0 8px;font-size:8px;color:var(--onSurfaceVariant)}
+.mini .mbody{padding:7px 7px;display:flex;flex-direction:column;gap:5px}
+.mini .mw{border:1px solid var(--outlineVariant);border-radius:8px;background:var(--surface);
+  height:34px;display:flex;align-items:center;padding:0 8px;font-size:9px;gap:6px}
+.mini .mw i{width:12px;height:12px;border-radius:4px;background:rgba(90,162,255,.2);
+  display:inline-block;flex:0 0 12px}
+
+/* 抽屉层 */
+.panel{position:absolute;top:0;bottom:0;width:200px;background:var(--surface);
+  box-shadow:0 0 40px rgba(0,0,0,.65);display:flex;flex-direction:column;
+  border:1px solid var(--outline);overflow:hidden}
+.panel-l{left:0;border-radius:0 14px 14px 0;border-left:0}
+.panel-r{right:0;border-radius:14px 0 0 14px;border-right:0}
+.panel .ph{padding:9px 10px;border-bottom:1px solid var(--outlineVariant);font-size:10px;font-weight:600}
+.panel .ph span{display:block;font-size:8.5px;font-weight:400;color:var(--onSurfaceVariant);margin-top:2px}
+.panel .pb{flex:1;padding:7px 8px;display:flex;flex-direction:column;gap:5px;overflow:hidden}
+.prow{border:1px solid var(--outlineVariant);border-radius:8px;background:var(--background);
+  padding:5px 7px;font-size:8.5px}
+.prow b{display:block;font-size:9px;font-weight:600}
+.prow s{display:block;text-decoration:none;font-size:8px;color:var(--onSurfaceVariant);margin-top:1px}
+.scrim{position:absolute;top:0;bottom:0;width:20px;background:rgba(0,0,0,.42)}
+.scrim-l{left:200px}
+.scrim-r{right:200px}
+.finger{position:absolute;width:24px;height:24px;border-radius:50%;
+  background:rgba(230,239,250,.9);box-shadow:0 2px 10px rgba(0,0,0,.6);
+  display:flex;align-items:center;justify-content:center;font-size:11px;color:#0B1420;z-index:5}
+.finger .trail{position:absolute;height:2px;border-radius:2px;
+  background:linear-gradient(90deg,rgba(90,162,255,0),rgba(90,162,255,.95));top:11px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>R051 效果图 · 首页手势分区</h1>
+<div class="sub">
+把 T076 的「右滑开洞察」换成<b>两半各管一个方向</b>：<b>左半屏右滑 = 最近会话抽屉</b>，<b>右半屏左滑 = 总上下文洞察抽屉</b>。<br>
+数据与配色沿用 R050 定稿；手势判定全部改成「起点 + 方向」二维，不再只看起点是否贴着左缘 <code>24dp</code>。
+</div>
+
+<!-- ═══════════════ 1 ═══════════════ -->
+<section>
+<h2><span class="n">1</span>为什么现在的手感是错的</h2>
+<div class="note">
+T076 交付的手势规则是「<b>起点在左缘 24dp 内 → 会话抽屉；其余区域右滑 → 洞察</b>」。这条规则有两个问题：<br>
+① <b>方向反了</b>：洞察抽屉在<b>右边</b>，却要求<b>向右滑</b>才能拉出来 —— 手指往右走、面板从右边出来，两者是逆着的。真机上会明显觉得「要往反方向推」。<br>
+② <b>两个抽屉抢同一个方向</b>：会话抽屉在左、也要向右滑，于是只能靠 24dp 的窄带子区分。那条带子只有 9mm 宽，十次里有几次划不准，用户根本没法形成肌肉记忆。<br><br>
+改成按<b>半屏</b>分区、并且<b>方向和抽屉所在侧一致</b>之后：左边的东西从左拉、右边的东西从右拉，两个手势的<b>方向互不相同</b>，不再需要一条 24dp 的窄带来仲裁。
+</div>
+<div class="row">
+  <div class="phone" data-fixed="1" style="height:470px">
+    <div class="status"><span>21:04</span><span>5G 87%</span></div>
+    <div class="topbar">
+      <div class="tb-btn">☰</div>
+      <div class="tb-mid"><div class="tb-t1">远程 Web</div><div class="tb-t2">工作区 9 · 会话 32</div></div>
+      <div class="tb-btn" style="color:var(--primary);background:rgba(90,162,255,.16)">◔<span class="badge"></span></div>
+      <div class="tb-btn" style="color:var(--running);font-size:8px">●</div>
+      <div class="tb-btn">⋯</div>
+    </div>
+    <div class="hlist">
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">bot</div><div class="t2">F:\bot</div></div>
+        <div class="pills"><span class="pill">1 进行中</span><span class="pill">7 会话</span><span class="pill arc">3 归档</span></div></div>
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">test</div><div class="t2">F:\test</div></div>
+        <div class="pills"><span class="pill">1 会话</span><span class="pill arc">1 归档</span></div></div>
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">dsh-plugin</div><div class="t2">F:\dsh-plugin</div></div>
+        <div class="pills"><span class="pill">2 会话</span></div></div>
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">Irok</div><div class="t2">F:\Irok</div></div>
+        <div class="pills"><span class="pill">11 会话</span></div></div>
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">model-filter</div><div class="t2">F:\dsh-plugin\model-filter</div></div>
+        <div class="pills"><span class="pill">3 会话</span></div></div>
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">WDMTP</div><div class="t2">F:\vm</div></div>
+        <div class="pills"><span class="pill">4 会话</span></div></div>
+    </div>
+    <div class="zone zone-l"></div>
+    <div class="zone zone-r"></div>
+    <div class="midline"></div>
+    <div class="ztag ztag-l">左半屏</div>
+    <div class="ztag ztag-r">右半屏</div>
+    <div class="zarrow zarrow-l">→</div>
+    <div class="zarrow zarrow-r">←</div>
+  </div>
+
+  <div class="note" style="max-width:560px">
+    <b>分区怎么画（图解）：</b><br>
+    屏幕沿<b>垂直中线</b>对半分，中线两侧各归一个抽屉。<br><br>
+    <b style="color:var(--primary)">左半屏 · 向右滑 → 最近会话抽屉</b><br>
+    抽屉本来就在左边，向右滑是把它从左侧<b>拉出来</b>，方向和物体的位置一致。<br><br>
+    <b style="color:var(--running)">右半屏 · 向左滑 → 总上下文洞察抽屉</b><br>
+    抽屉本来就在右边，向左滑是把它从右侧<b>拉出来</b>，同样一致。<br><br>
+    <b>为什么这样就好用了：</b>两个手势的<b>方向相反</b>，手指往哪边走，就从哪边出东西。不再有「两个抽屉抢同一个右滑、只能靠 24dp 窄带仲裁」的问题 —— 那条窄带是 T076 里唯一需要用户「瞄准」的东西，也是最难形成肌肉记忆的地方，现在整条规则里没有它了。<br><br>
+    <b>24dp 还需要吗：</b>不再需要。分区边界是中线的<b>一半屏宽</b>（360dp 屏上是 180dp），容错面积是原来的 7.5 倍。
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════ 2 ═══════════════ -->
+<section>
+<h2><span class="n">2</span>四类手势：两类已定，两类要你拍板</h2>
+<div class="note">
+<b>已定的两类</b>直接对应你说的那句话，没有歧义。剩下两类是<b>方向与所在半屏相反</b>的手势 —— 比如「在右半屏继续向右滑」，它既不是「拉出左边的会话」，也不是「拉出右边的洞察」。这两类现在必须给一个明确结果，否则会出现「划了没反应，但列表被拖歪一下」的坏手感。
+</div>
+
+<table class="matrix">
+  <thead>
+    <tr>
+      <th style="width:84px">起点</th>
+      <th style="width:70px">方向</th>
+      <th style="width:150px">结果</th>
+      <th style="width:96px">状态</th>
+      <th>说明</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><b>左半屏</b></td>
+      <td class="k">→ 右滑</td>
+      <td class="ok">拉出最近会话抽屉</td>
+      <td><span class="chip ok">你已定</span></td>
+      <td class="c-gray">抽屉在左，向右拉出。与顶栏 ☰ 按钮等价。</td>
+    </tr>
+    <tr>
+      <td><b>右半屏</b></td>
+      <td class="k">← 左滑</td>
+      <td class="ok">拉出总上下文洞察抽屉</td>
+      <td><span class="chip ok">你已定</span></td>
+      <td class="c-gray">抽屉在右，向左拉出。与顶栏 ◔ 按钮等价。</td>
+    </tr>
+    <tr>
+      <td><b>右半屏</b></td>
+      <td class="k">→ 右滑</td>
+      <td class="wait">候选 A / B / C</td>
+      <td><span class="chip wait">待拍板</span></td>
+      <td class="c-gray">往右滑，但右边没有可拉出的东西；左边的东西在这一半屏之外。</td>
+    </tr>
+    <tr>
+      <td><b>左半屏</b></td>
+      <td class="k">← 左滑</td>
+      <td class="wait">候选 A / B / C</td>
+      <td><span class="chip wait">待拍板</span></td>
+      <td class="c-gray">往左滑，与上一行完全对称。</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 style="margin-top:26px;font-size:12.5px"><span class="n">A</span>候选 A（推荐）：抽屉开着时反向滑 = 收起，没开时不响应</h2>
+<div class="note">
+这两类手势<b>恰好就是「把已经打开的抽屉推回去」的方向</b>。会话抽屉开着时，左半屏往左滑正是推它回去；洞察抽屉开着时，右半屏往右滑同理 —— 两个方向都被赋予了自然含义，没有一个手势是白划的。
+</div>
+<div class="frames">
+  <div class="frame">
+    <div class="mini">
+      <div class="mbar">远程 Web</div>
+      <div class="mbody"><div class="mw"><i></i>bot</div><div class="mw"><i></i>test</div><div class="mw"><i></i>dsh-plugin</div><div class="mw"><i></i>Irok</div></div>
+      <div class="panel panel-l">
+        <div class="ph">会话<span>32 个 · 9 个工作区</span></div>
+        <div class="pb">
+          <div class="prow"><b>app开发 main</b><s>bot · 10月17日</s></div>
+          <div class="prow"><b>skill自进</b><s>dsh-plugin · 昨天</s></div>
+          <div class="prow"><b>隧道公网访问</b><s>bot · 11:14</s></div>
+          <div class="prow"><b>维护会话</b><s>vm · 08:47</s></div>
+        </div>
+      </div>
+      <div class="scrim scrim-l"></div>
+      <div class="finger" style="left:130px;top:300px">←<span class="trail" style="left:-42px;width:40px;background:linear-gradient(270deg,rgba(90,162,255,0),rgba(90,162,255,.95))"></span></div>
+    </div>
+    <div class="cap"><b>会话抽屉开着</b> · 左半屏向左滑 → 收起抽屉</div>
+  </div>
+  <div class="frame">
+    <div class="mini">
+      <div class="mbar">远程 Web</div>
+      <div class="mbody"><div class="mw"><i></i>bot</div><div class="mw"><i></i>test</div><div class="mw"><i></i>dsh-plugin</div><div class="mw"><i></i>Irok</div></div>
+      <div class="panel panel-r">
+        <div class="ph">上下文洞察<span>32 个会话 · 381 轮</span></div>
+        <div class="pb">
+          <div class="prow"><b>Token 用量构成</b><s>4003M · 缓存读 3869M</s></div>
+          <div class="prow"><b>预估费用</b><s>$155.19 · 16 个未计价</s></div>
+          <div class="prow"><b>耗时分布</b><s>6 天 19 时 · 六段</s></div>
+        </div>
+      </div>
+      <div class="scrim scrim-r"></div>
+      <div class="finger" style="left:66px;top:300px">→<span class="trail" style="left:24px;width:40px;background:linear-gradient(90deg,rgba(74,222,128,0),rgba(74,222,128,.95))"></span></div>
+    </div>
+    <div class="cap"><b>洞察抽屉开着</b> · 右半屏向右滑 → 收起抽屉</div>
+  </div>
+  <div class="note" style="max-width:430px;margin-top:0">
+    <b>抽屉没开时会怎样：</b>不响应，列表也不动。因为「往右滑」在右半屏不指向任何东西，<b>不能</b>让它去开左边的会话抽屉 —— 那等于回到 T076 的老问题（同一方向两个含义），用户划到中线附近时会左右横跳。<br><br>
+    <b>为什么这是推荐的：</b>不需要用户记任何新东西。「往左推」推回左边的抽屉、「往右推」推回右边的抽屉，是这个手势本来就该有的意思。<br><br>
+    <b>无障碍：</b>收起抽屉另有返回键与遮罩点击两条路径，手势只是加速，不承担唯一入口。
+  </div>
+</div>
+
+<div class="note" style="margin-top:22px">
+  <b>候选 B（全屏方向分派）</b>：忽略半屏，<b>右滑一律开会话、左滑一律开洞察</b>。<br>
+  好处是规则只剩一条、最好记；坏处是「在右半屏右滑」也会把左边的会话抽屉拉出来，手指方向和面板出现方向又变成逆的 —— 这恰好是现在被抱怨的那个问题，只是换了个抽屉。另外它让「半屏」这个概念彻底没用，等于没做分区。<br><br>
+  <b>候选 C（死区）</b>：这两类手势完全不响应，抽屉也不动。<br>
+  最保守，绝不误触；但用户划完会觉得「没反应 = 卡了」，而且抽屉开着时想收起来只能去点遮罩或返回键，手感上少了一条最自然的路。
+</div>
+</section>
+
+<!-- ═══════════════ 3 ═══════════════ -->
+<section>
+<h2><span class="n">3</span>跟手过程：从哪一半起手，就从哪一边推出来</h2>
+<div class="note">
+手指往哪边走，面板就从哪一边跟出来。左侧面板向右滑时<b>左边先露出来</b>，右侧面板向左滑时<b>右边先露出来</b>；拖到一半松手会回弹，划过 35% 就吸附到全开。两个方向各自独立，不会同时被拖动。
+</div>
+<div class="frames">
+  <div class="frame">
+    <div class="mini">
+      <div class="mbar">远程 Web</div>
+      <div class="mbody"><div class="mw"><i></i>bot</div><div class="mw"><i></i>test</div><div class="mw"><i></i>dsh-plugin</div><div class="mw"><i></i>Irok</div></div>
+      <div class="panel panel-l" style="width:64px">
+        <div class="ph" style="padding:6px">会</div>
+      </div>
+      <div class="scrim scrim-l" style="left:64px;width:6px"></div>
+      <div class="finger" style="left:96px;top:300px">→<span class="trail" style="left:-34px;width:32px"></span></div>
+    </div>
+    <div class="cap"><b>刚开始拖</b> · 左半屏向右约 30%<br>面板露 64px，遮罩几乎看不见</div>
+  </div>
+  <div class="frame">
+    <div class="mini">
+      <div class="mbar">远程 Web</div>
+      <div class="mbody"><div class="mw"><i></i>bot</div><div class="mw"><i></i>test</div></div>
+      <div class="panel panel-l" style="width:132px">
+        <div class="ph" style="padding:6px 8px">会话<span style="font-size:8px">32 个</span></div>
+        <div class="pb" style="padding:5px 6px">
+          <div class="prow"><b>app开发 main</b></div>
+          <div class="prow"><b>skill自进</b></div>
+        </div>
+      </div>
+      <div class="scrim scrim-l" style="left:132px;width:14px"></div>
+      <div class="finger" style="left:158px;top:300px">→<span class="trail" style="left:-30px;width:28px"></span></div>
+    </div>
+    <div class="cap"><b>拖到 60%</b> · 越过 35% 阈值<br>松手会吸附到全开</div>
+  </div>
+  <div class="frame">
+    <div class="mini">
+      <div class="mbar">远程 Web</div>
+      <div class="mbody"><div class="mw"><i></i>bot</div></div>
+      <div class="panel panel-r" style="width:132px">
+        <div class="ph" style="padding:6px 8px">上下文洞察<span style="font-size:8px">32 会话</span></div>
+        <div class="pb" style="padding:5px 6px">
+          <div class="prow"><b>Token 用量</b></div>
+          <div class="prow"><b>预估费用</b></div>
+        </div>
+      </div>
+      <div class="scrim scrim-r" style="right:132px;width:14px"></div>
+      <div class="finger" style="left:62px;top:300px">←<span class="trail" style="right:-30px;width:28px;background:linear-gradient(270deg,rgba(74,222,128,0),rgba(74,222,128,.95))"></span></div>
+    </div>
+    <div class="cap"><b>右半屏向左 60%</b> · 洞察抽屉<br>从右边跟出来，与左侧完全镜像</div>
+  </div>
+  <div class="note" style="max-width:400px;margin-top:0">
+    <b>松手判定沿用 T076：</b><br>
+    位移 ≥ 35% 屏宽 → 开；<br>
+    位移不足但有明显甩动速度（≥ 2.2 屏宽/秒）→ 开；<br>
+    其余 → 回弹收起。<br><br>
+    <b>不改变的地方：</b>跟手比例仍按<b>屏宽</b>换算（不是面板宽度），所以「拖过半个屏幕」就看到一半，不会出现「手指没走完面板就满了」。<br><br>
+    <b>手势被系统抢走时</b>（比如从底部手势区起手）一律回弹，绝不停在半开。
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════ 4 ═══════════════ -->
+<section>
+<h2><span class="n">4</span>可滑动标识：两侧各一条，首次进入淡出</h2>
+<div class="note">
+分区规则本身是看不见的，所以首页要有<b>可滑动标识</b>。R050 定稿时只在右下角放了一条「右滑看总览」；现在有两个方向，标识也要成对，并且分别贴在<b>自己那一半</b>的底角 —— 用户看到左边那条就知道左边能滑，看到右边那条就知道右边能滑。
+</div>
+<div class="row">
+  <div class="phone" data-fixed="1" style="height:470px">
+    <div class="status"><span>21:04</span><span>5G 87%</span></div>
+    <div class="topbar">
+      <div class="tb-btn">☰</div>
+      <div class="tb-mid"><div class="tb-t1">远程 Web</div><div class="tb-t2">工作区 9 · 会话 32</div></div>
+      <div class="tb-btn" style="color:var(--primary);background:rgba(90,162,255,.16)">◔<span class="badge"></span></div>
+      <div class="tb-btn" style="color:var(--running);font-size:8px">●</div>
+      <div class="tb-btn">⋯</div>
+    </div>
+    <div class="hlist">
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">bot</div><div class="t2">F:ot</div></div>
+        <div class="pills"><span class="pill">1 进行中</span><span class="pill">7 会话</span><span class="pill arc">3 归档</span></div></div>
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">test</div><div class="t2">F:	est</div></div>
+        <div class="pills"><span class="pill">1 会话</span><span class="pill arc">1 归档</span></div></div>
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">dsh-plugin</div><div class="t2">F:\dsh-plugin</div></div>
+        <div class="pills"><span class="pill">2 会话</span></div></div>
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">Irok</div><div class="t2">F:\Irok</div></div>
+        <div class="pills"><span class="pill">11 会话</span></div></div>
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">model-filter</div><div class="t2">F:\dsh-plugin\model-filter</div></div>
+        <div class="pills"><span class="pill">3 会话</span></div></div>
+    </div>
+    <div class="hint hint-l"><span class="ar">→</span>右滑看会话</div>
+    <div class="hint hint-r"><span class="ar">←</span>左滑看洞察</div>
+  </div>
+  <div class="note" style="max-width:560px">
+    <b>位置</b>：两条标识各自贴在所在半屏的<b>底角</b>（左边那条距左缘 10dp、右边那条距右缘 10dp），都在列表内容之上。它们不侵入中线附近，所以不会互相挤在一起。<br><br>
+    <b>样式</b>：沿用 R050 的胶囊（10dp 圆角、主色/绿色描边 + 12% 底、9.5sp 字、箭头在文字外侧指向滑动方向）。左用主色 <code>#5AA2FF</code>、右用运行绿 <code>#4ADE80</code>，与两个抽屉各自的强调色一致。<br><br>
+    <b>什么时候显示</b>：<b>只在用户还没用过该手势时显示</b>，任一侧划过一次即永久消失（存本地，与 R049「看过即清」同一套语义）。两侧各自独立 —— 划过左边不影响右边那条。<br><br>
+    <b>为什么不做成常驻</b>：常驻的提示最后会变成视觉噪声（列表每屏都在闪），而这两个手势一旦学会就再不需要提示。R050 定稿的「右滑看总览」当时也是这个判断。<br><br>
+    <b>无障碍</b>：两条标识都是 <code>clearAndSetSemantics {}</code> 对读屏隐形，不制造额外的可聚焦节点；两个抽屉各自有顶栏按钮（☰ / ◔）作为不依赖手势的等价入口。
+  </div>
+</div>
+
+<h2 style="margin-top:26px;font-size:12.5px"><span class="n">5</span>改动清单（生产代码）</h2>
+<table class="matrix">
+  <thead>
+    <tr><th style="width:250px">文件</th><th style="width:110px">动作</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="k">ui/home/HomeEdgeSwipe.kt</td>
+      <td><span class="chip wait">改</span></td>
+      <td class="c-gray"><code>swipeOpensDrawer</code> 换成按半屏判定的 <code>swipeTarget(startX, widthPx)</code>，返回「会话 / 洞察 / 无」；新增方向参数，洞察改为向左为正。</td>
+    </tr>
+    <tr>
+      <td class="k">ui/home/HomeScreen.kt</td>
+      <td><span class="chip wait">改</span></td>
+      <td class="c-gray">手势修饰符拆成两个（会话侧向右、洞察侧向左），各自挂在自己的半屏；抽屉开合状态互斥。</td>
+    </tr>
+    <tr>
+      <td class="k">ui/home/HomeSwipeHint.kt</td>
+      <td><span class="chip ok">新</span></td>
+      <td class="c-gray">两条底角标识 + 用过即隐的本地标记。</td>
+    </tr>
+    <tr>
+      <td class="k">HomeEdgeSwipeTest / 渲染测试</td>
+      <td><span class="chip ok">新+改</span></td>
+      <td class="c-gray">分区判定、方向符号、抽屉开着时的收起方向、死区不响应；原有 14 条按新语义调整。</td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+</div>
+</body>
+</html>
