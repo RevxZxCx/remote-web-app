@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.ui.common.rememberAnimationsEnabled
@@ -311,19 +312,29 @@ internal fun DonutLegendRow(
                 .clip(CircleShape)
                 .background(color),
         )
+        // 名字让位给数字：两者都用 weight(1f) 时各占一半，`stepfun:step-5-preview`
+        // 这种长模型名会被截成 `stepfun:step-`（真机实测），右边那串
+        // 「$131.00 · 90.4%」也因为只有一半宽而丢掉占比、只剩一个「·」。
+        // 数字是不可再压缩的信息（截断后毫无意义），名字截断还能认出是谁，
+        // 所以名字让出剩余空间并省略号收尾，数字取自然宽度全量显示。
+        //
+        // 名字必须 `fill = true`（默认）：写成 `weight(1f, fill = false)` 时，
+        // 短名字只占自身宽度，行尾剩下的空间无人占用，数字就紧贴名字之后——
+        // 于是同一列里「缓存读」的数字偏左、「stepfun:step-5-preview」的数字偏右，
+        // 三行金额不再成列（审查 P3）。填满之后所有数字都停在右边同一条线上。
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
-            modifier = Modifier.weight(1f, fill = false),
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
         )
         Text(
             text = value,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
-            modifier = Modifier.weight(1f),
         )
     }
 }

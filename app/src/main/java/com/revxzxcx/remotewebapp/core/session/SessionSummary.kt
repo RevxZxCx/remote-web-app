@@ -118,6 +118,23 @@ data class SessionSummary(
  */
 data class SessionListResult(
     val items: List<SessionSummary> = emptyList(),
+    /**
+     * 逐会话的用量切片（T076），键是会话 id。
+     *
+     * 与 [items] 是**同一份响应的两个视角**：`session/list` 的每条本来就带
+     * `tokenUsage` / `costUsage` / `sessionStats` / `contextTimeline` 四个投影
+     * （实测 32 条主会话 32/32 命中），所以首页洞察不需要任何新增 RPC。
+     *
+     * ## 为什么在这里而不是塞进 [SessionSummary]
+     * `SessionSummary` 是 `@Parcelable`，会被放进 `rememberSaveable` 的导航状态与缓存表
+     * （`CachedSession`）。用量是**几百字节一个会话**的大块数据，跟着列表项走会让每次
+     * 会话状态更新（`running` 翻转、完成点亮起）都连带搬运一遍；而它只在打开洞察抽屉时
+     * 才被读。分开放还有第二个好处：`CachedSession` 不含它，冷启动时这份映射是空的，
+     * 界面显示的就不是「上次的旧账」而是等网络帧——洞察本来就是实时视图。
+     *
+     * 缺失某一项表示「这条会话没有洞察数据」，**不是「用量为 0」**。
+     */
+    val usages: Map<String, SessionUsage> = emptyMap(),
 ) {
     val isEmpty: Boolean get() = items.isEmpty()
 
@@ -151,4 +168,14 @@ data class SessionListResult(
     /** 列表可显示的会话，按最近活动降序——服务端已排好，这里再兜一次底。 */
     val topLevel: List<SessionSummary>
         get() = visible.sortedByDescending { it.updatedAt }
+
+    /**
+     * 可显示且**有洞察数据**的会话 + 它们的用量，供 [ContextTotalsCalculator] 使用。
+     *
+     * 与 [visible] 分开是因为两者语义不同：[visible] 是「列表里该显示的」，
+     * 这里是「能进洞察统计的」。差集是刚建好还没产生用量的会话——它们在列表里该有一行，
+     * 但塞进总额度分母就会让「共 N 个会话」与「有数据的 N' 个」对不上。
+     */
+    val visibleWithUsage: List<SessionSummary>
+        get() = visible.filter { usages.containsKey(it.sessionId) }
 }

@@ -225,6 +225,63 @@ class SessionListParserTest {
         assertFalse(s.failureUnread)
     }
 
+    // ── T076：用量随同一次响应切出来 ────────────────────────────────────────
+
+    @Test
+    fun `用量从 projections 切出来并挂到对应会话`() {
+        // 四条用量投影就在同一条记录里。这条用例守的是「顺手切出来」这件事本身：
+        // 若 parse 忘了填 usages，首页洞察会因为拿不到任何用量而整页空白
+        // （真机上就发生过：全量刷新路径漏传 usages，抽屉显示「没有可统计的会话」）。
+        val result = parser.parse(
+            obj(
+                """{"items":[{"sessionId":"s1","updatedAt":100,
+                     "projections":{"values":{
+                       "tokenUsage":{"uncachedInputTokens":100,"outputTokens":200,
+                                     "cacheReadTokens":300,"cacheWriteTokens":400},
+                       "sessionStats":{"turns":3,"steps":9,"llmMs":1000,"toolMs":500}}}}]}""",
+            ),
+        )
+        val usage = result.usages.getValue("s1")
+        assertEquals(100L, usage.tokens.uncachedInput)
+        assertEquals(200L, usage.tokens.output)
+        assertEquals(300L, usage.tokens.cacheRead)
+        assertEquals(400L, usage.tokens.cacheWrite)
+        assertEquals(1000L, usage.tokens.total)
+        assertEquals(3, usage.turns)
+        assertEquals(9, usage.steps)
+    }
+
+    @Test
+    fun `读不到用量的会话不进 usages 表`() {
+        // 「没有数据」与「用量是 0」是两件事：塞一条全 0 进去会把分母撑大，
+        // 界面就会出现「2 个会话，合计 0 token」这种自相矛盾的读数。
+        val result = parser.parse(
+            obj(
+                """{"items":[
+                     {"sessionId":"withData","updatedAt":100,
+                      "projections":{"values":{"tokenUsage":{"cacheReadTokens":7}}}},
+                     {"sessionId":"noData","updatedAt":200},
+                     {"sessionId":"emptyValues","updatedAt":300,"projections":{"values":{}}}]}""",
+            ),
+        )
+        assertEquals(setOf("withData"), result.usages.keys)
+        // 摘要里三条都还在：用量缺失不影响列表本身。
+        assertEquals(3, result.items.size)
+    }
+
+    @Test
+    fun `缺 sessionId 的条目既不进 items 也不进 usages`() {
+        // 没有 id 就无法成为列表项，用量表也不该出现一个空键。
+        val result = parser.parse(
+            obj(
+                """{"items":[{"updatedAt":100,
+                     "projections":{"values":{"tokenUsage":{"cacheReadTokens":7}}}}]}""",
+            ),
+        )
+        assertTrue(result.items.isEmpty())
+        assertTrue(result.usages.isEmpty())
+    }
+
     @Test
     fun `topLevel 排除子代理并按时间降序`() {
         val result = parser.parse(

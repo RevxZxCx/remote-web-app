@@ -24,10 +24,27 @@ import kotlinx.serialization.json.JsonPrimitive
  */
 class SessionListParser {
 
-    /** 解析 `result.value`（形如 `{items:[…]}`）。 */
+    /**
+     * 解析 `result.value`（形如 `{items:[…]}`）。
+     *
+     * T076：顺手把四条用量投影也切出来。它们就在**同一次响应的同一条记录**里，不需要额外
+     * 请求——这正是「首页洞察零新增 RPC」能成立的原因（实测 32 条主会话 32/32 命中）。
+     */
     fun parse(element: JsonElement): SessionListResult {
         val obj = element as? JsonObject ?: return SessionListResult()
-        return SessionListResult(items = obj.summaries("items"))
+        val summaryList = ArrayList<SessionSummary>()
+        val usageMap = LinkedHashMap<String, SessionUsage>()
+        (obj["items"] as? JsonArray)?.forEach { item ->
+            val raw = item as? JsonObject ?: return@forEach
+            val summary = summaryOf(raw) ?: return@forEach
+            summaryList += summary
+            // 用量与摘要**分开遍历**是刻意的：摘要要留给列表长期复用，用量只在打开洞察
+            // 抽屉时读一次。两者放在同一个 data class 里会互相拖累（见 `usages` 的 KDoc）。
+            // 读不到用量的会话不进 map —— 它不是「0 用量」，是「没有数据」。
+            val values = raw["projections"].asObject()?.get("values").asObject()
+            SessionUsage.of(summary.sessionId, values)?.let { usageMap[summary.sessionId] = it }
+        }
+        return SessionListResult(items = summaryList, usages = usageMap)
     }
 
     /** 解析一条 `SessionSummary`；缺 `sessionId` 视为无效条目，返回 `null`。 */
@@ -59,11 +76,6 @@ class SessionListParser {
                 } == true,
         )
     }
-
-    private fun JsonObject.summaries(key: String): List<SessionSummary> =
-        (this[key] as? JsonArray)
-            ?.mapNotNull { (it as? JsonObject)?.let(::summaryOf) }
-            .orEmpty()
 
     private fun JsonElement?.asObject(): JsonObject? = this as? JsonObject
 

@@ -12,6 +12,9 @@ import com.revxzxcx.remotewebapp.core.protocol.CarrierState
 import com.revxzxcx.remotewebapp.core.protocol.MuxStats
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
 import com.revxzxcx.remotewebapp.core.session.CompletionLedger
+import com.revxzxcx.remotewebapp.core.session.ContextTotals
+import com.revxzxcx.remotewebapp.core.session.ContextTotalsCalculator
+import com.revxzxcx.remotewebapp.core.session.InsightsRange
 import com.revxzxcx.remotewebapp.core.session.SessionActionRepository
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
 import com.revxzxcx.remotewebapp.core.session.SessionListParser
@@ -93,6 +96,27 @@ data class HomeUiState(
      * 已经先到，此时**绝不能让旧缓存盖掉权威快照**（R006 P1-1）。
      */
     val networkArrived: Boolean = false,
+    /**
+     * 洞察页当前的统计范围（T076）。
+     *
+     * 放进状态而不是留在 Composable 里：切范围要重算 [insights]，而重算发生在
+     * ViewModel 侧（[withDerived]）；如果范围是被 UI 独占的本地状态，两者会不同步。
+     */
+    val insightsRange: InsightsRange = InsightsRange.MONTH,
+    /**
+     * 首页「总上下文洞察」的聚合结果（T076）。
+     *
+     * 由 [withDerived] 和分组一起算，所以分组、排行、圆环永远看的是同一份会话列表。
+     * 全部来自内存里已有的 `session/list` 投影——**零额外 RPC**，切档切页都不发请求。
+     */
+    val insights: ContextTotals = ContextTotals.EMPTY,
+    /**
+     * 顶栏洞察按钮上那颗圆点是否该亮（R050）。
+     *
+     * 语义是「有你没看过的变化」，不是「有数据」：打开抽屉即清除，
+     * 判据见 [shouldLightInsightsDot]。
+     */
+    val insightsDot: Boolean = false,
 )
 
 /**
@@ -208,6 +232,29 @@ class HomeViewModel(
      * 与 [refreshDeferred] 分开：那个管的是去抖窗口，这个管的是在飞窗口，两处的触发点不同。
      */
     private var sessionsRefreshPending = false
+
+    /**
+     * 洞察圆点的基线：上次打开抽屉时的会话数（R050）。
+     *
+     * `-1` = 还没建立基线（进程刚起来、用户从没打开过洞察）。没基线时**不点亮**，
+     * 见 [shouldLightInsightsDot] 的理由：一进 App 就挂个圆点只会让人以为是脏数据。
+     *
+     * 与 R049 的 `CompletionLedger` 不同，这里不需要落盘：洞察是实时视图，
+     * 冷启动后重新建立基线正是期望行为——用户此刻看到的确实是「全量数据」，
+     * 而不是「上次之后新增的一点点」。
+     */
+    private var seenSessions = -1
+
+    /** 洞察圆点的基线：上次打开抽屉时的费用（分）；`-1` = 当时读不到（没装插件）。 */
+    private var seenCostCents = -1L
+
+    /**
+     * 基线取自哪一档统计范围。
+     *
+     * 会话数与费用都是**当前范围**内的合计，换了范围数字天然变化，
+     * 拿跨范围的两次读数比大小没有意义（切到「全部」必然变大）。
+     */
+    private var seenRange = InsightsRange.MONTH
 
     /** 复用它解析 `api-session/added` 推来的摘要（与 `session/list` 同形状）。 */
     private val listParser = SessionListParser()
@@ -527,7 +574,11 @@ class HomeViewModel(
      */
     private fun applySessions(items: List<SessionSummary>) {
         val current = _state.value
-        val result = SessionListResult(items = items)
+        // T076：用量切片必须**跟着继承**。这条路径只改标志位（running / 未读 / 标题），
+        // 会话与它的用量是一一对应的，不能因为一次状态翻转就把整张用量表清空——
+        // 否则用户每看到一次绿点亮起，洞察抽屉里的总额就会归零一次。
+        // 新增的会话在下次全量刷新时补进来（`loadSessions` 是权威来源）。
+        val result = SessionListResult(items = items, usages = current.sessions.usages)
         if (result == current.sessions) return
         _state.value = current
             .copy(sessions = result, sessionsError = null)
@@ -641,17 +692,73 @@ class HomeViewModel(
     /**
      * 重算所有由「工作区快照 + 会话列表」派生的字段。
      *
-     * 三个字段必须在同一次 `copy` 里一起更新，否则会出现「分组已更新、抽屉还是旧的」
+     * 四个字段必须在同一次 `copy` 里一起更新，否则会出现「分组已更新、抽屉还是旧的」
      * 这种自相矛盾的状态（真机实测过：标题显示 13 条，列表却是空的）。
+     *
+     * 洞察（[HomeUiState.insights]）也算在这里：它读的 `sessions.usages` 与分组读的
+     * `sessions.items` 是同一份响应的两个视角，分开算就会出现「会话页有 32 行、
+     * 总览页写 30 个会话」这种对不上。
      */
     private fun HomeUiState.withDerived(
         snapshot: WorkspaceSnapshot,
         sessions: SessionListResult,
-    ): HomeUiState = copy(
-        groups = SessionGrouping.group(snapshot, sessions),
-        recent = SessionGrouping.recentSessions(snapshot, sessions),
-        pinned = SessionGrouping.pinnedSessions(snapshot, sessions),
-    )
+    ): HomeUiState {
+        val insights = ContextTotalsCalculator.compute(
+            sessions = sessions.visibleWithUsage,
+            usages = sessions.usages,
+            range = insightsRange,
+            now = System.currentTimeMillis(),
+        )
+        return copy(
+            groups = SessionGrouping.group(snapshot, sessions),
+            recent = SessionGrouping.recentSessions(snapshot, sessions),
+            pinned = SessionGrouping.pinnedSessions(snapshot, sessions),
+            insights = insights,
+            insightsDot = shouldLightInsightsDot(
+                sessions = insights.sessionCount,
+                costCents = costCentsOf(insights.cost),
+                seenSessions = seenSessions,
+                seenCostCents = seenCostCents,
+                sameRange = insightsRange == seenRange,
+            ),
+        )
+    }
+
+    /**
+     * 切换洞察的统计范围（近 7 天 / 近 30 天 / 全部）。
+     *
+     * 只重算本地聚合，**不发任何请求**：三档的分母都是已经拿到的 `session/list`
+     * （原型 R050 与用户 m34453 都是基于这个前提定的「统计范围够」）。
+     */
+    fun setInsightsRange(range: InsightsRange) {
+        if (_state.value.insightsRange == range) return
+        val next = _state.value.copy(insightsRange = range)
+            .withDerived(_state.value.snapshot, _state.value.sessions)
+        // 切范围必然发生在抽屉打开时（范围选择器只在抽屉里），此刻用户正看着数据，
+        // 所以把基线一并推到新范围上。少了这一步，切到更大的范围会让会话数变大，
+        // 关掉抽屉后顶栏就冒出一颗「有新数据」的圆点——可实际上没有任何新数据进来，
+        // 而「打开抽屉才熄灭」意味着这颗假圆点会一直亮到下一次打开为止。
+        seenSessions = next.insights.sessionCount
+        seenCostCents = costCentsOf(next.insights.cost)
+        seenRange = next.insightsRange
+        _state.value = next.copy(insightsDot = false)
+    }
+
+    /**
+     * 记下「用户已经看过洞察了」，用于熄灭顶栏那颗圆点。
+     *
+     * 基线取**当前聚合结果**而不是「当前时间」：圆点的语义是「有没有新数据」，
+     * 新数据体现为会话数或费用变大，所以基线必须是这两个数本身。
+     */
+    fun markInsightsSeen() {
+        val current = _state.value
+        seenSessions = current.insights.sessionCount
+        seenCostCents = costCentsOf(current.insights.cost)
+        seenRange = current.insightsRange
+        if (current.insightsDot) {
+            _state.value = current.copy(insightsDot = false)
+        }
+    }
 
     /**
      * 拉一次会话摘要并重新合并分组。
@@ -675,7 +782,11 @@ class HomeViewModel(
                 // 某条会话的 `status` 事件。种子若拿陈旧快照比对，会把「刚开始跑」
                 // 读成「跑完了」，还会把基线改回 false 吞掉真正的完成边沿（二审 P2）。
                 val epochAtRequest = ledger.currentEpoch()
-                val loaded = sessions.load().items
+                // 用量投影必须跟着整表一起留下来：`SessionListResult` 是个整体，
+                // 下面重建它时只传 items 会把 usages 清空，洞察页就永远显示
+                // 「暂时没有可统计的会话」（真机验收抓到的 P1）。
+                val loadedFull = sessions.load()
+                val loaded = loadedFull.items
                 // 播种：把全量列表里各条会话的运行态补进账本（只补没见过的），
                 // 再把本次运行期亮着的两枚提醒重新盖上去。
                 val skipped = ledger.seed(loaded, sinceEpoch = epochAtRequest)
@@ -693,6 +804,7 @@ class HomeViewModel(
                         failureIds = ledger.failureIds(),
                         failureReasons = ledger.failureReasons(),
                     ),
+                    usages = loadedFull.usages,
                 )
                 _state.value = _state.value
                     .copy(

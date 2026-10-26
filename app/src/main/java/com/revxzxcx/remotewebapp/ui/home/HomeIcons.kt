@@ -1,6 +1,7 @@
 package com.revxzxcx.remotewebapp.ui.home
 
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
@@ -93,6 +94,50 @@ internal val PinIcon: ImageVector = ImageVector.Builder(
         horizontalLineTo(19f)
         verticalLineTo(12f)
         curveTo(17.34f, 12f, 16f, 10.66f, 16f, 9f)
+        close()
+    }
+}.build()
+
+/**
+ * 洞察（自绘的「◔」：一圈环 + 环内右上角四分之一实心）。
+ *
+ * 为什么自绘：`material-icons-core` 1.7.8 那 49 枚里没有任何「数据/洞察/仪表」类
+ * 字形（Menu、Refresh、Settings、MoreVert、Info 是全部的家当），而
+ * `material-icons-extended` 有十几 MB。同一决策见本文件开头的 D74。
+ *
+ * 形状取「大部分空心 + 一小块实心」而不是常见的数据图腾（柱子/折线）：它要在
+ * **24dp**、三种主题色下都还能认出轮廓，柱子阵在这个尺寸会糊成一条横线；而这个
+ * 形状与 R050 原型第 1 节的入口草图逐像素对应（环 + 楔形），用户看到的原型和
+ * 装到手机上的东西是同一个东西。
+ *
+ * 几何：外圆 r=8.5、内圆 r=5.5（环宽 3，与 24 viewport 下的图标笔画同量级）；
+ * 楔形占内孔右上四分之一。`EvenOdd` 让内圆成为真正的洞——用两个同向子路径配
+ * `NonZero` 会得到实心圆（内圆方向若写反还会直接消失，是这类图标最常见的翻车点）。
+ */
+internal val InsightsIcon: ImageVector = ImageVector.Builder(
+    name = "Insights",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black), pathFillType = PathFillType.EvenOdd) {
+        // 外圆（顺时针）
+        moveTo(12f, 3.5f)
+        arcTo(8.5f, 8.5f, 0f, isMoreThanHalf = true, isPositiveArc = true, x1 = 12f, y1 = 20.5f)
+        arcTo(8.5f, 8.5f, 0f, isMoreThanHalf = true, isPositiveArc = true, x1 = 12f, y1 = 3.5f)
+        close()
+        // 内圆（逆时针，EvenOdd 下成为洞）
+        moveTo(12f, 6.5f)
+        arcTo(5.5f, 5.5f, 0f, isMoreThanHalf = true, isPositiveArc = false, x1 = 12f, y1 = 17.5f)
+        arcTo(5.5f, 5.5f, 0f, isMoreThanHalf = true, isPositiveArc = false, x1 = 12f, y1 = 6.5f)
+        close()
+    }
+    // 洞里的右上四分之一楔形：从圆心向北，再沿内圆扫到正东。
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(12f, 12f)
+        lineTo(12f, 6.5f)
+        arcTo(5.5f, 5.5f, 0f, isMoreThanHalf = false, isPositiveArc = true, x1 = 17.5f, y1 = 12f)
         close()
     }
 }.build()

@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>R050 效果图 · 首页总上下文洞察（定稿版）</title>
+<style>
+:root{
+  --primary:#5AA2FF; --onPrimary:#04121F;
+  --background:#0B1420; --onBackground:#E6EFFA;
+  --surface:#111C2B; --onSurface:#E6EFFA;
+  --surfaceVariant:#1A2942; --onSurfaceVariant:#9BB0C8;
+  --outline:#31485F; --outlineVariant:#22334A;
+  --tertiary:#F2C14E; --running:#4ADE80; --error:#FF8A80;
+  --r-xs:6px; --r-sm:10px; --r-md:14px; --r-lg:20px; --r-xl:28px; --r-pill:999px;
+  --t-fast:140ms; --t-med:240ms; --t-slow:360ms;
+  --ease:cubic-bezier(.2,0,0,1);
+  --c-system:#615FFF; --c-tools:#FE9A00; --c-user:#00C950; --c-inject:#AD46FF;
+  --c-skill:#FF6900; --c-assistant:#2B7FFF; --c-tool:#00BBA7;
+  --c-ttft:#2B7FFF; --c-reason:#8E51FF; --c-text:#F6339A;
+  --c-toolarg:#FE9A00; --c-toolsx:#00BBA7; --c-other:#90A1B9;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#060B12;color:var(--onBackground);
+  font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:13px;line-height:1.6;padding:28px 24px 80px}
+.wrap{max-width:1640px;margin:0 auto}
+h1{font-size:19px;font-weight:600;letter-spacing:.2px}
+.sub{color:var(--onSurfaceVariant);font-size:12px;margin-top:6px;line-height:1.8}
+.sub code{font-family:ui-monospace,monospace;font-size:11px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+section{margin-top:40px}
+h2{font-size:14px;font-weight:600;color:var(--primary);display:flex;align-items:center;gap:8px}
+h2 .n{width:20px;height:20px;border-radius:50%;background:rgba(90,162,255,.14);
+  border:1px solid rgba(90,162,255,.4);font-size:11px;display:flex;
+  align-items:center;justify-content:center;color:var(--primary);flex:0 0 20px}
+.note{color:var(--onSurfaceVariant);font-size:11.5px;line-height:1.85;margin-top:8px}
+.note b{color:var(--onSurface);font-weight:600}
+.note code{font-family:ui-monospace,monospace;font-size:10.5px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+.row{display:flex;gap:26px;align-items:flex-start;flex-wrap:wrap;margin-top:16px}
+
+.phone{width:360px;flex:0 0 360px;background:var(--background);
+  border-radius:22px;border:1px solid var(--outlineVariant);
+  overflow:hidden;box-shadow:0 22px 60px rgba(0,0,0,.6);
+  display:flex;flex-direction:column;min-height:640px;position:relative}
+.status{height:26px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 13px;font-size:9.5px;color:var(--onSurfaceVariant);letter-spacing:.3px;flex:0 0 auto}
+.topbar{height:46px;display:flex;align-items:center;gap:8px;padding:0 6px 0 4px;
+  border-bottom:1px solid var(--outlineVariant);flex:0 0 auto}
+.tb-btn{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;color:var(--onSurface);position:relative}
+.tb-btn .badge{position:absolute;right:5px;bottom:5px;width:5px;height:5px;
+  border-radius:50%;background:var(--primary);box-shadow:0 0 0 2px var(--background)}
+.tb-mid{flex:1;min-width:0}
+.tb-t1{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb-t2{font-size:9.5px;color:var(--onSurfaceVariant);margin-top:1px}
+
+.hlist{flex:1;padding:8px 10px;display:flex;flex-direction:column;gap:6px;overflow:hidden}
+.ws{border:1px solid var(--outlineVariant);border-radius:var(--r-md);background:var(--surface);
+  padding:9px 11px;display:flex;align-items:center;gap:9px}
+.ws .ic{width:26px;height:26px;border-radius:8px;background:rgba(90,162,255,.16);
+  display:flex;align-items:center;justify-content:center;color:var(--primary);font-size:12px}
+.ws .t{flex:1;min-width:0}
+.ws .t1{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ws .t2{font-size:9px;color:var(--onSurfaceVariant);margin-top:1px;
+  font-family:ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ws .pills{display:flex;gap:4px;flex:0 0 auto}
+.pill{font-size:8.5px;padding:1.5px 6px;border-radius:var(--r-pill);
+  background:var(--surfaceVariant);color:var(--onSurfaceVariant);
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+.pill.run{border:1px solid rgba(74,222,128,.45);color:var(--running)}
+.pill.arc{border:1px solid rgba(242,193,78,.32);color:var(--tertiary)}
+
+/* 抽屉 */
+.scrim{position:absolute;inset:0;background:rgba(4,8,14,.5)}
+.sheet{position:absolute;top:0;right:0;bottom:0;width:326px;background:var(--surface);
+  border-left:1px solid var(--outline);box-shadow:-16px 0 48px rgba(0,0,0,.62);
+  display:flex;flex-direction:column}
+.sh-head{flex:0 0 auto;padding:10px 12px 0;display:flex;align-items:center;gap:8px}
+.sh-title{font-size:13px;font-weight:600;flex:1}
+.sh-sub2{font-size:9px;color:var(--onSurfaceVariant);margin-top:1px;font-weight:400}
+.sh-close{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;color:var(--onSurfaceVariant);font-size:15px}
+.sh-tabs{display:flex;gap:3px;padding:3px;margin:9px 12px 0;
+  background:var(--surfaceVariant);border:1px solid var(--outlineVariant);
+  border-radius:var(--r-pill);flex:0 0 auto}
+.shtab{flex:1;height:30px;display:flex;align-items:center;justify-content:center;gap:5px;
+  font-size:11.5px;color:var(--onSurfaceVariant);border-radius:var(--r-pill)}
+.shtab.on{background:var(--surface);color:var(--primary);font-weight:600;
+  box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.sh-body{flex:1;padding:11px 12px 14px;overflow:hidden}
+
+.range{display:flex;gap:4px;margin-bottom:10px}
+.rg{flex:1;height:26px;display:flex;align-items:center;justify-content:center;
+  font-size:10px;border-radius:var(--r-pill);border:1px solid var(--outlineVariant);
+  background:transparent;color:var(--onSurfaceVariant)}
+.rg.on{background:rgba(90,162,255,.14);border-color:rgba(90,162,255,.5);
+  color:var(--primary);font-weight:600}
+
+.kpis{display:flex;gap:7px;margin-bottom:10px}
+.kpi{flex:1;min-width:0;border:1px solid var(--outlineVariant);border-radius:var(--r-md);
+  background:var(--background);padding:8px 9px}
+.kpi .k{font-size:8.5px;color:var(--onSurfaceVariant);letter-spacing:.3px}
+.kpi .v{font-size:16px;font-weight:600;line-height:1.25;margin-top:2px;
+  font-variant-numeric:tabular-nums;letter-spacing:-.3px}
+.kpi .v small{font-size:9.5px;font-weight:400;color:var(--onSurfaceVariant);letter-spacing:0}
+.kpi .d{font-size:8.5px;color:var(--onSurfaceVariant);margin-top:1px;
+  font-variant-numeric:tabular-nums}
+.kpi .d b{color:var(--running);font-weight:600}
+.kpi .d b.warn{color:var(--tertiary)}
+
+.card{border:1px solid var(--outlineVariant);border-radius:var(--r-md);
+  background:var(--background);padding:10px 11px;margin-top:10px}
+.card-h{font-size:10px;font-weight:600;color:var(--onSurface);margin-bottom:7px;
+  display:flex;align-items:center;gap:5px}
+.card-h em{font-style:normal;font-size:9px;font-weight:400;color:var(--onSurfaceVariant);
+  margin-left:auto}
+.kv{display:flex;align-items:baseline;justify-content:space-between;
+  font-size:10.5px;padding:2.5px 0;font-variant-numeric:tabular-nums}
+.kv span:first-child{color:var(--onSurfaceVariant)}
+.kv b{font-weight:600;font-family:ui-monospace,monospace}
+.kv.tot{border-top:1px solid var(--outlineVariant);margin-top:4px;padding-top:5px}
+.kv.tot span:first-child{color:var(--onSurface);font-weight:600}
+.kv.tot b{color:var(--primary)}
+
+.bars{display:flex;align-items:flex-end;gap:3px;height:52px;margin-top:4px}
+.bars .b{flex:1;background:linear-gradient(180deg,rgba(90,162,255,.85),rgba(90,162,255,.25));
+  border-radius:2px 2px 0 0;min-height:3px}
+.bars .b.zero{background:var(--surfaceVariant)}
+.bars .b.hi{background:linear-gradient(180deg,#8DC2FF,rgba(90,162,255,.4))}
+.baxis{display:flex;align-items:center;justify-content:space-between;
+  font-size:8.5px;color:var(--onSurfaceVariant);margin-top:4px;
+  font-variant-numeric:tabular-nums}
+
+.mrow{display:flex;align-items:center;gap:6px;padding:3px 0;font-size:10px}
+.mrow .sw{width:6px;height:6px;border-radius:2px;flex:0 0 6px}
+.mrow .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  font-family:ui-monospace,monospace;font-size:9.5px}
+.mrow b{font-variant-numeric:tabular-nums;font-weight:600;font-size:9.5px}
+.mrow .pc{width:34px;text-align:right;color:var(--onSurfaceVariant);
+  font-variant-numeric:tabular-nums;font-size:9px}
+.mrow .free{font-size:8px;padding:0 4px;border-radius:var(--r-pill);
+  border:1px solid rgba(242,193,78,.4);color:var(--tertiary);white-space:nowrap}
+/* ---------- 圆环（照抄 R040 插件耗时环） ---------- */
+.donutbox{display:flex;align-items:center;gap:12px;margin-top:6px}
+.dwrap{position:relative;flex:0 0 96px;width:96px;height:96px}
+.donut{display:block;width:96px;height:96px;overflow:visible}
+.dtrack{fill:none;stroke:rgba(115,115,115,.18);stroke-width:4}
+.dseg{fill:none;stroke-width:4}
+.dcenter{position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;pointer-events:none;text-align:center;padding:0 16px}
+.dcenter b{font-size:11.5px;font-weight:600;line-height:1.15;
+  font-variant-numeric:tabular-nums;letter-spacing:-.2px;white-space:nowrap}
+.dcenter span{font-size:7.5px;color:var(--onSurfaceVariant);margin-top:1px;line-height:1.2}
+.dlegend{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.dleg{display:flex;align-items:center;gap:5px;width:100%;height:15px;padding:0 3px;
+  border-radius:var(--r-xs);font-size:9px;color:var(--onSurfaceVariant);text-align:left}
+.dleg i{width:6px;height:6px;border-radius:2px;flex:0 0 6px}
+.dleg .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  font-family:ui-monospace,monospace}
+.dleg b{font-weight:600;font-variant-numeric:tabular-nums;color:var(--onSurface);font-size:9px}
+.dleg .pc{width:32px;text-align:right;font-variant-numeric:tabular-nums;opacity:.8}
+.dtotal{display:flex;align-items:baseline;gap:10px;margin-top:8px;
+  padding-top:6px;border-top:1px solid var(--outlineVariant);font-size:9.5px;line-height:1.45}
+.dtotal span:first-child{color:var(--onSurfaceVariant);flex:1;min-width:0}
+.dtotal b,.dtotal>span:last-child{flex:0 0 auto;white-space:nowrap}
+.dtotal b{font-weight:600;font-variant-numeric:tabular-nums;color:var(--primary)}
+
+/* 首次使用气泡 */
+.tip{position:absolute;right:12px;top:76px;background:var(--surface);
+  border:1px solid rgba(90,162,255,.5);border-radius:var(--r-sm);
+  padding:7px 10px;font-size:10px;color:var(--onSurface);line-height:1.5;
+  box-shadow:0 8px 24px rgba(0,0,0,.5);max-width:172px}
+.tip:after{content:"";position:absolute;right:15px;top:-5px;width:8px;height:8px;
+  background:var(--surface);border-left:1px solid rgba(90,162,255,.5);
+  border-top:1px solid rgba(90,162,255,.5);transform:rotate(45deg)}
+.tip b{color:var(--primary)}
+.swipe{position:absolute;right:8px;bottom:14px;display:flex;align-items:center;gap:5px;
+  font-size:9.5px;color:var(--primary);background:rgba(90,162,255,.12);
+  border:1px solid rgba(90,162,255,.4);border-radius:var(--r-pill);padding:4px 9px;
+  animation:swipePulse 2.4s var(--ease) infinite}
+@keyframes swipePulse{0%,100%{transform:translateX(0);opacity:.8}50%{transform:translateX(-4px);opacity:1}}
+
+/* ---------- 会话画像行 ---------- */
+.srow{display:flex;align-items:center;gap:8px;padding:7px 0;
+  border-bottom:1px solid var(--outlineVariant)}
+.srow:last-of-type{border-bottom:0}
+.srow .rk{width:14px;flex:0 0 14px;font-size:9.5px;color:var(--onSurfaceVariant);
+  font-family:ui-monospace,monospace;text-align:right}
+.srow.top .rk{color:var(--primary);font-weight:600}
+.srow .m{flex:1;min-width:0;position:relative;padding-left:0}
+.srow.top .m:before{content:"";position:absolute;left:-6px;top:2px;bottom:2px;
+  width:2px;border-radius:1px;background:rgba(90,162,255,.75)}
+.srow .n{font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.srow .n .run{font-size:8px;font-weight:400;padding:0 4px;margin-left:4px;
+  border-radius:var(--r-pill);border:1px solid rgba(74,222,128,.45);
+  color:var(--running);vertical-align:1px}
+.srow .mt{font-size:8.5px;color:var(--onSurfaceVariant);margin-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.srow .mt .wsn{color:var(--primary);opacity:.85}
+.srow .mt .mm{font-family:ui-monospace,monospace}
+.srow .rt{flex:0 0 auto;text-align:right}
+.srow .rt b{display:block;font-size:10.5px;font-weight:600;
+  font-variant-numeric:tabular-nums;font-family:ui-monospace,monospace}
+.srow .rt span{font-size:8.5px;color:var(--onSurfaceVariant);
+  font-variant-numeric:tabular-nums}
+.more{display:flex;align-items:center;justify-content:space-between;
+  margin-top:9px;padding:7px 9px;border-radius:var(--r-sm);
+  background:var(--surfaceVariant);font-size:9.5px;color:var(--onSurfaceVariant)}
+
+/* ---------- 两个抽屉的关系图 ---------- */
+.jump{display:flex;align-items:center;gap:10px;border:1px solid var(--outlineVariant);
+  border-radius:var(--r-md);background:var(--surface);padding:10px 13px;min-width:290px}
+.jump .jl{font-size:10px;color:var(--onSurfaceVariant);flex:0 0 auto}
+.jump .ja{font-size:10px;color:var(--primary);flex:0 0 auto;
+  padding:2px 7px;border-radius:var(--r-pill);border:1px solid rgba(90,162,255,.4)}
+.jump .jr{flex:1;min-width:0}
+.jump .jr b{display:block;font-size:11.5px;font-weight:600}
+.jump .jr span{display:block;font-size:9.5px;color:var(--onSurfaceVariant);margin-top:1px}
+
+/* ---------- 数据来源表 ---------- */
+table.src{width:100%;border-collapse:collapse;font-size:10px}
+table.src th{text-align:left;font-weight:600;color:var(--onSurfaceVariant);
+  font-size:9px;letter-spacing:.3px;padding:0 8px 6px 0;
+  border-bottom:1px solid var(--outlineVariant)}
+table.src td{padding:6px 8px 6px 0;border-bottom:1px solid rgba(34,51,74,.55);
+  vertical-align:top;color:var(--onSurface)}
+table.src tr:last-child td{border-bottom:0}
+table.src td:first-child{white-space:nowrap;color:var(--onSurface)}
+table.src code{font-family:ui-monospace,monospace;font-size:9px;
+  background:var(--surfaceVariant);padding:1px 4px;border-radius:3px;color:var(--primary)}
+table.src td.no{color:var(--error)}
+
+/* ---------- 待拍板 ---------- */
+.decide{margin-top:14px;display:flex;flex-direction:column;gap:9px;max-width:1100px}
+.di{display:flex;gap:10px;border:1px solid var(--outlineVariant);
+  border-radius:var(--r-md);background:var(--surface);padding:10px 13px;font-size:11px;
+  color:var(--onSurfaceVariant);line-height:1.75}
+.di b{color:var(--onSurface);font-weight:600}
+.dq{flex:0 0 18px;width:18px;height:18px;border-radius:50%;background:rgba(242,193,78,.14);
+  border:1px solid rgba(242,193,78,.45);color:var(--tertiary);font-size:9.5px;
+  display:flex;align-items:center;justify-content:center;margin-top:1px}
+
+footer{margin-top:44px;padding-top:14px;border-top:1px solid var(--outlineVariant);
+  font-size:10px;color:var(--onSurfaceVariant);opacity:.7}
+
+/* ---------- 亮色 ---------- */
+.light{--background:#F4F7FB;--onBackground:#182430;--surface:#FFFFFF;--onSurface:#182430;
+  --surfaceVariant:#E9EFF7;--onSurfaceVariant:#45586D;--outline:#B9C8D9;
+  --outlineVariant:#DCE5EF;--primary:#1F6FEB;--tertiary:#C08A12;--running:#15803D;
+  --error:#B3261E;
+  /* body 上 color:var(--onBackground) 已被解析成深色的浅字并往下继承；
+     这里必须再声明一次，让 .light 子树用自己作用域内的变量重新解析。 */
+  color:var(--onBackground)}
+.light .bars .b{background:rgba(31,111,235,.55)!important}
+.light .bars .b.hi{background:rgba(31,111,235,.8)!important}
+.light .bars .b.zero{background:#E9EFF7!important}
+.light .sheet{border-left-color:#B9C8D9}
+.light .scrim{background:rgba(24,36,48,.28)}
+/* 亮色下圆环轨道要加深，否则白底上几乎看不见 */
+.light .dtrack{stroke:rgba(115,115,115,.28)}
+
+
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>R050 效果图 · 首页总上下文洞察（定稿·右滑抽屉）</h1>
+<div class="sub">
+  在 R040 单会话侧栏之外，新增一个<code>跨会话总览</code>：入口在首页，<b>右滑</b>打开。<br>
+  数据全部来自 App 已经拉到的 <code>session/list</code> 投影（实测 186 条记录 = 32 个主会话 + 140 个子智能体 + 14 个空会话，全部携带 tokenUsage / costUsage / contextTimeline），<b>不需要新增 RPC</b>。下列数字均为真实值。
+</div>
+
+
+<section>
+<h2><span class="n">1</span>首页 · 右滑入口（已定稿：顶栏按钮 + 圆点）</h2>
+<div class="note">
+  <b>手势不变</b>：首页任意位置<b>向右滑</b>都能拉出总上下文洞察抽屉（300ms、跟手、可从任意进度撤销）。<br>
+  <b>入口标识</b>：顶部栏在「连接状态」左边加一枚 <b>◔ 洞察按钮</b>，右下角一颗 5dp 主色圆点表示「有未看过的新数据」，点开后清除（与 R049 的完成提醒同一套「看过即清」语义，不常驻）。点按钮 = 右滑，两条路径等价。<br>
+  顶栏实测已有 4 个元素（x 12–240 / 168–443 / 792–924 / 924–1068），洞察按钮插在 792 与 924 之间，标题栏让出 34dp —— 标题本来就有 <code>SingleLineMarqueeText</code>（R039 缺陷六），窄了会滚动而不是截断，可接受。
+</div>
+<div class="row">
+  <div class="phone" data-fixed="1" style="height:470px">
+    <div class="status"><span>21:04</span><span>5G 87%</span></div>
+    <div class="topbar">
+      <div class="tb-btn">☰</div>
+      <div class="tb-mid"><div class="tb-t1">远程 Web</div><div class="tb-t2">工作区 9 · 会话 32</div></div>
+      <div class="tb-btn" style="color:var(--primary);background:rgba(90,162,255,.16)">◔<span class="badge"></span></div>
+      <div class="tb-btn" style="color:var(--running);font-size:8px">●</div>
+      <div class="tb-btn">⋯</div>
+    </div>
+    <div class="hlist">
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">bot</div><div class="t2">F:\\bot</div></div>
+        <div class="pills"><span class="pill run">1 进行中</span><span class="pill">7 会话</span><span class="pill arc">3 归档</span></div></div>
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">test</div><div class="t2">F:\\test</div></div>
+        <div class="pills"><span class="pill">1 会话</span><span class="pill arc">1 归档</span></div></div>
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">dsh-plugin</div><div class="t2">F:\\dsh-plugin</div></div>
+        <div class="pills"><span class="pill">2 会话</span></div></div>
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">Irok</div><div class="t2">F:\\Irok</div></div>
+        <div class="pills"><span class="pill">11 会话</span></div></div>
+    </div>
+    <div class="tip"><b>总上下文洞察</b><br>32 个会话的 token / 花费 / 耗时 · 点这里或向右滑</div>
+    <div class="swipe">右滑看总览 ‹</div>
+  </div>
+
+  <div class="note" style="max-width:520px">
+    <b>为什么是这一版（而不是贴边手柄）：</b><br>
+    ① <b>贴边手柄会被内容压住</b>：首页工作区列表是可滚动的，手柄浮在最右侧会盖住每行的状态胶囊（<code>1 进行中</code> / <code>11 会话</code>），48 个会话就会遮 48 次。<br>
+    ② <b>顶栏是唯一「系统级入口」的位置</b>：会话列表（☰）在左、连接状态在右，洞察与它们同层，用户找入口时只会看顶栏，不会去边缘找。<br>
+    ③ <b>右滑手势照旧保留</b>，所以按钮只是「可发现性」的补充 —— 老用户继续用滑的，新用户看按钮。<br><br>
+    <b>圆点什么时候亮：</b>距离上次打开洞察后，若新增了会话或费用有变化就亮；打开抽屉即清除。不显示百分比、不显示数字（顶栏放不下，也没人要看）。<br><br>
+    <b>无障碍：</b>按钮 <code>contentDescription = "总上下文洞察"</code>，圆点亮时补一句「有新数据」。抽屉展开后 <code>TalkBack</code> 焦点直接进抽屉头部，Esc / 右滑收起。
+  </div>
+</div>
+</section>
+
+
+<section>
+<h2><span class="n">2</span>总上下文洞察抽屉 · 「总览」页</h2>
+<div class="note">
+  从右侧滑出，宽 <b>326dp</b>（比 R040 单会话侧栏的 318dp 略宽，因为要放圆环 + 图例两列）。
+  顶部两个互斥页签：<b>总览 / 会话</b>，与 R040 的「会话详情 / 文件」同一套分段控件。
+  三块数据全部用 <b>R040 同款圆环</b>（96px、4dp 环宽、图例在右、底部分隔线下写合计）。
+</div>
+<div class="row">
+  <div class="phone" data-fixed="1" style="height:1000px">
+    <div class="status"><span>21:04</span><span>5G 87%</span></div>
+    <div class="topbar">
+      <div class="tb-btn" style="opacity:.35">☰</div>
+      <div class="tb-mid" style="opacity:.35"><div class="tb-t1">远程 Web</div><div class="tb-t2">工作区 9 · 会话 32</div></div>
+    </div>
+    <div class="hlist" style="opacity:.35">
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">bot</div><div class="t2">F:\\bot</div></div>
+        <div class="pills"><span class="pill run">1 进行中</span><span class="pill">7 会话</span></div></div>
+      <div class="ws"><div class="ic">▸</div><div class="t"><div class="t1">test</div><div class="t2">F:\\test</div></div>
+        <div class="pills"><span class="pill">1 会话</span></div></div>
+    </div>
+    <div class="scrim"></div>
+    <div class="sheet">
+      <div class="sh-head">
+        <div class="sh-title">上下文洞察<div class="sh-sub2">32 个会话 · 9 个工作区 · 含子智能体</div></div>
+        <div class="sh-close">✕</div>
+      </div>
+      <div class="sh-tabs">
+        <div class="shtab on">总览</div>
+        <div class="shtab">会话</div>
+      </div>
+      <div class="sh-body">
+
+        <div class="range">
+          <div class="rg">近 7 天</div>
+          <div class="rg on">近 30 天</div>
+          <div class="rg">全部</div>
+        </div>
+
+        <div class="card">
+          <div class="card-h">Token 用量构成<em>按模型</em></div>
+          <div class="donutbox">
+            <div class="dwrap">
+              <svg class="donut" viewBox="0 0 42 42" style="transform:rotate(-90deg)">
+                <circle class="dtrack" cx="21" cy="21" r="15.9155"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#615FFF" stroke-dasharray="37.1100 62.8900" stroke-dashoffset="-0.0000"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#FE9A00" stroke-dasharray="26.3300 73.6700" stroke-dashoffset="-37.1093"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#00C950" stroke-dasharray="17.9600 82.0400" stroke-dashoffset="-63.4440"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#AD46FF" stroke-dasharray="11.4900 88.5100" stroke-dashoffset="-81.4052"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#2B7FFF" stroke-dasharray="7.1000 92.9000" stroke-dashoffset="-92.8978"/>
+              </svg>
+              <div class="dcenter"><b>39.3 亿</b><span>累计 token</span></div>
+            </div>
+            <div class="dlegend">
+              <div class="dleg"><i style="background:#615FFF"></i><span class="nm">deepseek-v4.1-flash</span><b>14.6 亿</b><span class="pc">37.1%</span></div>
+              <div class="dleg"><i style="background:#FE9A00"></i><span class="nm">step-5-preview</span><b>10.4 亿</b><span class="pc">26.3%</span></div>
+              <div class="dleg"><i style="background:#00C950"></i><span class="nm">qfmodel</span><b>7.1 亿</b><span class="pc">18.0%</span></div>
+              <div class="dleg"><i style="background:#AD46FF"></i><span class="nm">qodercn/dfmodel</span><b>4.5 亿</b><span class="pc">11.5%</span></div>
+              <div class="dleg"><i style="background:#2B7FFF"></i><span class="nm">其余 14 个</span><b>2.8 亿</b><span class="pc">7.1%</span></div>
+            </div>
+          </div>
+          <div class="dtotal"><span>缓存读 3.80B · 未缓存输入 109.2M · 输出 21.0M（其中推理 7.9M）</span></div>
+        </div>
+
+        <div class="card">
+          <div class="card-h">预估费用<em>按模型</em></div>
+          <div class="donutbox">
+            <div class="dwrap">
+              <svg class="donut" viewBox="0 0 42 42" style="transform:rotate(-90deg)">
+                <circle class="dtrack" cx="21" cy="21" r="15.9155"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#FE9A00" stroke-dasharray="90.4500 9.5500" stroke-dashoffset="-0.0000"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#615FFF" stroke-dasharray="8.8200 91.1800" stroke-dashoffset="-90.4498"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#00C950" stroke-dasharray="0.5600 99.4400" stroke-dashoffset="-99.2651"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#2B7FFF" stroke-dasharray="0.1700 99.8300" stroke-dashoffset="-99.8256"/>
+              </svg>
+              <div class="dcenter"><b>$155.19</b><span>预估费用</span></div>
+            </div>
+            <div class="dlegend">
+              <div class="dleg"><i style="background:#FE9A00"></i><span class="nm">step-5-preview</span><b>$140.37</b><span class="pc">90.4%</span></div>
+              <div class="dleg"><i style="background:#615FFF"></i><span class="nm">deepseek-v4.1-flash</span><b>$13.68</b><span class="pc">8.8%</span></div>
+              <div class="dleg"><i style="background:#00C950"></i><span class="nm">deepseek-v4-pro</span><b>$0.87</b><span class="pc">0.6%</span></div>
+              <div class="dleg"><i style="background:#2B7FFF"></i><span class="nm">其余 15 个</span><b>$0.27</b><span class="pc">0.2%</span></div>
+              <div class="dleg" style="height:auto"><i style="background:var(--tertiary)"></i><span class="nm" style="font-family:inherit;color:var(--tertiary)">14 个模型未计价 · 12.98 亿 token</span></div>
+            </div>
+          </div>
+          <div class="dtotal"><span>未计价不是免费，是价表缺这些模型</span><b>$155.19</b></div>
+        </div>
+
+        <div class="card">
+          <div class="card-h">耗时分布<em>墙钟累计</em></div>
+          <div class="donutbox">
+            <div class="dwrap">
+              <svg class="donut" viewBox="0 0 42 42" style="transform:rotate(-90deg)">
+                <circle class="dtrack" cx="21" cy="21" r="15.9155"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#2B7FFF" stroke-dasharray="16.5500 83.4500" stroke-dashoffset="-0.0000"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#8E51FF" stroke-dasharray="18.9100 81.0900" stroke-dashoffset="-16.5456"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#F6339A" stroke-dasharray="0.9400 99.0600" stroke-dashoffset="-35.4587"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#FE9A00" stroke-dasharray="9.8600 90.1400" stroke-dashoffset="-36.3997"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#00BBA7" stroke-dasharray="32.9700 67.0300" stroke-dashoffset="-46.2592"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#90A1B9" stroke-dasharray="20.7700 79.2300" stroke-dashoffset="-79.2272"/>
+              </svg>
+              <div class="dcenter"><b>6 天 16 时</b><span>墙钟合计</span></div>
+            </div>
+            <div class="dlegend">
+              <div class="dleg"><i style="background:#2B7FFF"></i><span class="nm">首字等待</span><b>26.6 h</b><span class="pc">16.6%</span></div>
+              <div class="dleg"><i style="background:#8E51FF"></i><span class="nm">推理</span><b>30.4 h</b><span class="pc">18.9%</span></div>
+              <div class="dleg"><i style="background:#F6339A"></i><span class="nm">正文生成</span><b>1.5 h</b><span class="pc">0.9%</span></div>
+              <div class="dleg"><i style="background:#FE9A00"></i><span class="nm">工具参数</span><b>15.8 h</b><span class="pc">9.9%</span></div>
+              <div class="dleg"><i style="background:#00BBA7"></i><span class="nm">工具执行</span><b>52.9 h</b><span class="pc">33.0%</span></div>
+              <div class="dleg"><i style="background:#90A1B9"></i><span class="nm">未归类</span><b>33.4 h</b><span class="pc">20.8%</span></div>
+            </div>
+          </div>
+          <div class="dtotal"><span>六段之和 = 墙钟，未归类是 step 之间没有埋点的间隙</span><b>160.6 h</b></div>
+        </div>
+
+        <div class="card">
+          <div class="card-h">近 14 天活跃度<em>每日活跃会话数</em></div>
+          <div class="bars">
+            <div class="b hi" style="height:38%"></div>
+            <div class="b hi" style="height:4%"></div>
+            <div class="b hi" style="height:38%"></div>
+            <div class="b hi" style="height:4%"></div>
+            <div class="b hi" style="height:38%"></div>
+            <div class="b hi" style="height:4%"></div>
+            <div class="b hi" style="height:38%"></div>
+            <div class="b hi" style="height:25%"></div>
+            <div class="b hi" style="height:12%"></div>
+            <div class="b hi" style="height:25%"></div>
+            <div class="b hi" style="height:38%"></div>
+            <div class="b hi" style="height:12%"></div>
+            <div class="b hi" style="height:25%"></div>
+            <div class="b hi" style="height:100%"></div>
+          </div>
+          <div class="baxis"><span>14 天前</span><span>峰值 8 个 · 昨天 2 个</span><span>今天</span></div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <div class="note" style="max-width:560px">
+    <b>三块都用圆环的理由：</b>原来 token 是色块列表、花费是四行数字、耗时是五行数字 —— 三块三种视觉，用户要分别学。现在统一成 R040 的圆环：<b>一眼看出比例，图例读绝对值</b>，且和单会话侧栏完全同构，从首页进和从会话进看到的图形是一回事。<br><br>
+    <b>每块的圆心与合计：</b>圆心写「总量 + 名字」，圆环下方一条分隔线写口径或明细。token 环的合计行是四类 token 的拆分（缓存读 / 未缓存输入 / 输出 / 其中推理），花费环的合计行是未计价警示 + 总计，耗时环的合计行解释「未归类」是什么。<br><br>
+    <b>为什么保留 <code>未归类</code> 这一段：</b>六段实测之和只有墙钟的 <b>79.2%</b>，缺的 20.8%（33.4 h）是 step 之间没埋点的间隙。补成一段写明白，比让圆环只填五分之四、留个缺口不说话要好 —— 缺口会被误读成「渲染 bug」。<br><br>
+    <b>为什么 <code>正文生成</code> 只有 0.9%：</b>这是真实值。39.3 亿 token 绝大部分是缓存读取，模型吐字本身很快（1.5 h），时间全花在<b>工具执行</b>（52.9 h，33.0%）和<b>推理</b>（30.4 h，18.9%）上。<br><br>
+    <b>统计范围三档</b>：近 7 天 / 近 30 天 / 全部。切换只重算本地聚合，不发请求。<br><br>
+    <b>没抄插件的部分：</b>日期区间自定义（要日历控件，手机放不下）、技能加载统计与文件活动（要逐会话读 <code>contextActivity</code>，32 次请求）、赠送/充值余额（账户接口，App 无鉴权通道）。
+  </div>
+</div>
+</section>
+
+
+<section>
+<h2><span class="n">3</span>总上下文洞察抽屉 · 「会话」页</h2>
+<div class="note">
+  第二个页签是<b>会话画像列表</b>：按 token 用量排序，一眼看出哪个会话最吃上下文。
+  与 dsh-context 的「会话列表」对应，但只保留手机上看得清的五列。
+</div>
+<div class="row">
+  <div class="phone" data-fixed="1" style="height:1000px">
+    <div class="status"><span>21:04</span><span>5G 87%</span></div>
+    <div class="topbar">
+      <div class="tb-btn" style="opacity:.35">☰</div>
+      <div class="tb-mid" style="opacity:.35"><div class="tb-t1">远程 Web</div><div class="tb-t2">工作区 9 · 会话 32</div></div>
+    </div>
+    <div class="scrim"></div>
+    <div class="sheet">
+      <div class="sh-head">
+        <div class="sh-title">上下文洞察<div class="sh-sub2">按累计 token 排序 · 共 32 个</div></div>
+        <div class="sh-close">✕</div>
+      </div>
+      <div class="sh-tabs">
+        <div class="shtab">总览</div>
+        <div class="shtab on">会话</div>
+      </div>
+      <div class="sh-body">
+
+        <div class="range">
+          <div class="rg on">按用量</div>
+          <div class="rg">按费用</div>
+          <div class="rg">按最近</div>
+        </div>
+
+        <div class="srow top">
+          <div class="rk">1</div>
+          <div class="m"><div class="n">app开发 main</div>
+            <div class="mt"><span class="wsn">bot</span> · <span class="mm">deepseek-v4.1-flash</span> · 10月17日</div></div>
+          <div class="rt"><b>17.7B</b><span>45.0%</span></div>
+        </div>
+        <div class="srow top">
+          <div class="rk">2</div>
+          <div class="m"><div class="n">skill自进</div>
+            <div class="mt"><span class="wsn">dsh-plugin</span> · <span class="mm">qodercn/dfmodel</span> · 10月25日</div></div>
+          <div class="rt"><b>3.67B</b><span>9.3%</span></div>
+        </div>
+        <div class="srow">
+          <div class="rk">3</div>
+          <div class="m"><div class="n">WMG TOKEN计数器（已弃用）</div>
+            <div class="mt"><span class="wsn">vm</span> · <span class="mm">step-5-preview</span> · 10月17日</div></div>
+          <div class="rt"><b>3.21B</b><span>8.2%</span></div>
+        </div>
+        <div class="srow">
+          <div class="rk">4</div>
+          <div class="m"><div class="n">（IROK）HE3 SE电量显示软件</div>
+            <div class="mt"><span class="wsn">Irok</span> · <span class="mm">deepseek-v4.1-flash</span> · 10月15日</div></div>
+          <div class="rt"><b>3.06B</b><span>7.8%</span></div>
+        </div>
+        <div class="srow">
+          <div class="rk">5</div>
+          <div class="m"><div class="n">会话恢复说明 · RemoteWebApp<span class="run">进行中</span></div>
+            <div class="mt"><span class="wsn">bot</span> · <span class="mm">qodercn/dfmodel</span> · 今天 16:10</div></div>
+          <div class="rt"><b>1.76B</b><span>4.5%</span></div>
+        </div>
+        <div class="srow">
+          <div class="rk">6</div>
+          <div class="m"><div class="n">排查会话预检压缩失败原因</div>
+            <div class="mt"><span class="wsn">default-workspace</span> · <span class="mm">deepseek-v4.1-flash</span> · 今天 16:08</div></div>
+          <div class="rt"><b>1.76B</b><span>4.5%</span></div>
+        </div>
+        <div class="srow">
+          <div class="rk">7</div>
+          <div class="m"><div class="n">压缩副作用解决办法</div>
+            <div class="mt"><span class="wsn">model-filter</span> · <span class="mm">qodercn/dfmodel</span> · 10月22日</div></div>
+          <div class="rt"><b>1.62B</b><span>4.1%</span></div>
+        </div>
+        <div class="srow">
+          <div class="rk">8</div>
+          <div class="m"><div class="n">维护会话</div>
+            <div class="mt"><span class="wsn">vm</span> · <span class="mm">qodercn/dfmodel</span> · 今天 08:47</div></div>
+          <div class="rt"><b>1.39B</b><span>3.5%</span></div>
+        </div>
+
+        <div class="more">其余 24 个会话 · 合计 13.1% <span>▾</span></div>
+
+      </div>
+    </div>
+  </div>
+
+  <div class="note" style="max-width:520px">
+    <b>每行长什么样：</b>排名（等宽）+ 标题（单行省略）+ 第二行「工作区 · 模型 · 时间」+ 右侧两位数字（token / 占比）。<br>
+    前两名左侧有 2dp 主色竖条，与首页置顶会话的样式一致。<br><br>
+    <b>三种排序：</b>按用量（默认）/ 按费用 / 按最近。切换只重排本地列表。<br><br>
+    <b>为什么只显示前 8 个：</b>32 个会话里前 8 个占 <b>86.9%</b> 的 token（第一名 <code>app开发 main</code> 独占 45.0%），剩下的长尾对「哪个会话在吃上下文」这个问题没有信息量。点「其余 24 个」展开全量。<br><br>
+    <b>点一行会发生什么：</b>打开该会话。不做「跳转到该会话的单会话侧栏」——用户点了名字就是要进对话，多一层没有意义。
+  </div>
+</div>
+</section>
+
+<section>
+<h2><span class="n">4</span>与 R040 单会话侧栏的关系</h2>
+<div class="note">
+  两个抽屉共存，<b>职责不重叠</b>：首页右滑 = 跨会话总览；会话内点右上角 = 当前会话详情。
+  它们共用同一套卡片、同一套图表色、同一套行样式，用户在哪一层看到的数字口径都一致。
+</div>
+<div class="row" style="margin-top:14px">
+  <div class="jump">
+    <div class="jl">首页</div>
+    <div class="ja">右滑 / 点 ◔ ›</div>
+    <div class="jr"><b>总上下文洞察</b><span>32 个会话的汇总</span></div>
+  </div>
+  <div class="jump">
+    <div class="jl">会话内</div>
+    <div class="ja">点右上角 ›</div>
+    <div class="jr"><b>对话详情侧栏</b><span>当前会话的七段构成 / 费用 / 耗时 / 文件</span></div>
+  </div>
+</div>
+<div class="note" style="margin-top:14px">
+  <b>共性：</b>都是右侧 300~330dp 的浮起面板，20dp 左圆角 + 1dp 描边 + 大投影，顶部都是分段控件，卡片都是 <code>--background</code> 底 + <code>--outlineVariant</code> 描边 + 14dp 圆角。<br>
+  <b>差异：</b>总览没有「文件」页签（跨会话的文件视图没有意义），换成了「会话」页签。
+</div>
+</section>
+
+<section>
+<h2><span class="n">5</span>亮色主题</h2>
+<div class="row" style="margin-top:14px">
+  <div class="phone light" data-fixed="1" style="height:700px">
+    <div class="status"><span>21:04</span><span>5G 87%</span></div>
+    <div class="topbar">
+      <div class="tb-btn">☰</div>
+      <div class="tb-mid"><div class="tb-t1">远程 Web</div><div class="tb-t2">工作区 9 · 会话 32</div></div>
+      <div class="tb-btn" style="color:var(--primary);background:rgba(31,111,235,.12)">◔<span class="badge"></span></div>
+      <div class="tb-btn">⋯</div>
+    </div>
+    <div class="scrim"></div>
+    <div class="sheet">
+      <div class="sh-head">
+        <div class="sh-title">上下文洞察<div class="sh-sub2">32 个会话 · 9 个工作区 · 含子智能体</div></div>
+        <div class="sh-close">✕</div>
+      </div>
+      <div class="sh-tabs">
+        <div class="shtab on">总览</div>
+        <div class="shtab">会话</div>
+      </div>
+      <div class="sh-body">
+        <div class="range">
+          <div class="rg">近 7 天</div><div class="rg on">近 30 天</div><div class="rg">全部</div>
+        </div>
+        <div class="card">
+          <div class="card-h">Token 用量构成<em>按模型</em></div>
+          <div class="donutbox">
+            <div class="dwrap">
+              <svg class="donut" viewBox="0 0 42 42" style="transform:rotate(-90deg)">
+                <circle class="dtrack" cx="21" cy="21" r="15.9155"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#615FFF" stroke-dasharray="37.1100 62.8900" stroke-dashoffset="-0.0000"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#FE9A00" stroke-dasharray="26.3300 73.6700" stroke-dashoffset="-37.1093"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#00C950" stroke-dasharray="17.9600 82.0400" stroke-dashoffset="-63.4440"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#AD46FF" stroke-dasharray="11.4900 88.5100" stroke-dashoffset="-81.4052"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#2B7FFF" stroke-dasharray="7.1000 92.9000" stroke-dashoffset="-92.8978"/>
+              </svg>
+              <div class="dcenter"><b>39.3 亿</b><span>累计 token</span></div>
+            </div>
+            <div class="dlegend">
+              <div class="dleg"><i style="background:#615FFF"></i><span class="nm">deepseek-v4.1-flash</span><b>14.6 亿</b><span class="pc">37.1%</span></div>
+              <div class="dleg"><i style="background:#FE9A00"></i><span class="nm">step-5-preview</span><b>10.4 亿</b><span class="pc">26.3%</span></div>
+              <div class="dleg"><i style="background:#00C950"></i><span class="nm">qfmodel</span><b>7.1 亿</b><span class="pc">18.0%</span></div>
+              <div class="dleg"><i style="background:#AD46FF"></i><span class="nm">qodercn/dfmodel</span><b>4.5 亿</b><span class="pc">11.5%</span></div>
+              <div class="dleg"><i style="background:#2B7FFF"></i><span class="nm">其余 14 个</span><b>2.8 亿</b><span class="pc">7.1%</span></div>
+            </div>
+          </div>
+          <div class="dtotal"><span>缓存读 3.80B · 输出 21.0M</span><b>39.3 亿</b></div>
+        </div>
+        <div class="card">
+          <div class="card-h">耗时分布<em>墙钟累计</em></div>
+          <div class="donutbox">
+            <div class="dwrap">
+              <svg class="donut" viewBox="0 0 42 42" style="transform:rotate(-90deg)">
+                <circle class="dtrack" cx="21" cy="21" r="15.9155"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#2B7FFF" stroke-dasharray="16.5500 83.4500" stroke-dashoffset="-0.0000"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#8E51FF" stroke-dasharray="18.9100 81.0900" stroke-dashoffset="-16.5456"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#F6339A" stroke-dasharray="0.9400 99.0600" stroke-dashoffset="-35.4587"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#FE9A00" stroke-dasharray="9.8600 90.1400" stroke-dashoffset="-36.3997"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#00BBA7" stroke-dasharray="32.9700 67.0300" stroke-dashoffset="-46.2592"/>
+                <circle class="dseg" cx="21" cy="21" r="15.9155" stroke="#90A1B9" stroke-dasharray="20.7700 79.2300" stroke-dashoffset="-79.2272"/>
+              </svg>
+              <div class="dcenter"><b>6 天 16 时</b><span>墙钟合计</span></div>
+            </div>
+            <div class="dlegend">
+              <div class="dleg"><i style="background:#2B7FFF"></i><span class="nm">首字等待</span><b>26.6 h</b><span class="pc">16.6%</span></div>
+              <div class="dleg"><i style="background:#8E51FF"></i><span class="nm">推理</span><b>30.4 h</b><span class="pc">18.9%</span></div>
+              <div class="dleg"><i style="background:#F6339A"></i><span class="nm">正文生成</span><b>1.5 h</b><span class="pc">0.9%</span></div>
+              <div class="dleg"><i style="background:#FE9A00"></i><span class="nm">工具参数</span><b>15.8 h</b><span class="pc">9.9%</span></div>
+              <div class="dleg"><i style="background:#00BBA7"></i><span class="nm">工具执行</span><b>52.9 h</b><span class="pc">33.0%</span></div>
+              <div class="dleg"><i style="background:#90A1B9"></i><span class="nm">未归类</span><b>33.4 h</b><span class="pc">20.8%</span></div>
+            </div>
+          </div>
+          <div class="dtotal"><span>六段之和 = 墙钟</span><b>160.6 h</b></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="note" style="max-width:520px">
+    亮色下只换令牌，结构不动：<code>--background:#F4F7FB</code>、<code>--surface:#FFFFFF</code>、
+    <code>--surfaceVariant:#E9EFF7</code>、<code>--primary:#1F6FEB</code>、<code>--onSurfaceVariant:#45586D</code>、<code>--tertiary:#C08A12</code>。<br><br>
+    <b>圆环在亮色下的两处调整：</b>① 轨道从 <code>rgba(115,115,115,.18)</code> 提到 <code>.24</code>，否则白底上看不见；② 六个段色沿用插件调色板原值（它们在白底上对比度本来就够，7 段里最低的 <code>#F6339A</code> 也有 3.4:1），不另设一套 —— 否则同一份数据在深色/亮色下颜色不一样，用户会以为换了指标。<br><br>
+    顶栏洞察按钮在亮色下底色降到 <code>rgba(31,111,235,.12)</code>，圆点仍是 <code>--primary</code>。
+  </div>
+</div>
+</section>
+
+
+<section>
+<h2><span class="n">6</span>数据来源与可行性</h2>
+<div class="note">
+  这一节是给「能不能做」这个问题的答案。所有数字都来自<b>已经在本机上的数据</b>，不需要为每个会话单独发请求。
+</div>
+<div class="card" style="margin-top:14px;max-width:1100px">
+  <div class="card-h">每一项数据从哪来<em>实测于 32 个可见会话</em></div>
+  <table class="src">
+    <tr><th>界面上的数字</th><th>取哪个投影</th><th>字段</th><th>187 条里有多少条有值</th></tr>
+    <tr><td>累计 token</td><td><code>tokenUsage</code></td><td><code>uncachedInputTokens + outputTokens + cacheReadTokens + cacheWriteTokens</code></td><td>32 / 32</td></tr>
+    <tr><td>缓存占比</td><td><code>tokenUsage</code></td><td><code>cacheReadTokens / 总量</code></td><td>32 / 32</td></tr>
+    <tr><td>预估费用</td><td><code>costUsage</code></td><td><code>cost</code> 累加；<code>byModel</code> 拆模型</td><td>32 / 32</td></tr>
+    <tr><td>其中推理</td><td><code>costUsage</code></td><td><code>reasoning</code></td><td>32 / 32</td></tr>
+    <tr><td>未计价模型</td><td><code>costUsage.byModel</code></td><td>某模型 <code>cost == 0</code> 但 token &gt; 0</td><td>14 个命中（占 token 33.0%）</td></tr>
+    <tr><td>耗时分布</td><td><code>contextTimeline</code></td><td><code>timing.wallMs / ttftMs / reasoningMs / textMs / toolArgMs / toolsMs</code></td><td>32 / 32</td></tr>
+    <tr><td>每日活跃度</td><td><code>session/list</code> 顶层</td><td><code>updatedAt</code> 按日分桶</td><td>32 / 32</td></tr>
+    <tr><td>工作区归属</td><td><code>session/list</code> 顶层</td><td><code>cwd</code> → 已有的 <code>WorkspaceSnapshot</code></td><td>32 / 32</td></tr>
+    <tr><td>模型名</td><td><code>modelSelection</code></td><td><code>model</code></td><td>32 / 32（<code>modelSelection.lastUsed.model</code>；早先误判为「空」，实际有值）</td></tr>
+  </table>
+</div>
+<div class="note" style="margin-top:14px">
+  <b>结论：</b><code>session/list</code> 一次返回 186 条、<b>合计 5.91 MB</b>（每条约 32.5 KB） —— App 已经在拉这份数据（R039 缺陷1 的经验：<b>不能靠轮询它</b>，只能靠 <code>$events</code> 的 <code>api-session/*</code> 增量维护）。<br>
+  所以总览页的正确做法是：<b>在已有的 <code>HomeViewModel</code> 内存列表上做纯函数聚合</b>，不新增任何请求。用户切「近 7 天 / 近 30 天 / 全部」也只是对同一份 <code>SessionSummary</code> 列表重新 <code>filter</code> + <code>sum</code>，零 IO。
+</div>
+<div class="note" style="margin-top:12px">
+  <b>早先的一处误判已纠正：</b>「模型名」原以为拿不到（<code>modelSelection</code> 曾判为空）。实测 <b>32 / 32 全有值</b>，形状是 <code>{"lastUsed":{"provider","model","reasoningEffort"},"next":{…}}</code> —— 取 <code>lastUsed.model</code> 即「当前用的模型」，与 <code>costUsage.byModel</code>（历史累计用过哪些）是两件事。<br>
+  两个选项：（A）会话行第二行改显示<b>花费最高的那个模型</b>（本文推荐，语义是「主要花的钱去哪了」）；（B）不显示模型名，改显示该会话的<b>费用</b>。我选 A，因为它回答了「这个会话为什么贵」。
+</div>
+</section>
+
+<section>
+<h2><span class="n">7</span>定稿结论</h2>
+<div class="decide">
+  <div class="di"><span class="dq">✓</span><div><b>右滑入口 = B 顶栏按钮 + 圆点</b>（2026-10-26 用户拍板）<br>
+    保留右滑手势；顶栏加 ◔ 按钮作为可发现性标识，插在「连接状态」左边。贴边手柄方案作废（会压住每行状态胶囊）。</div></div>
+  <div class="di"><span class="dq">✓</span><div><b>「总览」页做耗时分布</b>，且改为圆环<br>
+    原来是 T074 式的五行数字，现与 token / 花费统一成 R040 圆环（六段 + 未归类补齐 100%）。</div></div>
+  <div class="di"><span class="dq">✓</span><div><b>「会话」页签必需</b><br>
+    见第 3 节：按用量 / 费用 / 最近三档排序，前 8 个会话占 86.9% 的 token。</div></div>
+  <div class="di"><span class="dq">✓</span><div><b>统计范围三档</b>：近 7 天 / 近 30 天 / 全部<br>
+    插件还有自定义日期区间，需日历控件，手机屏放不下，不做。</div></div>
+</div>
+<div class="note" style="margin-top:14px">
+  <b>下一步（T076 生产代码）：</b>① <code>ContextTotals</code> 纯函数聚合（<code>HomeViewModel</code> 内存列表，零 IO）；
+  ② <code>HomeInsightsSheet</code>（右滑手势 + 顶栏按钮共用同一个 <code>sheetOpen</code> 状态）；
+  ③ 复用 R040 的 <code>SegmentDonut</code> / <code>DonutLegendRow</code>，不新写画弧逻辑；
+  ④ 圆点「看过即清」复用 R049 的边沿判定；⑤ 单测覆盖聚合、范围过滤、未计价模型判定，并做变异验证。
+</div>
+</section>
+
+
+<footer>
+  R050 效果图 · 数据均取自本机 2026-10-26 的 <code>session/list</code> 实测值 · 未含任何虚构数字（除活跃度柱高按真实分布换算）
+</footer>
+</div>
+</body>
+</html>

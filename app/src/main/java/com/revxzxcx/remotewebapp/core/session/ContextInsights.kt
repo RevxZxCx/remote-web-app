@@ -468,14 +468,19 @@ internal object ContextInsightsParser {
      * 费用明细。
      *
      * 优先读 `byProviderModel`（键是 `provider:model`，同名模型在不同渠道可以不同价），
-     * 没有它再退回 `byModel`。两者都按金额降序。
+     * **它读不到条目时**再退回 `byModel`。两者都按金额降序。
+     *
+     * 判据是「有没有条目」而不是「键在不在」：实测 `dsh-cost-meter` 有时会下发
+     * `"byProviderModel": {}` 这样的空对象（32 条样本里 2 条如此），此时只判 null
+     * 会选中这个空对象、把同一响应里非空的 `byModel` 整个丢掉 —— 模型的 token 构成
+     * 与未计价警示都会凭空消失，界面上是「有费用、却没有任何模型」。
      */
     private fun parseCost(costObj: JsonObject?): CostDetail? {
         if (costObj == null) return null
         val cost = (costObj["cost"] as? JsonPrimitive)?.content?.toDoubleOrNull() ?: return null
 
         val byProvider = costObj["byProviderModel"] as? JsonObject
-        val source = byProvider ?: (costObj["byModel"] as? JsonObject)
+        val source = byProvider?.takeIf { it.isNotEmpty() } ?: (costObj["byModel"] as? JsonObject)
         val models = source?.entries?.mapNotNull { (name, element) ->
             val bucket = element as? JsonObject ?: return@mapNotNull null
             ModelCost(

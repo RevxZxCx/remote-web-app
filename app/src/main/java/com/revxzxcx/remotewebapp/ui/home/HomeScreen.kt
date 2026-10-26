@@ -1,5 +1,6 @@
 package com.revxzxcx.remotewebapp.ui.home
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -7,11 +8,13 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.animate
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -66,6 +69,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -76,6 +80,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.draw.rotate
@@ -84,6 +89,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -111,6 +121,7 @@ import com.revxzxcx.remotewebapp.ui.theme.LocalStatusRunning
 import com.revxzxcx.remotewebapp.ui.theme.Motion
 import com.revxzxcx.remotewebapp.ui.theme.bubbleShape
 import com.revxzxcx.remotewebapp.ui.theme.pillShape
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /**
@@ -149,8 +160,51 @@ fun HomeScreen(
     // 但若确认框的可见性挂在 remember 上，旋屏会让它静默消失 = 防护被绕过。
     var menuOpen by rememberSaveable { mutableStateOf(false) }
 
-    // 抽屉的开合由 `drawerState` 自己持有，不再镜像到 ViewModel —— 早先那个 `drawerOpen`
-    // 字段没有任何回写点，恒为 false，只会留下错误的心智模型（R003 P3-2）。
+    // R050：洞察抽屉。`insightsReveal` 是 0..1 的**揭开比例**（0 = 完全收起，1 = 完全打开），
+    // 手势在拖动时直接改它、松手后由它决定开还是合，见 [settleInsightsOpen]。
+    //
+    // 为什么不用一个单纯的 Boolean：抽屉要跟手。只记开合就只能「拖完再滑出来」，
+    // 手指和面板会脱节，而这正是原型里明确要求的「跟手、可从任意进度撤销」。
+    //
+    // 为什么用 `remember` 而不是 `rememberSaveable`：旋屏后抽屉自动弹出来盖住首页
+    // 比「要重新划一次」更意外。这与 R033 里归档确认框保持 `remember` 是同一个判断。
+    var insightsReveal by remember { mutableFloatStateOf(0f) }
+    // 页签反而适合 saveable：旋屏后停在原来那页是预期行为。
+    var insightsTab by rememberSaveable { mutableStateOf(InsightsTab.OVERVIEW) }
+    val insightsVisible = insightsReveal > 0f
+
+    // 洞察抽屉的遮罩上限（完全不透明时）。0.42f 与 R040 聊天页侧栏遮罩同一量级：
+    // 两处都是「浮起一层看数据」，不该暗到看不清底下的列表在哪。
+    val ScrimAlpha = 0.42f
+
+    // 左缘手势带的像素宽度：手势层与单测共用 [EdgeWidth] 这一个真值来源。
+    val density = LocalDensity.current
+    val edgeWidthPx = with(density) { EdgeWidth.toPx() }
+
+    // R050：抽屉的开合补间。拖动时 `insightsReveal` 由手势**直接**改写，只有松手与
+    // 按钮点击才走这里；两者不能抢——手势一开拖就 cancel 掉在飞的补间（见下面的
+    // `onReveal`），否则手指在拖、动画在跑，面板会来回抖。
+    var insightsJob by remember { mutableStateOf<Job?>(null) }
+    fun settleInsights(open: Boolean) {
+        insightsJob?.cancel()
+        // 圆点是「有新数据」的提醒，不是常驻状态（R049 用户 m33325 的口径）。
+        // 「打开抽屉即清除」这条**必须挂在 settleInsights 里**，不能只写在按钮回调上：
+        // 抽屉有两条打开路径（顶栏按钮、右滑手势），只标在按钮那条会让手势打开后
+        // 圆点还亮着——用户已经看到了全部数据却被继续提醒，是这个提醒唯一会变成
+        // 噪声的方式。放在这里两条路径自动共享同一处真值。
+        if (open) viewModel.markInsightsSeen()
+        insightsJob = scope.launch {
+            animate(
+                initialValue = insightsReveal,
+                targetValue = if (open) 1f else 0f,
+                animationSpec = tween(durationMillis = Motion.MEDIUM, easing = Motion.Emphasized),
+            ) { value, _ -> insightsReveal = value }
+        }
+    }
+
+    // 系统返回键要**先收抽屉再退首页**（与 R028 ② 给会话抽屉定的规矩一致）：
+    // 抽屉是覆盖层，用户按返回时想关的是它，不是退出这个页面。
+    BackHandler(enabled = insightsVisible) { settleInsights(false) }
     //
     // 系统返回键（R028 ②）：**必须**把 `drawerState` 传给 `ModalDrawerSheet`。material3 1.4.0
     // 只在接收 `DrawerState` 的那个重载里注册预测性返回回调；不带参数的旧重载会给内部
@@ -167,285 +221,361 @@ fun HomeScreen(
             }
         }
     }
-
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        gesturesEnabled = true,
-        drawerContent = {
-            HomeDrawerSheet(drawerState = drawerState) {
-                SessionDrawer(
-                    state = state,
-                    onOpenSession = { session, workspace ->
-                        scope.launch { drawerState.close() }
-                        openSession(session, workspace)
-                    },
-                    onRefreshSessions = viewModel::refreshSessions,
-                    busySessionIds = actionBusy,
-                    onArchive = viewModel::archiveSession,
-                    onUnarchive = viewModel::unarchiveSession,
-                    onPin = viewModel::pinSession,
-                    onUnpin = viewModel::unpinSession,
-                    // 复用 HomeScreen 那一个时钟：抽屉自己再起一个定时器是多余的
-                    // （R006 P3-3），而且两边的 `now` 还不完全同步。
-                    now = now,
-                )
-            }
-        },
-    ) {
-        Scaffold(
-            topBar = {
-                Column {
-                    TopAppBar(
-                        navigationIcon = {
-                            AppIconButton(
-                                onClick = { scope.launch { drawerState.open() } },
-                                contentDescription = "会话列表",
-                            ) {
-                                Icon(Icons.Default.Menu, contentDescription = null)
-                            }
+    // R050：叠层顺序（外 → 内）：手势层 → 会话抽屉 → 洞察抽屉。
+    // 洞察抽屉必须在 `ModalNavigationDrawer` **内部**（内容 lambda 里），原因有两处，
+    // 都是 Compose 的硬约束而非风格选择：
+    //
+    // ① 手势派发顺序：`PointerEventPass.Main` 由叶子向根派发，我们的 `insightsSwipe`
+    //    要抢在被抽屉的 `anchoredDraggable` 之前消费事件，就只能挂在**它内部**。
+    //    挂到外面（包住整个 ModalNavigationDrawer）派发顺序反过来，抽屉会先赢。
+    // ② 绘制位置：抽屉的 Scaffold 在 `ModalNavigationDrawer` 的 content 槽里，
+    //    浮层若与 `ModalNavigationDrawer` 平级、排在它**之后**，就能盖住内容区，
+    //    这也是 ChatScreen 侧栏浮层的既有层次（R040）。
+    Box(modifier = Modifier.fillMaxSize()) {
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            gesturesEnabled = true,
+            drawerContent = {
+                HomeDrawerSheet(drawerState = drawerState) {
+                    SessionDrawer(
+                        state = state,
+                        onOpenSession = { session, workspace ->
+                            scope.launch { drawerState.close() }
+                            openSession(session, workspace)
                         },
-                        title = {
-                            // 两行：App 名 + 副标题。原来顶栏横排的「已连接 5 · 会话 58」
-                            // 与「刷新/诊断/设置/退出」四个文字按钮都收进来——顶栏从
-                            // 4 个文字 + 1 个文字导航挤成 2 个图标 + 1 个菜单。
-                            Column {
-                                Text(
-                                    "远程 Web",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                val subtitle = when {
-                                    state.loading -> "连接中…"
-                                    state.error != null -> state.error.orEmpty()
-                                    state.fromCache -> {
-                                        // R028 ①：副标题不再重复胶囊里的「已连接」，
-                                        // 改成两个只有这里有的事实（工作区数、会话数）。
-                                        val workspaces = state.snapshot?.items?.size ?: 0
-                                        "缓存内容 · 工作区 $workspaces · 会话 ${state.sessions.visible.size}"
-                                    }
-
-                                    else -> {
-                                        val workspaces = state.snapshot?.items?.size ?: 0
-                                        "工作区 $workspaces · 会话 ${state.sessions.visible.size}"
-                                    }
-                                }
-                                Text(
-                                    subtitle,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        },
-                        actions = {
-                            // R028 ①：连接状态收进顶栏，放在「更多」**左边**。
-                            // 原来顶栏下面永远压着一条整宽状态条（ConnectionBanner），
-                            // 不管健不健康都占一整行；现在三级信息密度：
-                            // 圆点（不打扰）→ 胶囊（想知道）→ 面板（要排查）。
-                            //
-                            // 两个 `collectAsState` 刻意写在 `actions` 这个 lambda **里面**
-                            // （R028 审查 P2-3）：`connectionDetails` 跟着每一帧收发更新，
-                            // 若在 `HomeScreen` 函数体顶层读取，Compose 会把失效范围记在
-                            // 整个 HomeScreen 的重组作用域上——每一帧都重建顶栏与列表，
-                            // 恰好抵消了把 `carrier` 与 `connectionDetails` 拆开省下的开销。
-                            // 放进 lambda 后高频失效只波及顶栏右侧这一格。
-                            val carrier by viewModel.carrier.collectAsState()
-                            val connectionDetails by viewModel.connectionDetails.collectAsState()
-                            ConnectionIndicator(
-                                carrier = carrier,
-                                details = connectionDetails,
-                                // 「重新配对」= 退出配对 + 重新配对，是破坏性操作（会擦凭证）。
-                                // AppRoot 层的 onUnpair 只置位 pendingUnpair，确认框由
-                                // AppRoot 统一渲染（R018 P1-1）——面板里不能另开一条不确认的路。
-                                onRepairRequest = onUnpair,
-                                onRetry = viewModel::retry,
-                                onOpenDebug = onOpenDebug,
-                            )
-                            // R017 ①：actions **只准一个**图标按钮。刷新曾是一个独立的
-                            // Refresh 图标钮，与 MoreVert 并排——那样顶栏右端有两个图标，
-                            // 既违反规范也让「刷新」离「退出配对」只差几十像素（误触风险）。
-                            // 现在刷新收进溢出菜单，放在第一项（最高频）。
-                            // （连接指示器不是「图标按钮」，它自带状态语义，R028 明确要求
-                            // 它常驻顶栏。）
-                            OverflowMenuIconButton(
-                                expanded = menuOpen,
-                                onExpandedChange = { menuOpen = it },
-                                contentDescription = "更多",
-                                icon = { Icon(Icons.Default.MoreVert, contentDescription = null) },
-                            ) {
-                                OverflowItem(
-                                    text = "刷新",
-                                    leadingIcon = {
-                                        Icon(Icons.Default.Refresh, contentDescription = null)
-                                    },
-                                ) { viewModel.retry() }
-                                if (onOpenDebug != null) {
-                                    OverflowItem(
-                                        text = "诊断",
-                                        leadingIcon = {
-                                            Icon(Icons.Default.Info, contentDescription = null)
-                                        },
-                                    ) { onOpenDebug() }
-                                }
-                                if (onOpenSettings != null) {
-                                    OverflowItem(
-                                        text = "设置",
-                                        leadingIcon = {
-                                            Icon(Icons.Default.Settings, contentDescription = null)
-                                        },
-                                    ) { onOpenSettings() }
-                                }
-                                // 分隔线 + error 色：破坏性动作不与常用项相邻，
-                                // 也不会和「刷新」只差几十像素。
-                                OverflowMenuDivider()
-                                OverflowItem(
-                                    text = "退出配对",
-                                    leadingIcon = {
-                                        Icon(Icons.Default.ExitToApp, contentDescription = null)
-                                    },
-                                    destructive = true,
-                                ) { onUnpair() }
-                            }
-                        },
+                        onRefreshSessions = viewModel::refreshSessions,
+                        busySessionIds = actionBusy,
+                        onArchive = viewModel::archiveSession,
+                        onUnarchive = viewModel::unarchiveSession,
+                        onPin = viewModel::pinSession,
+                        onUnpin = viewModel::unpinSession,
+                        // 复用 HomeScreen 那一个时钟：抽屉自己再起一个定时器是多余的
+                        // （R006 P3-3），而且两边的 `now` 还不完全同步。
+                        now = now,
                     )
-
-                    // R028 ①：整宽状态条已收进顶栏，只剩缓存提示（它与连接状态可以同时为真，
-                    // 合成一条会丢掉其中一半信息，所以保留独立一条）。
-                    if (state.fromCache) {
-                        CacheNotice("正在同步：当前显示的是上次的缓存内容。")
-                    }
                 }
             },
-            snackbarHost = { SnackbarHost(snackbar) },
-        ) { padding ->
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-            ) {
-                state.error?.let { error ->
-                    // 配色跟随主题（早先是硬编码深红底 + 亮红字，浅色主题下与整个界面不协调）。
-                    Surface(
-                        color = MaterialTheme.colorScheme.errorContainer,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(
-                            Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Scaffold(
+                topBar = {
+                    Column {
+                        TopAppBar(
+                            navigationIcon = {
+                                AppIconButton(
+                                    onClick = { scope.launch { drawerState.open() } },
+                                    contentDescription = "会话列表",
+                                ) {
+                                    Icon(Icons.Default.Menu, contentDescription = null)
+                                }
+                            },
+                            title = {
+                                // 两行：App 名 + 副标题。原来顶栏横排的「已连接 5 · 会话 58」
+                                // 与「刷新/诊断/设置/退出」四个文字按钮都收进来——顶栏从
+                                // 4 个文字 + 1 个文字导航挤成 2 个图标 + 1 个菜单。
+                                Column {
+                                    Text(
+                                        "远程 Web",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    val subtitle = when {
+                                        state.loading -> "连接中…"
+                                        state.error != null -> state.error.orEmpty()
+                                        state.fromCache -> {
+                                            // R028 ①：副标题不再重复胶囊里的「已连接」，
+                                            // 改成两个只有这里有的事实（工作区数、会话数）。
+                                            val workspaces = state.snapshot?.items?.size ?: 0
+                                            "缓存内容 · 工作区 $workspaces · 会话 ${state.sessions.visible.size}"
+                                        }
+
+                                        else -> {
+                                            val workspaces = state.snapshot?.items?.size ?: 0
+                                            "工作区 $workspaces · 会话 ${state.sessions.visible.size}"
+                                        }
+                                    }
+                                    Text(
+                                        subtitle,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            },
+                            actions = {
+                                // R028 ①：连接状态收进顶栏，放在「更多」**左边**。
+                                // 原来顶栏下面永远压着一条整宽状态条（ConnectionBanner），
+                                // 不管健不健康都占一整行；现在三级信息密度：
+                                // 圆点（不打扰）→ 胶囊（想知道）→ 面板（要排查）。
+                                //
+                                // 两个 `collectAsState` 刻意写在 `actions` 这个 lambda **里面**
+                                // （R028 审查 P2-3）：`connectionDetails` 跟着每一帧收发更新，
+                                // 若在 `HomeScreen` 函数体顶层读取，Compose 会把失效范围记在
+                                // 整个 HomeScreen 的重组作用域上——每一帧都重建顶栏与列表，
+                                // 恰好抵消了把 `carrier` 与 `connectionDetails` 拆开省下的开销。
+                                // 放进 lambda 后高频失效只波及顶栏右侧这一格。
+                                val carrier by viewModel.carrier.collectAsState()
+                                val connectionDetails by viewModel.connectionDetails.collectAsState()
+                                // R050：洞察入口插在「连接状态」**左边**。R017 ① 定的
+                                // 「actions 只准一个图标按钮」针对的是功能按钮（刷新/设置那一类）：
+                                // 洞察是全 App 导航级的第二个视图，与左端的 ☰ 是对称的一对，
+                                // 不属于「一堆功能图标挤在右端」那种情况。圆点是提醒不是状态，
+                                // 打开抽屉即灭（[HomeViewModel.markInsightsSeen]）。
+                                InsightsIconButton(
+                                    hasNew = state.insightsDot,
+                                    onClick = {
+                                        // 「看过即清」在 `settleInsights` 里统一处理，
+                                        // 手势与按钮两条路径共享（见那个函数的注释）。
+                                        settleInsights(true)
+                                    },
+                                )
+                                ConnectionIndicator(
+                                    carrier = carrier,
+                                    details = connectionDetails,
+                                    // 「重新配对」= 退出配对 + 重新配对，是破坏性操作（会擦凭证）。
+                                    // AppRoot 层的 onUnpair 只置位 pendingUnpair，确认框由
+                                    // AppRoot 统一渲染（R018 P1-1）——面板里不能另开一条不确认的路。
+                                    onRepairRequest = onUnpair,
+                                    onRetry = viewModel::retry,
+                                    onOpenDebug = onOpenDebug,
+                                )
+                                // R017 ①：actions **只准一个**图标按钮。刷新曾是一个独立的
+                                // Refresh 图标钮，与 MoreVert 并排——那样顶栏右端有两个图标，
+                                // 既违反规范也让「刷新」离「退出配对」只差几十像素（误触风险）。
+                                // 现在刷新收进溢出菜单，放在第一项（最高频）。
+                                // （连接指示器不是「图标按钮」，它自带状态语义，R028 明确要求
+                                // 它常驻顶栏。）
+                                OverflowMenuIconButton(
+                                    expanded = menuOpen,
+                                    onExpandedChange = { menuOpen = it },
+                                    contentDescription = "更多",
+                                    icon = { Icon(Icons.Default.MoreVert, contentDescription = null) },
+                                ) {
+                                    OverflowItem(
+                                        text = "刷新",
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Refresh, contentDescription = null)
+                                        },
+                                    ) { viewModel.retry() }
+                                    if (onOpenDebug != null) {
+                                        OverflowItem(
+                                            text = "诊断",
+                                            leadingIcon = {
+                                                Icon(Icons.Default.Info, contentDescription = null)
+                                            },
+                                        ) { onOpenDebug() }
+                                    }
+                                    if (onOpenSettings != null) {
+                                        OverflowItem(
+                                            text = "设置",
+                                            leadingIcon = {
+                                                Icon(Icons.Default.Settings, contentDescription = null)
+                                            },
+                                        ) { onOpenSettings() }
+                                    }
+                                    // 分隔线 + error 色：破坏性动作不与常用项相邻，
+                                    // 也不会和「刷新」只差几十像素。
+                                    OverflowMenuDivider()
+                                    OverflowItem(
+                                        text = "退出配对",
+                                        leadingIcon = {
+                                            Icon(Icons.Default.ExitToApp, contentDescription = null)
+                                        },
+                                        destructive = true,
+                                    ) { onUnpair() }
+                                }
+                            },
+                        )
+
+                        // R028 ①：整宽状态条已收进顶栏，只剩缓存提示（它与连接状态可以同时为真，
+                        // 合成一条会丢掉其中一半信息，所以保留独立一条）。
+                        if (state.fromCache) {
+                            CacheNotice("正在同步：当前显示的是上次的缓存内容。")
+                        }
+                    }
+                },
+                snackbarHost = { SnackbarHost(snackbar) },
+            ) { padding ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding)
+                        // 右滑开洞察。**必须挂在这里**（Scaffold 内容根），不能挂到外面那个
+                        // 包住 `ModalNavigationDrawer` 的 Box 上——`PointerEventPass.Main`
+                        // 由叶子向根派发，挂在外面时抽屉的 `anchoredDraggable` 先拿到事件，
+                        // 每一次右滑都被它吃掉，洞察永远打不开（真机实测复现过）。
+                        .insightsSwipe(
+                            edgeWidthPx = edgeWidthPx,
+                            reveal = { insightsReveal },
+                            onReveal = { next ->
+                                // 手指接管，把在飞的补间掐掉（否则动画与手指互相覆盖，面板会抖）。
+                                insightsJob?.cancel()
+                                insightsReveal = next
+                            },
+                            onSettle = { open -> settleInsights(open) },
+                        ),
+                ) {
+                    state.error?.let { error ->
+                        // 配色跟随主题（早先是硬编码深红底 + 亮红字，浅色主题下与整个界面不协调）。
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Column(
+                                Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text(
+                                    text = if (state.needsRepair) "配对已失效：$error" else "连接失败：$error",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                )
+                                if (state.needsRepair) {
+                                    Button(onClick = onUnpair) { Text("重新配对") }
+                                } else {
+                                    Button(onClick = viewModel::retry) { Text("重试") }
+                                }
+                            }
+                        }
+                    }
+
+                    // 会话摘要失败不阻塞工作区列表，只挂一条黄条。
+                    state.sessionsError?.let { error ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = "会话列表读取失败：$error",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                TextButton(onClick = viewModel::refreshSessions) { Text("重试") }
+                            }
+                        }
+                    }
+
+                    // 管理动作（归档 / 置顶）失败必须可见：这四类动作成功后 UI 靠
+                    // `workspace/follow` 的 `archived` / `pinned` 增量帧自动更新，
+                    // 失败时什么都不会变——不挂横幅的话用户只以为「点了没反应」。
+                    actionError?.let { error ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = "操作失败：$error",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                TextButton(onClick = viewModel::dismissActionError) { Text("知道了") }
+                            }
+                        }
+                    }
+
+                    when {
+                        // 只有「还没有任何可显示的内容」时才整屏转圈。`warmStart` 刻意不复位
+                        // `loading`（缓存不是权威数据），若这里只看 `loading`，缓存铺好之后屏幕
+                        // 上仍然是转圈——FR-4.3「先出缓存再对齐」等于没实现，而顶部的
+                        // 「当前显示的是上次的缓存内容」横幅还在，画面与文案自相矛盾
+                        //（R006 P1-2；与 `ChatScreen` 的同类条件保持同形）。
+                        state.loading && state.snapshot.isEmpty && state.groups.isEmpty() -> Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(28.dp),
+                                    strokeWidth = 3.dp,
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                Text("正在读取工作区…", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+
+                        // 只有「真的拿到了权威数据」才说没有工作区。`fromCache` 为真时列表来自
+                        // 上一次的缓存，空缓存不能断言「桌面端没有工作区」。
+                        state.snapshot.isEmpty && state.groups.isEmpty() && !state.fromCache -> Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center,
                         ) {
                             Text(
-                                text = if (state.needsRepair) "配对已失效：$error" else "连接失败：$error",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                text = "这个桌面端还没有工作区。",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
                             )
-                            if (state.needsRepair) {
-                                Button(onClick = onUnpair) { Text("重新配对") }
-                            } else {
-                                Button(onClick = viewModel::retry) { Text("重试") }
+                        }
+
+                        else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
+                            items(
+                                items = state.groups,
+                                key = { it.workspace.workspaceId },
+                            ) { group ->
+                                WorkspaceRow(
+                                    group = group,
+                                    expanded = group.workspace.workspaceId in state.expandedWorkspaceIds,
+                                    onToggle = { viewModel.toggleWorkspace(group.workspace.workspaceId) },
+                                    onOpenSession = { openSession(it, group.workspace) },
+                                    now = now,
+                                    busySessionIds = actionBusy,
+                                    onArchive = viewModel::archiveSession,
+                                    onUnarchive = viewModel::unarchiveSession,
+                                    onPin = viewModel::pinSession,
+                                    onUnpin = viewModel::unpinSession,
+                                )
                             }
                         }
                     }
                 }
+            }
+        }
 
-                // 会话摘要失败不阻塞工作区列表，只挂一条黄条。
-                state.sessionsError?.let { error ->
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Row(
-                            Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                text = "会话列表读取失败：$error",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.weight(1f),
-                            )
-                            TextButton(onClick = viewModel::refreshSessions) { Text("重试") }
-                        }
-                    }
-                }
-
-                // 管理动作（归档 / 置顶）失败必须可见：这四类动作成功后 UI 靠
-                // `workspace/follow` 的 `archived` / `pinned` 增量帧自动更新，
-                // 失败时什么都不会变——不挂横幅的话用户只以为「点了没反应」。
-                actionError?.let { error ->
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Row(
-                            Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                text = "操作失败：$error",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.weight(1f),
-                            )
-                            TextButton(onClick = viewModel::dismissActionError) { Text("知道了") }
-                        }
-                    }
-                }
-
-                when {
-                    // 只有「还没有任何可显示的内容」时才整屏转圈。`warmStart` 刻意不复位
-                    // `loading`（缓存不是权威数据），若这里只看 `loading`，缓存铺好之后屏幕
-                    // 上仍然是转圈——FR-4.3「先出缓存再对齐」等于没实现，而顶部的
-                    // 「当前显示的是上次的缓存内容」横幅还在，画面与文案自相矛盾
-                    //（R006 P1-2；与 `ChatScreen` 的同类条件保持同形）。
-                    state.loading && state.snapshot.isEmpty && state.groups.isEmpty() -> Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(28.dp),
-                                strokeWidth = 3.dp,
-                            )
-                            Spacer(Modifier.height(12.dp))
-                            Text("正在读取工作区…", style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-
-                    // 只有「真的拿到了权威数据」才说没有工作区。`fromCache` 为真时列表来自
-                    // 上一次的缓存，空缓存不能断言「桌面端没有工作区」。
-                    state.snapshot.isEmpty && state.groups.isEmpty() && !state.fromCache -> Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = "这个桌面端还没有工作区。",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
-                        )
-                    }
-
-                    else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
-                        items(
-                            items = state.groups,
-                            key = { it.workspace.workspaceId },
-                        ) { group ->
-                            WorkspaceRow(
-                                group = group,
-                                expanded = group.workspace.workspaceId in state.expandedWorkspaceIds,
-                                onToggle = { viewModel.toggleWorkspace(group.workspace.workspaceId) },
-                                onOpenSession = { openSession(it, group.workspace) },
-                                now = now,
-                                busySessionIds = actionBusy,
-                                onArchive = viewModel::archiveSession,
-                                onUnarchive = viewModel::unarchiveSession,
-                                onPin = viewModel::pinSession,
-                                onUnpin = viewModel::unpinSession,
-                            )
-                        }
-                    }
-                }
+        // 遮罩 + 抽屉本体。与 Scaffold 平级（同在 Box 内），否则会被 padding 让出一截。
+        if (insightsVisible) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        // 遮罩透明度跟着揭开比例走：拖到一半时遮罩也是半暗，
+                        // 用户能同时看见「正在揭开什么」和「下面是什么」。
+                        .background(Color.Black.copy(alpha = ScrimAlpha * insightsReveal))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { settleInsights(false) }
+                        .semantics { contentDescription = "关闭总上下文洞察" },
+                )
+                HomeInsightsSheet(
+                    totals = state.insights,
+                    range = state.insightsRange,
+                    onRangeChange = viewModel::setInsightsRange,
+                    tab = insightsTab,
+                    onTabChange = { insightsTab = it },
+                    loading = state.sessionsLoading,
+                    onClose = { settleInsights(false) },
+                    onOpenSession = { sessionId ->
+                        // 点一行 → 关抽屉 + 打开那个会话。抽屉不关的话，
+                        // 用户进入聊天页后返回会看到它还开着，像没离开过首页。
+                        settleInsights(false)
+                        state.sessions.items
+                            .firstOrNull { it.sessionId == sessionId }
+                            ?.let { openSession(it, null) }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .graphicsLayer { translationX = (1f - insightsReveal) * size.width },
+                )
             }
         }
     }
