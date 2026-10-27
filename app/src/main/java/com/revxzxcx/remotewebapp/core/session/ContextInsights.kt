@@ -1,5 +1,7 @@
 package com.revxzxcx.remotewebapp.core.session
 
+import java.time.LocalDate
+import java.time.format.DateTimeParseException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -72,6 +74,18 @@ data class ContextInsights(
      * 「LLM / 工具」两段（`sessionStats` 能给出这两个数）。null 表示一个耗时数字都没有。
      */
     val timing: TurnTiming? = null,
+    /**
+     * 按本地日（`yyyy-MM-dd`）拆分的请求数，来自 `contextActivity.days[day].requests`。
+     *
+     * 这就是 dsh-context 插件里「步数」指标的口径 —— 插件自己的全局页是逐个会话读
+     * `contextActivity` 得来的，一天一条。实测 32 条主会话 32/32 命中。
+     *
+     * **不是** [steps] 那种累计值：`sessionStats.steps` 与会话内 `counts.steps` 都是整个
+     * 会话跑到现在为止的总数，没有按天拆分，拿它画柱状图只能画出一根柱子。
+     *
+     * 空 map 表示这条会话没有 `contextActivity` 投影（未装插件，或这个版本没这个键）。
+     */
+    val dailyRequests: Map<String, Int> = emptyMap(),
 ) {
 
     /** 窗口占用比例，0..1。窗口缺失或为 0 时返回 null（不显示进度条）。 */
@@ -366,6 +380,12 @@ internal object ContextInsightsParser {
 
     /** 投影键名。放常量是为了 UI 与 `session/control` 帧分发共用同一串。 */
     const val KEY_TIMELINE = "contextTimeline"
+
+    /** `contextActivity` 投影（插件 `dsh-context` 的按天活动记录）。 */
+    const val KEY_ACTIVITY = "contextActivity"
+
+    /** `contextActivity.days` 的键形态；只认这个形状，别的一律跳过。 */
+    private val DAY_KEY = Regex("""\d{4}-\d{2}-\d{2}""")
     const val KEY_BREAKDOWN = "contextBreakdown"
     const val KEY_TOKEN_USAGE = "tokenUsage"
     const val KEY_COST = "costUsage"
@@ -381,6 +401,7 @@ internal object ContextInsightsParser {
         val costObj = values[KEY_COST] as? JsonObject
         val pressureObj = values[KEY_PRESSURE] as? JsonObject
         val statsObj = values[KEY_SESSION_STATS] as? JsonObject
+        val activityObj = values[KEY_ACTIVITY] as? JsonObject
 
         // 六个键一个都没有：这不是「会话刚建」，是「桌面端不认识这套投影」。
         // 返回 null 让 UI 说「读不到」，而不是渲染一排 0 冒充正常。
@@ -461,7 +482,51 @@ internal object ContextInsightsParser {
             costDetail = parseCost(costObj),
             pressure = pressureObj?.long("pressureTokens")?.takeIf { it > 0 },
             timing = parseTiming(timeline?.get("timing") as? JsonObject, statsObj),
+            dailyRequests = parseDailyRequests(activityObj),
         )
+    }
+
+    /**
+     * `contextActivity.days` → `Map<yyyy-MM-dd, requests>`。
+     *
+     * 键名 `days` 下每天一项，实测条目形如
+     * `{"2026-10-26": {"tokens": 29758802, "requests": 204, "cost": {...}, "skills": [...]}}`。
+     *
+     * 只取 `requests`：那正是插件「步数」指标的口径（插件源码
+     * `let u=e=>r===`sessions`?e.sessions:e.requests`）。`tokens` 与 `cost` 这里不要 ——
+     * 聚合层已经用全局 `tokenUsage` / `costUsage` 的累计值，再按天累加一次只会得到
+     * 两套对不上的数（实测同一批会话按天累加 tokens 与全局累计差 20%）。
+     *
+     * 非对象、非正数、键不是**真实存在的** `yyyy-MM-dd` 的条目一律跳过：宁可少一天，
+     * 也不要把脏数据画成一根柱子。
+     *
+     * ## 为什么光有正则不够
+     * `DAY_KEY` 只校验形状，`2026-13-99` 照样匹配（13 月 99 日）。这种键会被
+     * [com.revxzxcx.remotewebapp.core.session.ContextTotalsCalculator] 里的日期循环
+     * 静默丢弃——柱子画不出来，但这个值却进了图例合计，两边对不上。所以这里用
+     * [LocalDate.parse] 真正解析一次：它能拒掉 `2026-13-99`、`2026-02-30` 这类
+     * 形状合法而日历上不存在的日期。
+     */
+    private fun parseDailyRequests(activityObj: JsonObject?): Map<String, Int> {
+        val days = activityObj?.get("days") as? JsonObject ?: return emptyMap()
+        val out = HashMap<String, Int>(days.size)
+        for ((day, element) in days.entries) {
+            if (!DAY_KEY.matches(day)) continue
+            if (!isRealDate(day)) continue
+            val entry = element as? JsonObject ?: continue
+            val requests = entry.intOrZero("requests")
+            if (requests <= 0) continue
+            out[day] = requests
+        }
+        return out
+    }
+
+    /** 键是不是日历上真实存在的一天（拒掉 `2026-13-99` 这类形状合法的假日期）。 */
+    private fun isRealDate(day: String): Boolean = try {
+        LocalDate.parse(day)
+        true
+    } catch (_: DateTimeParseException) {
+        false
     }
 
     /**
@@ -640,7 +705,15 @@ internal fun replayPendingContext(snapshot: JsonObject, pending: JsonObject): Js
     return merged
 }
 
-/** 侧边栏关心的六个投影键。顺序无所谓，但必须与 [ContextInsightsParser] 读的那批完全一致。 */
+/**
+ * 上下文投影的七个键。顺序无所谓，但必须与 [ContextInsightsParser] 读的那批完全一致。
+ *
+ * `contextActivity` 是 R052 加进来的（首页活跃度按天步数用它）。它唯一的生产消费者是首页
+ * 走 `session/list` 的全量路径，不经过这张表；但**只要 [ContextInsightsParser] 读了它**，
+ * 这里就必须登记——否则增量帧会在 [mergeContextValue] 的口子被静默丢掉、
+ * [rebuildContextValues] 也会把它从重建结果里剔掉，成为「解析器认识、分发不认识」的不一致
+ * （R052 第二轮审查 P3）。
+ */
 internal val CONTEXT_PROJECTION_KEYS: Set<String> = setOf(
     ContextInsightsParser.KEY_TIMELINE,
     ContextInsightsParser.KEY_BREAKDOWN,
@@ -648,6 +721,7 @@ internal val CONTEXT_PROJECTION_KEYS: Set<String> = setOf(
     ContextInsightsParser.KEY_COST,
     ContextInsightsParser.KEY_PRESSURE,
     ContextInsightsParser.KEY_SESSION_STATS,
+    ContextInsightsParser.KEY_ACTIVITY,
 )
 
 /** 便于 UI 直接取：投影里有没有上下文数据。 */

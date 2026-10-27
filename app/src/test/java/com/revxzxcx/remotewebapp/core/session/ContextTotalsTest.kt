@@ -34,6 +34,15 @@ class ContextTotalsTest {
     private fun values(json: String): JsonObject =
         Json.parseToJsonElement(json) as JsonObject
 
+    /**
+     * 把几段报文拼成一个 projections.values。
+     *
+     * 不能写 `values(a) + values(b)`：`JsonObject` 虽然是 `Map`，但
+     * `Map.plus` 返回的是普通 `Map`，类型对不上 `SessionUsage.of` 要的 `JsonObject?`。
+     */
+    private fun merged(vararg jsons: String): JsonObject =
+        JsonObject(jsons.flatMap { values(it).entries }.associate { it.key to it.value })
+
     // ── 真实报文片段（每段都是 session/list 里原样摘出来的） ────────────────
 
     /** 实测 `tokenUsage`（一个真实主会话）。 */
@@ -80,6 +89,23 @@ class ContextTotalsTest {
         }
     """
 
+    /**
+     * 实测 `contextActivity`（一个真实主会话，只摘两天）。
+     *
+     * `days` 的每一项都带 `cost` / `skills` / `requests` / `tokens` 四个键，
+     * R052 的步数指标只取 `requests`——插件里「步数」就是这个字段。
+     */
+    private fun activityJson(vararg days: Pair<String, Int>) = buildString {
+        append("""{"contextActivity":{"days":{""")
+        days.forEachIndexed { index, (day, requests) ->
+            if (index > 0) append(",")
+            append(
+                """"$day":{"cost":{"total":0.1},"skills":[],"requests":$requests,"tokens":1000}""",
+            )
+        }
+        append("}}}")
+    }
+
     private fun summary(
         id: String,
         updatedAt: Long,
@@ -96,6 +122,19 @@ class ContextTotalsTest {
 
     private val now = 1_790_000_000_000L
     private val day = InsightsRange.MILLIS_PER_DAY
+
+    /** 与 [ContextTotalsCalculator] 同口径：把某个时刻所在的本地日格式化成 `yyyy-MM-dd`。 */
+    private fun dayLabel(millis: Long): String {
+        val calendar = java.util.Calendar.getInstance()
+        calendar.timeInMillis = millis
+        return String.format(
+            java.util.Locale.US,
+            "%04d-%02d-%02d",
+            calendar.get(java.util.Calendar.YEAR),
+            calendar.get(java.util.Calendar.MONTH) + 1,
+            calendar.get(java.util.Calendar.DAY_OF_MONTH),
+        )
+    }
 
     // ── InsightsRange ──────────────────────────────────────────────────────
 
@@ -463,6 +502,78 @@ class ContextTotalsTest {
         val all = ContextTotalsCalculator.compute(sessions, usages, InsightsRange.ALL, now)
         assertEquals(2, all.sessionCount)
         assertEquals(2, all.activity.sumOf { it.sessions })
+    }
+
+    @Test
+    fun activityCarriesStepsFromContextActivityRequests() {
+        // 「步数」= contextActivity.days[day].requests，与 dsh-context 插件同一口径
+        // （插件源码 `r === "sessions" ? e.sessions : e.requests`）。
+        // 注意：**不是** sessionStats.steps —— 那是整条会话的累计值，没有按天拆分。
+        val dayA = dayLabel(now)
+        val dayB = dayLabel(now - day)
+        val usage = SessionUsage.of(
+            "a",
+            merged(tokenUsageJson(), activityJson(dayA to 120, dayB to 80)),
+        )!!
+        assertEquals(mapOf(dayA to 120, dayB to 80), usage.dailyRequests)
+
+        val totals = ContextTotalsCalculator.compute(
+            listOf(summary("a", now)),
+            mapOf("a" to usage),
+            InsightsRange.ALL, now,
+        )
+        assertEquals(120, totals.activity.first { it.day == dayA }.steps)
+        assertEquals(80, totals.activity.first { it.day == dayB }.steps)
+    }
+
+    @Test
+    fun stepsSumAcrossSessionsWhileSessionsCountStaysOne() {
+        // 同一天两条会话各有请求 → 步数相加，会话数仍是 2。
+        // 这两个口径本来就不同：一天可以只有 2 条会话却跑了几千步。
+        val dayA = dayLabel(now)
+        val a = SessionUsage.of("a", merged(tokenUsageJson(), activityJson(dayA to 30)))!!
+        val b = SessionUsage.of("b", merged(tokenUsageJson(), activityJson(dayA to 12)))!!
+        val totals = ContextTotalsCalculator.compute(
+            listOf(summary("a", now), summary("b", now)),
+            mapOf("a" to a, "b" to b),
+            InsightsRange.ALL, now,
+        )
+        val bucket = totals.activity.first { it.day == dayA }
+        assertEquals(42, bucket.steps)
+        assertEquals(2, bucket.sessions)
+    }
+
+    @Test
+    fun sessionsWithoutContextActivityHaveZeroSteps() {
+        // 没装 dsh-context 插件时读不到 contextActivity → 步数全是 0。
+        // 这时界面切到「会话」口径仍然可用（updatedAt 分桶是核心数据），
+        // 所以这里要求 0 而不是 null：柱状图上「没活动」就是 0 高。
+        val usage = SessionUsage.of("a", values(tokenUsageJson()))!!
+        val totals = ContextTotalsCalculator.compute(
+            listOf(summary("a", now)),
+            mapOf("a" to usage),
+            InsightsRange.ALL, now,
+        )
+        assertEquals(0, totals.activity.sumOf { it.steps })
+        assertEquals(1, totals.activity.sumOf { it.sessions })
+    }
+
+    @Test
+    fun dirtyActivityEntriesAreSkipped() {
+        // 日期键不是 yyyy-MM-dd、条目不是对象、requests <= 0 —— 一律跳过。
+        // 宁可少一天，也不要在图上画一根来路不明的柱子。
+        val good = dayLabel(now)
+        val json = """
+            {"contextActivity":{"days":{
+              "$good":{"requests":50},
+              "not-a-date":{"requests":99},
+              "2026-13-99":{"requests":99},
+              "empty":{},
+              "negative":{"requests":-5}
+            }}}
+        """.trimIndent()
+        val usage = SessionUsage.of("a", merged(tokenUsageJson(), json))!!
+        assertEquals(mapOf(good to 50), usage.dailyRequests)
     }
 
     @Test

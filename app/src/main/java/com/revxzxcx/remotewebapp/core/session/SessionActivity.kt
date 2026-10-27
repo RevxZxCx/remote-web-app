@@ -60,6 +60,36 @@ enum class SessionStatus {
 }
 
 /**
+ * 状态之间的「谁更该被看见」排序，数字越大越优先。
+ *
+ * ## 为什么需要把优先级抽成一个数（R052）
+ *
+ * 工作区折叠后要把它下面所有会话的状态折叠成**一个**点（[com.remotewebapp] 的
+ * `WorkspaceGroup.unreadStatus`），那就得能比较「红点和琥珀点哪个先说」。直接把
+ * [statusOf] 里的 `when` 顺序抄一遍会变成两处真理，改一处忘另一处就出现「子行是红的、
+ * 工作区是绿的」这种自相矛盾。所以优先级只在这里定义一次，[statusOf] 的书写顺序也必须
+ * 与之一致（单测 `statusRankMatchesStatusOfOrder` 守着这件事）。
+ *
+ * 取值本身无意义，只用于比较；[SessionStatus.Idle] 恒为 0，于是空工作区自然落到「不画点」。
+ *
+ * ## 为什么 [SessionStatus.Attention] 仍排在 [SessionStatus.Failed] 之前
+ *
+ * R052 代码审查曾建议把 `Failed` 提到最前，理由是「失败是终态、更不可恢复」。
+ * 这条建议**没有采纳**，因为顺序不是可以独立拍板的偏好：它必须与 [statusOf] 一致，
+ * 而 [statusOf] 里 `awaitingAttention` 高于 `failureUnread` 是 R049 用户 m32994
+ * 定下的——agent 挂起等你回答时这一轮并没有结束，把 running/failure 放前面会让
+ * 「需要你继续」这一档在提问场景下永远不出现。若这里单独把 Failed 提上去，就会出现
+ * **折叠态是红点、展开后子行是琥珀点**的自相矛盾，比「哪个更严重」的取舍更伤。
+ */
+internal fun unreadRank(status: SessionStatus): Int = when (status) {
+    SessionStatus.Attention -> 4
+    SessionStatus.Ongoing -> 3
+    SessionStatus.Failed -> 2
+    SessionStatus.Done -> 1
+    SessionStatus.Idle -> 0
+}
+
+/**
  * 从一条列表摘要推断它该显示的状态。
  *
  * 判据顺序就是优先级，与官方 `sessionStatuses` 一致（asar 偏移 49084078 起，

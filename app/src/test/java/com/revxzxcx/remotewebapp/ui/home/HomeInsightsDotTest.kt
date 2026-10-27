@@ -109,4 +109,16 @@ class HomeInsightsDotTest {
         // 费用读不到不影响会话数维度的判定。
         assertTrue(shouldLightInsightsDot(sessions = 33, costCents = -1, seenSessions = 32, seenCostCents = -1))
     }
+
+    @Test
+    fun activityMetricDefaultsToSteps() {
+        // 用户 m37499：「将步数作为默认的展示逻辑」。
+        // 默认值只在 ActivityMetric.default 这一处定义（HomeScreen 从它取值），
+        // 所以这条纯 JVM 断言就足以守住产品口径——不需要挂 Compose 宿主。
+        assertEquals(ActivityMetric.STEPS, ActivityMetric.default)
+        assertEquals(ActivityMetric.STEPS, ActivityMetric.ordered.first())
+        // 两个口径都在，且顺序决定渲染顺序。
+        assertEquals(listOf(ActivityMetric.STEPS, ActivityMetric.SESSIONS), ActivityMetric.ordered)
+    }
+
 }

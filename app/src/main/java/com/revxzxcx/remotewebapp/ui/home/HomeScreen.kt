@@ -100,6 +100,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
+import com.revxzxcx.remotewebapp.core.session.SessionStatus
 import com.revxzxcx.remotewebapp.core.session.statusOf
 import com.revxzxcx.remotewebapp.core.workspace.Workspace
 import com.revxzxcx.remotewebapp.ui.common.AppIconButton
@@ -169,6 +170,10 @@ fun HomeScreen(
     var insightsReveal by remember { mutableFloatStateOf(0f) }
     // 页签反而适合 saveable：旋屏后停在原来那页是预期行为。
     var insightsTab by rememberSaveable { mutableStateOf(InsightsTab.OVERVIEW) }
+    // 活跃度指标。默认 STEPS（用户 m37499「将步数作为默认的展示逻辑」）。
+    // 用 rememberSaveable 而不是提到 ViewModel：它是纯视图偏好，不参与聚合，
+    // 也不该跨会话/冷启动留下来——每次进首页回到默认口径最不容易误解。
+    var activityMetric by rememberSaveable { mutableStateOf(ActivityMetric.default) }
     val insightsVisible = insightsReveal > 0f
 
     // 洞察抽屉的遮罩上限（完全不透明时）。0.42f 与 R040 聊天页侧栏遮罩同一量级：
@@ -639,6 +644,8 @@ fun HomeScreen(
                     onRangeChange = viewModel::setInsightsRange,
                     tab = insightsTab,
                     onTabChange = { insightsTab = it },
+                    activityMetric = activityMetric,
+                    onActivityMetricChange = { activityMetric = it },
                     loading = state.sessionsLoading,
                     onClose = { settleInsights(false) },
                     onOpenSession = { sessionId ->
@@ -779,6 +786,19 @@ private fun WorkspaceRow(
                     if (group.missingIds.isNotEmpty()) {
                         StatPill("${group.missingIds.size}", "读不到", warn = true)
                     }
+                }
+            }
+            // R052（用户 m37463 第 2 条）：工作区折叠时，把子行里最强的那个未读状态
+            // 折叠成一个点挂在这里——折叠把子行整块收进 AnimatedVisibility，子行
+            // 自己的点跟着看不见，提醒就失效了。
+            //
+            // 只在折叠时画：展开时子行各画各的，工作区再画一个就是同一条信息说两遍，
+            // 而且用户一眼能看到是哪个子行在提醒。判据见 `WorkspaceGroup.unreadStatus`。
+            if (!expanded) {
+                val unread = group.unreadStatus
+                if (unread != SessionStatus.Idle) {
+                    Spacer(Modifier.width(10.dp))
+                    SessionStatusDot(status = unread, failureReason = group.unreadFailureReason)
                 }
             }
         }

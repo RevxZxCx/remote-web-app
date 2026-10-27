@@ -81,6 +81,8 @@ data class SessionUsage(
     /** 轮数与步数（`sessionStats` 的 `turns` / `steps`）。 */
     val turns: Int = 0,
     val steps: Int = 0,
+    /** 按本地日拆分的请求数（`contextActivity.days[day].requests`），用来画活跃度柱子。 */
+    val dailyRequests: Map<String, Int> = emptyMap(),
 ) {
     companion object {
         /**
@@ -104,6 +106,7 @@ data class SessionUsage(
                 timing = insights.timing,
                 turns = insights.turns,
                 steps = insights.steps,
+                dailyRequests = insights.dailyRequests,
             )
         }
     }
@@ -125,6 +128,17 @@ data class DayActivity(
     val day: String,
     /** 这一天有多少条会话被更新过。 */
     val sessions: Int,
+    /**
+     * 这一天跑了多少步（请求数），来自各会话 `contextActivity.days[day].requests` 之和。
+     *
+     * 与 [sessions] 是**两个不同口径**，不要互相换算：一天可以只有 2 条会话却跑了 2000 步。
+     * 插件把这两个指标做成可切换的（`ov.heat.metric`），App 也照做，并且**默认用步数** ——
+     * 用户 m37499 明确要求「将步数作为默认的展示逻辑」。
+     *
+     * 没有任何会话在这一天有 `contextActivity` 时为 0（不是 null）：柱子高度需要它，
+     * 「这一天没活动」与「这一天读不到活动」在柱状图上没有区别，都是 0 高。
+     */
+    val steps: Int = 0,
 )
 
 /**
@@ -403,24 +417,18 @@ object ContextTotalsCalculator {
             unpricedTokens = unpriced.sumOf { it.tokens },
             unpricedModels = unpriced.size,
             timing = timing,
-            activity = activityOf(sessions, now),
+            activity = activityOf(sessions, usages, now),
             ranking = ranked,
             turns = turns,
             steps = steps,
         )
     }
 
-    /**
-     * 近 [ACTIVITY_DAYS] 天的活跃度：每天有多少条会话被更新过。
-     *
-     * 日期分桶走本地时区（用户在哪个时区就该看到哪一天），实现用
-     * [java.util.Calendar] 而不是 `LocalDate`——工程 minSdk 21 且没有开
-     * desugaring，`java.time` 在 Android 24 以下不可用。
-     *
-     * 边界：超出窗口的会话不计；窗口内没有会话的那一天照样出现（计数 0），
-     * 否则柱子会因「没数据的那天被抽掉」而让横轴时间间距失真。
-     */
-    fun activityOf(sessions: List<SessionSummary>, now: Long): List<DayActivity> {
+    fun activityOf(
+        sessions: List<SessionSummary>,
+        usages: Map<String, SessionUsage>,
+        now: Long,
+    ): List<DayActivity> {
         val calendar = java.util.Calendar.getInstance()
         // 起点：今天往前推 ACTIVITY_DAYS-1 天的 00:00:00.000。
         calendar.timeInMillis = now
@@ -456,6 +464,26 @@ object ContextTotalsCalculator {
             counts[dayStart] = (counts[dayStart] ?: 0) + 1
         }
 
+        // 按天的步数：来自 `contextActivity.days`，**与 updatedAt 分桶无关** ——
+        // 一条会话可以在 5 天前更新过、却在这 5 天里天天都有请求。所以这张表要独立
+        // 按日期字符串累加，不能跟着上面的 `counts` 走。
+        //
+        // 键是 `yyyy-MM-dd` 字符串而不是毫秒：服务端给的就是字符
+        // 键，换算成毫秒反而要依赖时区假设，且夏令时那天会错位。
+        //
+        // 遍历 [sessions] 而不是 `usages.values`：后者含**子代理会话**（`SessionListParser.parse`
+        // 对 `session/list` 返回的每一条都尝试切出用量，含 `isSubagent` 的那些），而同一张
+        // 卡片左边的「会话数」来自 [sessions]（已过滤掉子代理与空会话）。两者分母不同会让
+        // 用户读成矛盾：抽屉副标题说「32 个会话」，活跃度却把另外 140 条子代理的请求也算了
+        // 进去。宁可少算，也不要两个数字互相打架。——R052 代码审查 P2-3。
+        val stepsByDay = HashMap<String, Int>()
+        for (session in sessions) {
+            val usage = usages[session.sessionId] ?: continue
+            for ((day, steps) in usage.dailyRequests) {
+                stepsByDay[day] = (stepsByDay[day] ?: 0) + steps
+            }
+        }
+
         val out = ArrayList<DayActivity>(ACTIVITY_DAYS)
         for (i in 0 until ACTIVITY_DAYS) {
             val dayStart = dayStarts[i]
@@ -467,7 +495,11 @@ object ContextTotalsCalculator {
                 calendar.get(java.util.Calendar.MONTH) + 1,
                 calendar.get(java.util.Calendar.DAY_OF_MONTH),
             )
-            out += DayActivity(day = label, sessions = counts[dayStart] ?: 0)
+            out += DayActivity(
+                day = label,
+                sessions = counts[dayStart] ?: 0,
+                steps = stepsByDay[label] ?: 0,
+            )
         }
         return out
     }

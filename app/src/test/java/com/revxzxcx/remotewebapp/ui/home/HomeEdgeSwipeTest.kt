@@ -194,4 +194,49 @@ class HomeEdgeSwipeTest {
         // 默认参数不能被 COLLAPSE 的行为污染。
         assertEquals(settleAfterDrag(true, 0.5f, 0f), settleAfterDrag(true, 0.5f, 0f, SwipeMode.REVEAL))
     }
+
+    // ── R052 需求 1：轴向锁定 ────────────────────────────────────────────
+    //
+    // 用户 m37463 第 1 条：洞察抽屉展开时上下拖动会被判成右滑，抽屉被收起、内容滚不动。
+    // 根因是从前直接用 horizontalDrag —— 它只按水平轴判断是否越过 touchSlop，
+    // 手指上下滑时一点水平抖动越限就被接管。这组用例守的是「先判主轴」。
+
+    @Test
+    fun pureVerticalDragNeverClaimsTheGesture() {
+        // 竖直远大于水平：让给滚动容器。
+        assertEquals(DragAxis.VERTICAL, dragAxis(dx = 3f, dy = 40f, slopPx = 8f))
+    }
+
+    @Test
+    fun pureHorizontalDragClaimsTheGesture() {
+        assertEquals(DragAxis.HORIZONTAL, dragAxis(dx = 40f, dy = 3f, slopPx = 8f))
+    }
+
+    @Test
+    fun tinyMovementStaysUndecided() {
+        // 还没越过 touchSlop，方向是随机的，不能提前选边。
+        assertEquals(DragAxis.UNDECIDED, dragAxis(dx = 2f, dy = 3f, slopPx = 8f))
+    }
+
+    @Test
+    fun diagonalDragPicksTheDominantAxis() {
+        // 用 hypot 判「是否越过 slop」、用 abs 比较判主轴：
+        // 斜向滑动时不能只看单轴是否越限就选边。
+        assertEquals(DragAxis.HORIZONTAL, dragAxis(dx = 30f, dy = 10f, slopPx = 8f))
+        assertEquals(DragAxis.VERTICAL, dragAxis(dx = 10f, dy = 30f, slopPx = 8f))
+    }
+
+    @Test
+    fun aTieBetweenAxesGoesToScrolling() {
+        // 平局判纵向（让给滚动）：滚动是常态操作，收起还有返回键/遮罩/顶栏三条路。
+        assertEquals(DragAxis.VERTICAL, dragAxis(dx = 20f, dy = 20f, slopPx = 8f))
+    }
+
+    @Test
+    fun slopIsMeasuredOnTheDiagonalNotOnOneAxis() {
+        // dx=7/dy=7 单轴都不越 8 的 slop，但 hypot≈9.9 越了 → 必须已经判定方向。
+        // 若用 max(abs(dx),abs(dy)) 判，这里会停在 UNDECIDED。
+        assertEquals(DragAxis.UNDECIDED, dragAxis(dx = 5f, dy = 5f, slopPx = 8f))
+        assertEquals(DragAxis.VERTICAL, dragAxis(dx = 7f, dy = 7f, slopPx = 8f))
+    }
 }

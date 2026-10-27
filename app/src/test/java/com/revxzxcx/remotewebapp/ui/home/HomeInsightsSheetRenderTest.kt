@@ -87,7 +87,9 @@ class HomeInsightsSheetRenderTest {
             otherMs = 51_000_000L,
             detailAvailable = true,
         ),
-        activity = List(14) { DayActivity("2026-10-${it + 1}", it % 4) },
+        // 会话数与步数刻意不同（同一天可以只有 2 条会话却跑了几千步），
+        // 这样切换指标时柱高必须跟着变，切换是真生效而不是共用同一个值。
+        activity = List(14) { DayActivity("2026-10-${it + 1}", sessions = it % 4, steps = (it + 1) * 100) },
         ranking = listOf(
             SessionRank(
                 sessionId = "s1",
@@ -122,6 +124,8 @@ class HomeInsightsSheetRenderTest {
         onClose: () -> Unit = {},
         onRangeChange: (InsightsRange) -> Unit = {},
         onTabChange: (InsightsTab) -> Unit = {},
+        activityMetric: ActivityMetric = ActivityMetric.STEPS,
+        onActivityMetricChange: (ActivityMetric) -> Unit = {},
         onOpenSession: (String) -> Unit = {},
     ) {
         Box(Modifier.height(900.dp)) {
@@ -131,6 +135,8 @@ class HomeInsightsSheetRenderTest {
                 onRangeChange = onRangeChange,
                 tab = tab,
                 onTabChange = onTabChange,
+                activityMetric = activityMetric,
+                onActivityMetricChange = onActivityMetricChange,
                 loading = loading,
                 onClose = onClose,
                 onOpenSession = onOpenSession,
@@ -163,7 +169,9 @@ class HomeInsightsSheetRenderTest {
         compose.setContent { Sheet(detailedTotals()) }
         compose.waitForIdle()
         compose.onNodeWithText("总览").assertExists()
-        compose.onNodeWithText("会话").assertExists()
+        // 用 contentDescription 而不是文本：活跃度卡的指标切换里也有「会话」二字，
+        // 按文本找会同时命中页签和指标按钮。
+        compose.onNodeWithContentDescription("会话 页签选项").assertExists()
     }
 
     @Test
@@ -226,6 +234,62 @@ class HomeInsightsSheetRenderTest {
         compose.setContent { Sheet(detailedTotals()) }
         compose.waitForIdle()
         compose.onNodeWithText("近 14 天活跃度").assertExists()
+    }
+
+    @Test
+    fun activityDefaultsToTheStepsMetric() {
+        // 用户 m37499：「将步数作为默认的展示逻辑」。
+        // 默认口径决定峰值行怎么写——步数是「N 步」，会话是「N 个」。
+        compose.setContent { Sheet(detailedTotals()) }
+        compose.waitForIdle()
+        compose.onNodeWithText("步数").assertExists()
+        compose.onNodeWithText("峰值 1400 步", substring = true).assertExists()
+    }
+
+    @Test
+    fun switchingToTheSessionsMetricChangesThePeakLine() {
+        // 同一份 fixture、只换口径，峰值文案必须从「1400 步」变成「3 个」。
+        // 若两个口径共用同一个字段，这条会读到同一个数字而变红。
+        compose.setContent { Sheet(detailedTotals(), activityMetric = ActivityMetric.SESSIONS) }
+        compose.waitForIdle()
+        compose.onNodeWithText("峰值 3 个", substring = true).assertExists()
+        // 不用「全树没有『步』」来断言——头部副标题本来就有「0 轮 0 步」。
+        // 真正要守的是：峰值行不再按步数走。
+        compose.onAllNodesWithText("峰值 1400 步", substring = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun stepsMetricWithoutContextActivitySaysSoInsteadOfClaimingNoActivity() {
+        // 守 R052 审查 P3：步数唯一来源是插件下发的 `contextActivity.days[].requests`，
+        // 而「会话数」来自核心自带的 `session/list.updatedAt`。没装插件时会出现
+        // 「有会话、没步数」的组合——此时说「最近 14 天没有活动」是错的。
+        // 需求 3 把步数设成默认后，这个组合变成打开抽屉就看得见，必须说清楚。
+        compose.setContent {
+            Sheet(
+                detailedTotals().copy(
+                    // 会话数照常有，步数全 0。
+                    activity = List(14) { DayActivity("2026-10-${it + 1}", sessions = it % 4, steps = 0) },
+                ),
+            )
+        }
+        compose.waitForIdle()
+        compose.onNodeWithText("读不到步数 · 可切到「会话」").assertExists()
+        compose.onAllNodesWithText("最近 14 天没有活动").assertCountEquals(0)
+    }
+
+    @Test
+    fun sessionsMetricStillSaysNoActivityWhenNothingHappened() {
+        // 反向守：会话口径没有「投影缺失」这回事，14 天真的没人动过就该直说。
+        compose.setContent {
+            Sheet(
+                detailedTotals().copy(
+                    activity = List(14) { DayActivity("2026-10-${it + 1}", sessions = 0, steps = 0) },
+                ),
+                activityMetric = ActivityMetric.SESSIONS,
+            )
+        }
+        compose.waitForIdle()
+        compose.onNodeWithText("最近 14 天没有活动").assertExists()
     }
 
     // ── 总览：降级态（没装插件） ───────────────────────────────────────────
@@ -315,7 +379,7 @@ class HomeInsightsSheetRenderTest {
         var picked: InsightsTab? = null
         compose.setContent { Sheet(detailedTotals(), onTabChange = { picked = it }) }
         compose.waitForIdle()
-        compose.onNodeWithText("会话").performClick()
+        compose.onNodeWithContentDescription("会话 页签选项").performClick()
         assertEquals(InsightsTab.SESSIONS, picked)
     }
 

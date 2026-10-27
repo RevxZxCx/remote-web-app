@@ -69,6 +69,84 @@ import java.util.Locale
  * 两者共用同一套抽屉手感（宽度、圆角、分段控件），但**职责不重叠**——
  * 首页看的是跨会话总量，聊天页看的是单会话七段构成。
  */
+/**
+ * 活跃度图用哪个指标画柱高。
+ *
+ * ## 为什么要有这个开关（R052，用户 m37499）
+ *
+ * 用户原话：「当前上下文洞察侧边栏显示的近14天活跃度是用活跃会话数展示的，而插件也可以
+ * 用步数来展示，我希望你增加这个切换功能，并且将步数作为默认的展示逻辑」。
+ *
+ * ## 「步数」到底是什么
+ *
+ * 是**请求数**，与插件同一口径：dsh-context 的全局页源码是
+ * `let u=e=>r==="sessions"?e.sessions:e.requests` —— 切到「步数」时它拿的是
+ * `requests` 而不是 `sessionStats.steps`。App 侧对应
+ * `contextActivity.days[day].requests`（见 `ContextInsights.dailyRequests`）。
+ *
+ * 两者不是同一件事的两种写法：实测最近 14 天合计 28,000 步 / 69 个会话日，
+ * 一天可以只有 2 条会话却跑 2000 步。步数更能反映「这天有多忙」。
+ */
+internal enum class ActivityMetric(val label: String) {
+    STEPS("步数"),
+    SESSIONS("会话"),
+    ;
+
+    /** 某一天的取值，柱高按它算。 */
+    fun valueOf(day: DayActivity): Int = when (this) {
+        STEPS -> day.steps
+        SESSIONS -> day.sessions
+    }
+
+    /** 读屏文案：一天的活动量。 */
+    fun describe(day: DayActivity): String = when (this) {
+        STEPS -> "${day.day} 跑了 ${day.steps} 步"
+        SESSIONS -> "${day.day} 有 ${day.sessions} 个会话活动"
+    }
+
+    /** 底部一句话总结（峰值）。 */
+    fun peakText(day: DayActivity): String = when (this) {
+        STEPS -> "峰值 ${day.steps} 步 · ${day.day}"
+        SESSIONS -> "峰值 ${day.sessions} 个 · ${day.day}"
+    }
+
+    /**
+     * 整张图在这个口径上**一个数都没有**时，底部该说的话。
+     *
+     * 为什么不能统一写「最近 14 天没有活动」：步数的唯一来源是
+     * `contextActivity.days[day].requests`，而它是 **dsh-context 插件**才下发的投影
+     * （R040 取证：核心 asar 里 `contextActivity` 命中 0 次）；「会话数」来自
+     * `session/list` 顶层的 `updatedAt`，核心自带。于是没装插件时会出现
+     * 「一条会话都没少、步数却全是 0」的画面，此时说「没有活动」是**错的**。
+     *
+     * 需求 3 把步数设成默认口径之后，这个组合从「用户手动点才看得到」变成
+     * 「打开抽屉就看得见」，所以必须说清楚差在哪、以及怎么绕过。——R052 审查 P3。
+     */
+    fun emptyText(activity: List<DayActivity>): String = when (this) {
+        STEPS -> if (activity.any { it.sessions > 0 }) {
+            "读不到步数 · 可切到「会话」"
+        } else {
+            "最近 14 天没有活动"
+        }
+        SESSIONS -> "最近 14 天没有活动"
+    }
+
+    companion object {
+        /** UI 里按这个顺序渲染分段控件。 */
+        val ordered: List<ActivityMetric> = listOf(STEPS, SESSIONS)
+
+        /**
+         * 打开抽屉时默认用哪个口径。
+         *
+         * 用户 m37499 定的「将步数作为默认的展示逻辑」，**这里是唯一来源**。
+         * 早先默认值直接写在 `HomeScreen` 的 `rememberSaveable` 里，等于把同一条产品
+         * 决定散落在两个文件；改成从 [ordered] 推导后，换口径只需要动这一处，
+         * 单测也能从组件层直接守住（不依赖任何 Compose 宿主）。
+         */
+        val default: ActivityMetric get() = ordered.first()
+    }
+}
+
 internal enum class InsightsTab(val label: String) {
     OVERVIEW("总览"),
     SESSIONS("会话"),
@@ -94,6 +172,8 @@ internal enum class InsightsTab(val label: String) {
  * @param onTabChange 切页签。
  * @param loading 首次加载中（`totals` 为空时才有意义）。
  * @param onClose 关闭抽屉。
+ * @param activityMetric 活跃度图当前的指标（步数 / 会话）。
+ * @param onActivityMetricChange 切换指标；**只重画柱子**，不重新聚合、不发请求。
  * @param onOpenSession 点某个会话排行行 → 打开那个会话。
  */
 @Composable
@@ -103,6 +183,8 @@ internal fun HomeInsightsSheet(
     onRangeChange: (InsightsRange) -> Unit,
     tab: InsightsTab,
     onTabChange: (InsightsTab) -> Unit,
+    activityMetric: ActivityMetric,
+    onActivityMetricChange: (ActivityMetric) -> Unit,
     loading: Boolean,
     onClose: () -> Unit,
     onOpenSession: (String) -> Unit,
@@ -122,6 +204,7 @@ internal fun HomeInsightsSheet(
                 options = InsightsTab.entries.map { it.label },
                 selectedIndex = InsightsTab.entries.indexOf(tab),
                 onSelect = { onTabChange(InsightsTab.entries[it]) },
+                group = "页签选项",
             )
             RangePicker(current = range, onSelect = onRangeChange)
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
@@ -129,7 +212,11 @@ internal fun HomeInsightsSheet(
                 when {
                     totals.isEmpty && loading -> CenteredHint("正在读取用量…", spinner = true)
                     totals.isEmpty -> CenteredHint("这个范围里还没有用量数据。")
-                    tab == InsightsTab.OVERVIEW -> OverviewTab(totals = totals)
+                    tab == InsightsTab.OVERVIEW -> OverviewTab(
+                        totals = totals,
+                        activityMetric = activityMetric,
+                        onActivityMetricChange = onActivityMetricChange,
+                    )
                     else -> SessionsTab(totals = totals, onOpenSession = onOpenSession)
                 }
             }
@@ -204,6 +291,14 @@ private fun SegPicker(
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
+    /**
+     * 这一组选择器的名字，会进每项的 `contentDescription`（「会话 选项」→「会话 指标选项」）。
+     *
+     * 抽屉里同时存在两组选择器：页签里有「会话」，活跃度指标里也有「会话」。
+     * 不带组名时读屏听到的是两个一模一样的「会话 选项」，分不清点的是哪个；
+     * 测试也没法唯一命中。
+     */
+    group: String = "选项",
 ) {
     Row(
         modifier = modifier
@@ -230,7 +325,7 @@ private fun SegPicker(
                         if (selected) MaterialTheme.colorScheme.surface else Color.Transparent,
                     )
                     .clickable { onSelect(index) }
-                    .semantics { contentDescription = "$label 选项" },
+                    .semantics { contentDescription = "$label $group" },
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
@@ -257,6 +352,7 @@ private fun RangePicker(current: InsightsRange, onSelect: (InsightsRange) -> Uni
         selectedIndex = InsightsRange.ordered.indexOf(current),
         onSelect = { onSelect(InsightsRange.ordered[it]) },
         compact = true,
+        group = "范围选项",
     )
     Spacer(Modifier.height(8.dp))
 }
@@ -283,7 +379,11 @@ private fun CenteredHint(text: String, spinner: Boolean = false) {
 // ── 总览 ──────────────────────────────────────────────────────────────────
 
 @Composable
-private fun OverviewTab(totals: ContextTotals) {
+private fun OverviewTab(
+    totals: ContextTotals,
+    activityMetric: ActivityMetric,
+    onActivityMetricChange: (ActivityMetric) -> Unit,
+) {
     Column(
         Modifier
             .fillMaxSize()
@@ -294,7 +394,11 @@ private fun OverviewTab(totals: ContextTotals) {
         TokenDonutCard(totals)
         if (totals.hasCost) CostDonutCard(totals) else CostUnavailableCard()
         TimingDonutCard(totals)
-        ActivityCard(totals.activity)
+        ActivityCard(
+            activity = totals.activity,
+            metric = activityMetric,
+            onMetricChange = onActivityMetricChange,
+        )
     }
 }
 
@@ -491,24 +595,42 @@ private fun TimingDonutCard(totals: ContextTotals) {
 
 /** 近 14 天活跃度柱状图。 */
 @Composable
-private fun ActivityCard(activity: List<DayActivity>) {
+private fun ActivityCard(
+    activity: List<DayActivity>,
+    metric: ActivityMetric,
+    onMetricChange: (ActivityMetric) -> Unit,
+) {
     if (activity.isEmpty()) return
-    val peak = activity.maxOf { it.sessions }.coerceAtLeast(1)
-    InsightCard(title = "近 14 天活跃度", trailing = "每日活跃会话数") {
+    val peak = activity.maxOf { metric.valueOf(it) }.coerceAtLeast(1)
+    InsightCard(
+        title = "近 14 天活跃度",
+        trailing = null,
+        // 指标切换放在卡头右侧：它只作用于这一张卡，放在抽屉顶部的范围选择器旁边
+        // 会被误读成「影响全部三张圆环」。
+        header = {
+            SegPicker(
+                options = ActivityMetric.ordered.map { it.label },
+                selectedIndex = ActivityMetric.ordered.indexOf(metric),
+                onSelect = { onMetricChange(ActivityMetric.ordered[it]) },
+                group = "指标选项",
+                compact = true,
+                modifier = Modifier.width(104.dp),
+            )
+        },
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth().height(52.dp),
             horizontalArrangement = Arrangement.spacedBy(3.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
             activity.forEach { day ->
-                val ratio = day.sessions.toFloat() / peak.toFloat()
+                val value = metric.valueOf(day)
+                val ratio = value.toFloat() / peak.toFloat()
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
-                        .semantics {
-                            contentDescription = "${day.day} 有 ${day.sessions} 个会话活动"
-                        },
+                        .semantics { contentDescription = metric.describe(day) },
                     contentAlignment = Alignment.BottomCenter,
                 ) {
                     Box(
@@ -518,7 +640,7 @@ private fun ActivityCard(activity: List<DayActivity>) {
                             .height((2 + (50 * ratio)).dp)
                             .clip(RoundedCornerShape(2.dp))
                             .background(
-                                if (day.sessions == 0) {
+                                if (value == 0) {
                                     ContextPalette.track.copy(alpha = 0.25f)
                                 } else {
                                     MaterialTheme.colorScheme.primary.copy(alpha = 0.55f + 0.45f * ratio)
@@ -536,9 +658,13 @@ private fun ActivityCard(activity: List<DayActivity>) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
             )
-            val busiest = activity.maxByOrNull { it.sessions }
+            val busiest = activity.maxByOrNull { metric.valueOf(it) }
             Text(
-                text = if (busiest == null || busiest.sessions == 0) "最近 14 天没有活动" else "峰值 ${busiest.sessions} 个 · ${busiest.day}",
+                text = if (busiest == null || metric.valueOf(busiest) == 0) {
+                    metric.emptyText(activity)
+                } else {
+                    metric.peakText(busiest)
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -800,6 +926,14 @@ private fun DonutCard(
 private fun InsightCard(
     title: String,
     trailing: String? = null,
+    /**
+     * 卡头右侧的交互控件（目前只有活跃度卡的「步数/会话」切换用）。
+     *
+     * 单独开一个槽而不是把 [trailing] 改成 `@Composable`：`trailing` 是**文字**
+     * （「按模型」「墙钟累计」这类口径说明），语义是「这张卡的数字怎么算出来的」；
+     * 切控件是**可点的操作**。混成一个参数会让读代码的人分不清哪张卡的右上角能点。
+     */
+    header: (@Composable () -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Surface(
@@ -824,6 +958,7 @@ private fun InsightCard(
                         maxLines = 1,
                     )
                 }
+                if (header != null) header()
             }
             Spacer(Modifier.height(8.dp))
             content()

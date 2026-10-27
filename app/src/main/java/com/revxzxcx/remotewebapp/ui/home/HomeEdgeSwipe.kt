@@ -2,13 +2,17 @@ package com.revxzxcx.remotewebapp.ui.home
 
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.horizontalDrag
+import androidx.compose.foundation.gestures.drag
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import kotlin.math.abs
+import kotlin.math.hypot
 
 /**
  * 手指落在首页的哪半边屏幕。
@@ -54,6 +58,85 @@ internal enum class SwipeSide {
  */
 internal fun swipeSide(startX: Float, widthPx: Float): SwipeSide =
     if (widthPx > 0f && startX >= widthPx / 2f) SwipeSide.RIGHT else SwipeSide.LEFT
+
+/**
+ * 这次拖动归谁：横向手势（我们）还是纵向滚动（内容容器）？
+ *
+ * ## 为什么需要这一层判定（R052，用户 m37463 第 1 条）
+ *
+ * 用户原话：「上下文洞察侧边栏展开的时候，上下拖动也会触发右拉，导致实际操作的上拉，
+ * 而实际没有进行滚动而是关闭侧边栏」。左侧会话抽屉没有这个问题，因为它交给
+ * `ModalNavigationDrawer` 的 `anchoredDraggable`，那一套**先判主轴再决定接不接管**。
+ *
+ * 首版用的是 `horizontalDrag`，它只盯**水平轴**有没有越过 `touchSlop`：手指竖直滚动时
+ * 只要有一点横向抖动（斜率 0.3 的斜划在 20dp 的竖直位移上就有 6dp 横移），水平阈值照样
+ * 被越过 → 手势被我们接管、`consume()` 把每一帧都吃掉 → 内容容器收不到滚动，而
+ * `revealAfterDrag` 被那点负位移拖着走，松手按 [settleInsightsCollapse] 判成收起。
+ * 用户看到的就是「想滚动，结果面板关了」。
+ *
+ * ## 判据
+ *
+ * 先等**任意方向**的累计位移超过 `touchSlop`（[_UNDECIDED]），再比轴向绝对值：
+ * 横向占优（[HORIZONTAL]）归我们，纵向占优（[VERTICAL]）整段让路。等阈值这一步不能省：
+ * 手指刚落下时的几帧抖动方向是随机的，提前选边会把一次干净的竖直滚动判成横向。
+ *
+ * 平局（`abs(dx) == abs(dy)`）判纵向：滚动是内容区的常态操作，收起抽屉还有返回键、遮罩
+ * 点击、顶栏按钮三条路，把误判代价压在让路这一侧。
+ *
+ * @param dx 从按下点到当前的累计横向位移（像素，右正左负）。
+ * @param dy 从按下点到当前的累计纵向位移（像素，下正上负）。
+ * @param slopPx 系统的 `touchSlop`（像素）。
+ */
+internal enum class DragAxis {
+    /** 还没走够 `touchSlop`，不能选边。 */
+    UNDECIDED,
+
+    /** 横向占优：归 [insightsSwipe]。 */
+    HORIZONTAL,
+
+    /** 纵向占优（含平局）：让给滚动容器，整段手势不消费任何一帧。 */
+    VERTICAL,
+}
+
+/** 轴向判定，见 [DragAxis]。纯函数，便于单测与变异验证。 */
+internal fun dragAxis(dx: Float, dy: Float, slopPx: Float): DragAxis = when {
+    // `hypot` 而不是 `max(abs(x), abs(y))`：斜向滑动时两者都小，用单轴判断会提前选边。
+    hypot(dx, dy) <= slopPx -> DragAxis.UNDECIDED
+    abs(dx) > abs(dy) -> DragAxis.HORIZONTAL
+    else -> DragAxis.VERTICAL
+}
+
+/**
+ * 等到能选边为止，返回是不是横向手势。
+ *
+ * 三件事会让我们**放弃**这次手势（返回 `false`）：
+ * 1. 走到了 [DragAxis.VERTICAL] 的结论（用户要滚动）。
+ * 2. 这一帧已经被子孙消费（`change.isConsumed`）——内容容器的 `scrollable` 在 Main pass
+ *    里比我们**先**收到事件（派发由叶子向根），它已经接管就没必要再抢。
+ * 3. 手指抬起来了（`!change.pressed`），说明是点击或极短的一划。
+ *
+ * 放弃时**不调用 `settleSink`**：那等同于「回到手势开始前的状态」，与
+ * [settleAfterDrag] 里 `!completed` 分支的语义一致，直接 return 即可。
+ */
+private suspend fun AwaitPointerEventScope.awaitHorizontalIntent(pointerId: PointerId): Boolean {
+    val slopPx = viewConfiguration.touchSlop
+    var dx = 0f
+    var dy = 0f
+    while (true) {
+        val event = awaitPointerEvent()
+        val change = event.changes.firstOrNull { it.id == pointerId } ?: return false
+        if (change.isConsumed) return false
+        if (!change.pressed) return false
+        val delta = change.positionChange()
+        dx += delta.x
+        dy += delta.y
+        when (dragAxis(dx, dy, slopPx)) {
+            DragAxis.UNDECIDED -> Unit
+            DragAxis.HORIZONTAL -> return true
+            DragAxis.VERTICAL -> return false
+        }
+    }
+}
 
 /**
  * 松手时抽屉是开还是合？
@@ -239,19 +322,22 @@ internal fun Modifier.insightsSwipe(
                 // 左半屏：整段手势让给 `ModalNavigationDrawer`，这里不消费任何一帧。
                 return@awaitEachGesture
             }
+            // **先判主轴再接管**（R052）：竖直滚动要整段让路，否则用户想上下滑看内容、
+            // 结果面板被那点横向抖动收起来了。判据见 [dragAxis] / [awaitHorizontalIntent]。
+            if (!awaitHorizontalIntent(down.id)) return@awaitEachGesture
             // 上一次采样时刻与「每秒揭开比例」的瞬时估计，用于松手时的甩动判定。
             var lastUptime = 0L
             var velocity = 0f
             // 这次触摸有没有真的拖动过。
             //
-            // **纯点击绝不能走到 `settleSink`**：`horizontalDrag` 在「一直没超过 touchSlop
+            // **纯点击绝不能走到 `settleSink`**：`drag` 在「一直没超过 touchSlop
             // 就抬手」时也会正常返回 `completed = true`，那一刻 `reveal` 还是原值。
             // 对 COLLAPSE（`reveal >= 1` 判开）来说这就等于「点一下 = 重新打开」——
             // 遮罩上那次点击刚触发 `settleInsights(false)`，紧接着这里又 `settleInsights(true)`，
             // `insightsJob?.cancel()` 把关闭动画掐掉再动画回全开，抽屉那条约 40dp 的
             // 窄缝彻底点不掉了（第二轮审查 P1 抓到，是我给遮罩补 mode 时引入的回归）。
             var moved = false
-            val completed = horizontalDrag(down.id) { change ->
+            val completed = drag(down.id) { change ->
                 val delta = change.positionChange().x
                 // 洞察从**右侧**推出，所以手指往左（delta < 0）才是揭开方向。
                 // 整个手势里统一取负号，把「向左为正」换算成 revealAfterDrag 要求的

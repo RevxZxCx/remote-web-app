@@ -16,7 +16,7 @@ import org.junit.Test
  * ## 为什么这个函数值得单独测
  *
  * 侧栏的实时数字来自 `session/control` 那条流里**逐个投影**的增量帧，每个帧只有一个
- * `key`。要把七段圆环画出来，必须把六个键攒在一个 `JsonObject` 里反复覆盖同一份快照。
+ * `key`。要把七段圆环画出来，必须把这些键攒在一个 `JsonObject` 里反复覆盖同一份快照。
  * 这个「攒」的动作有三个很容易写错、但写错了**不会崩**的地方：
  *
  * 1. 把 `contextHeaders`（70 KB）也收进来 → 累加器常驻内存涨到几 MB，而且这串东西
@@ -42,6 +42,23 @@ class ContextValueMergeTest {
         val merged = mergeContextValue(current, "contextHeaders", huge)
 
         assertSame("不认识的键必须原样返回同一个对象，连拷贝都不该发生", current, merged)
+    }
+
+    @Test
+    fun `登记表必须覆盖解析器读的每一个投影键`() {
+        // R052 第二轮审查 P3：`ContextInsightsParser` 加了 KEY_ACTIVITY，登记表没跟上，
+        // 结果增量帧在 mergeContextValue 的口子被静默丢掉、rebuildContextValues 也会
+        // 把它剔出去。两处都没有编译期约束，只能靠这条断言把它们钉在一起。
+        val parsed = setOf(
+            ContextInsightsParser.KEY_TIMELINE,
+            ContextInsightsParser.KEY_BREAKDOWN,
+            ContextInsightsParser.KEY_TOKEN_USAGE,
+            ContextInsightsParser.KEY_COST,
+            ContextInsightsParser.KEY_PRESSURE,
+            ContextInsightsParser.KEY_SESSION_STATS,
+            ContextInsightsParser.KEY_ACTIVITY,
+        )
+        assertEquals("解析器读了但没登记的键会被静默丢弃", parsed, CONTEXT_PROJECTION_KEYS)
     }
 
     @Test
@@ -171,7 +188,7 @@ class ContextValueMergeTest {
     }
 
     @Test
-    fun `全量读重建只保留六个已知键`() {
+    fun `全量读重建只保留已知键`() {
         // contextHeaders 是 70 KB 的大家伙，绝不能因为「顺手都在 values 里」就连带存下来。
         val rebuilt = rebuildContextValues(
             buildJsonObject {
@@ -180,8 +197,31 @@ class ContextValueMergeTest {
                 put("unrelatedProjection", buildJsonObject { })
             },
         )
-        assertEquals("只认六个键", 1, rebuilt.size)
+        assertEquals("只认已知键", 1, rebuilt.size)
         assertEquals(false, "contextHeaders" in rebuilt)
+    }
+
+    @Test
+    fun `解析器读的每个键都必须登记进分发表`() {
+        // R052 第二轮审查 P3：给解析器加了 `contextActivity`，却忘了登记进
+        // CONTEXT_PROJECTION_KEYS —— 解析器认识它、分发不认识它，增量帧会在
+        // mergeContextValue 的口子被静默丢掉，重建时也会被剔掉。
+        // 这类不一致不会崩、不会编译报错，只表现为「某个数字永远不动」。
+        //
+        // 断言方式：把每个登记键都当成一帧喂进去，必须被吸收；再逐个确认它们
+        // 都在 rebuildContextValues 的保留名单里。
+        for (key in CONTEXT_PROJECTION_KEYS) {
+            val merged = mergeContextValue(JsonObject(emptyMap()), key, values("probe" to 1))
+            assertNotSame("登记的键 $key 必须被吸收", JsonObject(emptyMap()), merged)
+            assertEquals("登记的键 $key 没进累加器", 1, merged.size)
+
+            val rebuilt = rebuildContextValues(buildJsonObject { put(key, values("probe" to 1)) })
+            assertEquals("登记的键 $key 没进重建结果", 1, rebuilt.size)
+        }
+
+        // contextActivity 是 R052 新增的那个，单独点名，避免将来有人把它删掉。
+        assertEquals(true, ContextInsightsParser.KEY_ACTIVITY in CONTEXT_PROJECTION_KEYS)
+        assertEquals("登记的键数应与解析器读的一致", 7, CONTEXT_PROJECTION_KEYS.size)
     }
 
     @Test

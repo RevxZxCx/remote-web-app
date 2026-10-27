@@ -77,6 +77,74 @@ object SessionGrouping {
         /** 置顶会话（跨工作区集合的下发顺序不保证，这里按活动时间降序）。 */
         val pinnedRows: List<SessionRow>
             get() = rows.filter { it.isPinned }.sortedByDescending { it.summary.updatedAt }
+
+        /**
+         * 这个工作区里最强的「未读提醒」状态，用于工作区**折叠时**在标题右侧亮一个点。
+         *
+         * ## 为什么需要它（R052，用户 m37463 第 2 条）
+         *
+         * 用户原话：「当一个会话完成了或者状态有更新，会话的右边会显示圆点，但是当会话
+         * 所在工作区折叠的时候，就不能正常看到了。我希望当会话所在工作区被折叠的时候，
+         * 工作区的右边也会展示圆点，提醒用户查看。」折叠把子行整块收进
+         * `AnimatedVisibility`，子行的点跟着看不见，提醒就失效了。
+         *
+         * ## 为什么取「最强的一个」而不是数个数
+         *
+         * 与子行共用同一套 [statusOf] 判据，只是把多行折叠成一个。数个数会引出
+         * 「3 个未读里 1 个是失败」这种说不清的颜色，而用户需要知道的只是「这个壳里有东西
+         * 要看」。优先级由 [unreadRank] 单点定义，与子行的视觉/读屏语义保持一致。
+         *
+         * ## 为什么排除归档行
+         *
+         * 归档是用户主动收起来的东西，它自己那行的点也只在展开归档视图时才看得到，
+         * 不该让一个折叠的工作区长期为它亮着。
+         *
+         * ## 为什么「运行中」不参与聚合
+         *
+         * 工作区标题右侧已经有均衡器动画表示「这里在跑」（`hasRunning`）。把
+         * [SessionStatus.Ongoing] 也算进聚合，会出现「标题右边一个动画 + 右边再一个点」
+         * 的重复表达；更糟的是它会**盖住**真该提醒的状态——一个工作区里同时有「正在跑」
+         * 和「上一轮失败没人看」时，用户需要看到的是那个红点。
+         */
+        val unreadStatus: SessionStatus
+            get() = strongestUnread()?.let { statusOf(it.summary) } ?: SessionStatus.Idle
+
+        /**
+         * 聚合出来的那个状态若为 [SessionStatus.Failed]，它对应子行的失败原因；否则空串。
+         *
+         * 为什么需要它：折叠态的工作区圆点如果只传状态、不传原因，读屏只会念
+         * 「上一轮失败，点进去看」，而展开后同一个状态会念出服务端给的具体原因——
+         * 折叠反而让提示**信息更少**，用户还得展开才知道哪一条坏了。这里把原因一起
+         * 带出去，折叠态与展开态的读屏信息就一致了。——R052 代码审查 P2-2。
+         */
+        val unreadFailureReason: String
+            get() = strongestUnread()?.summary?.failureReason.orEmpty()
+
+        /**
+         * 该显示在工作区行上的那一条会话，没有则 null。
+         *
+         * 优先级由 [unreadRank] 单点定义，**必须与 [statusOf] 同序**：折叠态显示的点
+         * 与展开后子行显示的点必须是同一个结论，否则会出现「折叠看是绿点、展开看是红点」
+         * 的矛盾。这也是为什么没有把 `Failed` 提到 `Attention` 之前——`Attention` 在
+         * [statusOf] 里本来就高于 `Failed`（agent 挂起等你回答时这一轮并没结束，
+         * 那条判据由 R049 用户 m32994 的状态需求定下），聚合若自定一套顺序，
+         * 两个视图就会各说各话。
+         *
+         * 同优先级时取第一命中：`rows` 已按 `updatedAt` 降序，即最活跃的那条。
+         */
+        private fun strongestUnread(): SessionRow? {
+            var best: SessionRow? = null
+            for (row in rows) {
+                if (row.isArchived) continue
+                val status = statusOf(row.summary)
+                // 「运行中」不参与聚合：工作区标题右侧本来就有均衡器动画在表示
+                // 这件事（`hasRunning`），再给圆点一次等于同一件事说两遍，而且
+                // 动画是 16dp 的方框、圆点是 8dp 的圆，两者挨在一起会显得凌乱。
+                if (status == SessionStatus.Ongoing) continue
+                if (best == null || unreadRank(status) > unreadRank(statusOf(best.summary))) best = row
+            }
+            return best
+        }
     }
 
     /**
