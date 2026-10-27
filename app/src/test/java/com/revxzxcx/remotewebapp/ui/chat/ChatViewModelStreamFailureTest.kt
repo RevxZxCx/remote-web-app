@@ -186,7 +186,7 @@ class ChatViewModelStreamFailureTest {
         val http = OkHttpClient.Builder().build()
         val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO).also { scopes += it }
         return DshConnection(
-            credential = DeviceCredential(
+            initialCredential = DeviceCredential(
                 baseUrl = "http://127.0.0.1:$port",
                 deviceId = "dev-42",
                 pairedAt = 0L,

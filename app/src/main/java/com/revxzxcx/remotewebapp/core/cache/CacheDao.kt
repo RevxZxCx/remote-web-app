@@ -182,4 +182,38 @@ interface CacheDao {
         deleteOtherDrafts(ownerId)
         deleteOtherMeta(ownerId)
     }
+
+    // ---------------------------------------------------------------- 多主机（R054）
+
+    @Query("DELETE FROM workspaces WHERE ownerId = :ownerId")
+    suspend fun deleteOwnerWorkspaces(ownerId: String)
+
+    @Query("DELETE FROM sessions WHERE ownerId = :ownerId")
+    suspend fun deleteOwnerSessions(ownerId: String)
+
+    @Query("DELETE FROM messages WHERE ownerId = :ownerId")
+    suspend fun deleteOwnerMessages(ownerId: String)
+
+    @Query("DELETE FROM drafts WHERE ownerId = :ownerId")
+    suspend fun deleteOwnerDrafts(ownerId: String)
+
+    @Query("DELETE FROM meta WHERE ownerId = :ownerId")
+    suspend fun deleteOwnerMeta(ownerId: String)
+
+    /**
+     * 清掉**某一个**分区的全部行（R054 多主机：用户把某台主机从列表里移除时调用）。
+     *
+     * 与 [deleteOtherOwners] 的区别是主语：那个是「除了这台，其他都清掉」，只在
+     * 「一台手机只连一台桌面端」的时代成立。多主机之后这个语义会变成「切到 B 就把
+     * A 的缓存全删了」——切回来时列表要重新拉一遍 `session/list`（单次实测 1.78 MB）。
+     * 现在每个分区各自保留，只有用户真正删除主机才清它自己那一片。
+     */
+    @Transaction
+    suspend fun deleteOwner(ownerId: String) {
+        deleteOwnerWorkspaces(ownerId)
+        deleteOwnerSessions(ownerId)
+        deleteOwnerMessages(ownerId)
+        deleteOwnerDrafts(ownerId)
+        deleteOwnerMeta(ownerId)
+    }
 }

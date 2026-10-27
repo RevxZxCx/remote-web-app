@@ -8,6 +8,8 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
+import com.revxzxcx.remotewebapp.core.credentials.CredentialBook
+import com.revxzxcx.remotewebapp.core.credentials.DeviceCredential
 import com.revxzxcx.remotewebapp.core.prefs.ThemeMode
 import com.revxzxcx.remotewebapp.core.prefs.ThemePreferences
 import org.junit.Assert.assertEquals
@@ -61,16 +63,16 @@ class SettingsScreenRenderTest {
     }
 
     @Test
-    fun 解除配对按钮把动作交给AppRoot层的确认框() {
+    fun 移除全部远程把动作交给AppRoot层的确认框() {
         val prefs = prefs()
         var unpairCalls = 0
         compose.setContent {
             SettingsScreen(themePreferences = prefs, onBack = {}, onUnpair = { unpairCalls++ })
         }
 
-        // 解除配对在页面最底部：Robolectric 的虚拟屏幕只有几屏高，直接 performClick
+        // 危险操作在页面最底部：Robolectric 的虚拟屏幕只有几屏高，直接 performClick
         // 落在视口外的节点上什么都不会发生（M5-5 踩过同一个坑），必须先滚过去。
-        compose.onNodeWithText("解除配对").performScrollTo().performClick()
+        compose.onNodeWithText("移除全部远程").performScrollTo().performClick()
 
         // R018 P1-1：确认框已上移到 AppRoot 层，本屏**不再自己弹**。这里断言的是
         // 「本屏点下去就调 onUnpair」——真实 App 里 onUnpair = { pendingUnpair = true }，
@@ -82,6 +84,112 @@ class SettingsScreenRenderTest {
         assertEquals(1, unpairCalls)
         // 本屏不该再出现自己的对话框。
         compose.onNodeWithText("退出配对？").assertDoesNotExist()
+    }
+
+    @Test
+    fun 断开当前远程与移除全部远程是两个不同的出口() {
+        // R054 的核心纠正：多主机语境下旧的单一「解除配对」会被读成「清空所有远程」，
+        // 而它实际只影响当前这一台。两个动作必须各走各的回调，否则用户以为只删一台
+        // 却回到配对页（或者以为清空了却还留着一台）。
+        val prefs = prefs()
+        val book = CredentialBook(
+            hosts = listOf(
+                DeviceCredential(baseUrl = "http://192.168.1.5:19387", deviceId = "d1", pairedAt = 0L, hostId = "a"),
+                DeviceCredential(baseUrl = "http://10.0.0.2:19387", deviceId = "d2", pairedAt = 0L, hostId = "b"),
+            ),
+            activeHostId = "a",
+        )
+        val removed = mutableListOf<String>()
+        var unpairCalls = 0
+        compose.setContent {
+            SettingsScreen(
+                themePreferences = prefs,
+                onBack = {},
+                onUnpair = { unpairCalls++ },
+                book = book,
+                onRemoveActiveHost = { removed += "active" },
+            )
+        }
+
+        compose.onNodeWithText("断开当前远程").performScrollTo().performClick()
+        assertEquals("只应触发移除当前主机", listOf("active"), removed)
+        assertEquals("不该触发移除全部", 0, unpairCalls)
+
+        compose.onNodeWithText("移除全部远程").performScrollTo().performClick()
+        assertEquals("现在才轮到移除全部", 1, unpairCalls)
+        assertEquals("移除当前主机只应被调一次", listOf("active"), removed)
+    }
+
+    @Test
+    fun 单台主机时文案说明会回到配对页() {
+        // 只剩一台时「断开当前远程」的后果与「移除全部」等价，文案必须提前说清，
+        // 否则用户点下去会以为自己还留着一台。
+        val prefs = prefs()
+        val single = CredentialBook(
+            hosts = listOf(
+                DeviceCredential(baseUrl = "http://192.168.1.5:19387", deviceId = "d1", pairedAt = 0L, hostId = "a"),
+            ),
+            activeHostId = "a",
+        )
+        compose.setContent {
+            SettingsScreen(
+                themePreferences = prefs,
+                onBack = {},
+                onUnpair = {},
+                book = single,
+                onRemoveActiveHost = {},
+            )
+        }
+
+        compose.onNodeWithText("这是最后一台，会回到配对页").assertExists()
+    }
+
+    @Test
+    fun 多台主机时文案说明只移除当前那台() {
+        val prefs = prefs()
+        val book = CredentialBook(
+            hosts = listOf(
+                DeviceCredential(
+                    baseUrl = "http://192.168.1.5:19387",
+                    deviceId = "d1",
+                    pairedAt = 0L,
+                    label = "家里的主机",
+                    hostId = "a",
+                ),
+                DeviceCredential(baseUrl = "http://10.0.0.2:19387", deviceId = "d2", pairedAt = 0L, hostId = "b"),
+            ),
+            activeHostId = "a",
+        )
+        compose.setContent {
+            SettingsScreen(
+                themePreferences = prefs,
+                onBack = {},
+                onUnpair = {},
+                book = book,
+                onRemoveActiveHost = {},
+            )
+        }
+
+        compose.onNodeWithText("只移除「家里的主机」，其余 1 台保留").assertExists()
+    }
+
+    @Test
+    fun 没接onRemoveActiveHost时断开当前远程不可点() {
+        // 防御：调用方忘了传这个回调时，不能让一个「点了没反应」的破坏性按钮看起来可用。
+        val prefs = prefs()
+        val book = CredentialBook(
+            hosts = listOf(
+                DeviceCredential(baseUrl = "http://192.168.1.5:19387", deviceId = "d1", pairedAt = 0L, hostId = "a"),
+            ),
+            activeHostId = "a",
+        )
+        var unpairCalls = 0
+        compose.setContent {
+            SettingsScreen(themePreferences = prefs, onBack = {}, onUnpair = { unpairCalls++ }, book = book)
+        }
+
+        compose.onNodeWithText("断开当前远程").performScrollTo().performClick()
+        assertEquals("没有出口就不该有任何动作", 0, unpairCalls)
     }
 
     @Test

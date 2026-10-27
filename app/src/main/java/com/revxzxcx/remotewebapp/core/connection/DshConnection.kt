@@ -25,12 +25,22 @@ import okhttp3.OkHttpClient
  *   waterfall，订阅不能在聊天页开关（见 [RemoteEventsClient] 的 KDoc）。
  */
 class DshConnection(
-    val credential: DeviceCredential,
+    initialCredential: DeviceCredential,
     unaryHttp: OkHttpClient,
     streamHttp: OkHttpClient,
     json: Json = DshJson,
     scope: CoroutineScope,
 ) {
+
+    /**
+     * 建立本连接时用的凭证。
+     *
+     * R054 起它是 `var`：多主机模式下「只改显示名」不重建连接（socket 只认 `baseUrl` +
+     * `deviceId`，见 `AppContainer.reusable`），顶栏标题又要读到新名字，就只能就地更新。
+     * 唯一入口是 [updateCredential]，它拒绝改 endpoint 是刻意的（见那个方法的 KDoc）。
+     */
+    var credential: DeviceCredential = initialCredential
+        private set
 
     val baseUrl: String get() = credential.baseUrl
 
@@ -68,6 +78,24 @@ class DshConnection(
      * 额外建连；但订阅本身是长驻的，随连接建立而开始、随 [close] 而结束。
      */
     val remoteEvents: RemoteEventsClient = RemoteEventsClient(mux, typert, scope)
+
+    /**
+     * 就地更新凭证（R054：多主机模式下改显示名）。
+     *
+     * **只允许改不影响 socket 的字段**（`label` / `hostId`）。`baseUrl` 与 `deviceId`
+     * 是本连接所有内部对象（[typert] / [mux] / [routes] / [attachments] / [uploads]）的
+     * 构造参数，改了就与那些对象不一致了——地址变更必须走 `AppContainer.installConnection`
+     * 重建整条连接。
+     *
+     * @return 是否真的更新了；endpoint 有变时返回 `false` 且**不做任何修改**，
+     *   让调用方（[com.revxzxcx.remotewebapp.core.AppContainer]）走重建路径。
+     */
+    fun updateCredential(credential: DeviceCredential): Boolean {
+        if (credential.baseUrl != this.credential.baseUrl) return false
+        if (credential.deviceId != this.credential.deviceId) return false
+        this.credential = credential
+        return true
+    }
 
     /** 关闭 mux 与转发事件订阅（unary 是无状态请求，无需关闭）。 */
     suspend fun close() {

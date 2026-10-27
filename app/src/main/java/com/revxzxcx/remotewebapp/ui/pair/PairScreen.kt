@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -36,11 +37,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -48,6 +52,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -84,9 +89,11 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.journeyapps.barcodescanner.BarcodeCallback
 import com.journeyapps.barcodescanner.BarcodeResult
 import com.journeyapps.barcodescanner.BarcodeView
+import com.revxzxcx.remotewebapp.core.credentials.DeviceCredential
 import com.revxzxcx.remotewebapp.core.pairing.PairLink
 import com.revxzxcx.remotewebapp.core.pairing.PairLinkParser
 import com.revxzxcx.remotewebapp.core.pairing.PairParse
+import com.revxzxcx.remotewebapp.ui.common.AppIconButton
 import com.revxzxcx.remotewebapp.ui.common.AppMark
 import com.revxzxcx.remotewebapp.ui.common.maskDeviceId
 import com.revxzxcx.remotewebapp.ui.common.rememberAnimationsEnabled
@@ -113,9 +120,27 @@ import com.revxzxcx.remotewebapp.ui.theme.pillShape
  * ⚠️ App 不能发起配对：`POST /api/pair/issue` 是 loopback-only（`routes.ts:688`），
  * 二维码只能在桌面端生成（需求文档 Q7）。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PairScreen(
     viewModel: PairViewModel,
+    /**
+     * 是否处于「添加远程」模式（R054）。
+     *
+     * 首次配对与添加第二台走的是**同一个页面**（扫码 / 链接 / 手工三条入口全部复用），
+     * 差别只有三处，且都是「因为已经有一台在跑」才成立：
+     *
+     * 1. 顶部有返回按钮——首次配对时退无可退，而添加时退回去就是原来那一台；
+     * 2. 副标题声明「不会覆盖当前」——否则用户会担心配对会把现有连接顶掉；
+     * 3. 成功后不自动切走，而是问一句「现在切过去吗」（原型 s3 定的）。
+     */
+    addMode: Boolean = false,
+    /** 返回上一屏；仅 [addMode] 下有意义（首次配对时为 `null`，不画返回按钮）。 */
+    onCancel: (() -> Unit)? = null,
+    /** 配对成功且已写入凭证簿后回调（参数是新主机）。 */
+    onAdded: (DeviceCredential) -> Unit = {},
+    /** 「现在切过去」：直接切到新加的那台。 */
+    onSwitchToAdded: (DeviceCredential) -> Unit = {},
 ) {
     val state by viewModel.state.collectAsState()
     // ⚠️ 这四个都必须是 rememberSaveable：`MainActivity` 没有 `configChanges`，转屏会重建
@@ -131,16 +156,56 @@ fun PairScreen(
     // 两张卡只是它的两个视觉分组。
     var manualBaseUrl by rememberSaveable { mutableStateOf("") }
     var manualDeviceId by rememberSaveable { mutableStateOf("") }
+    // 成功卡不再画在整页最底部（见下方注释）：手工入口那两张卡很高，成功卡会整个
+    // 落在屏幕之外，用户以为没成功就再点一次——每次点击都真的写进凭证簿，实测连成
+    // 11 台同地址主机。改成插在入口选择器下方，出现即在视野内。
 
     // `lastBaseUrl` 是异步读出来的（`init` 里 `credentialStore.load()`），不能拿它当
     // `remember` 的键：那样从 null 变成值时会把用户已经敲进去的地址**重置**掉。改成
     // 「只在仍为空时回填一次」。
+    // 「已加入列表」是一次性事件：页面离开组合时消费掉，否则同一台 VM 在下次进入时
+    // 还会把上一轮的成功卡画出来（key 改稳定后 VM 不再被重建，见 AppRoot 的注释）。
+    DisposableEffect(Unit) {
+        onDispose { viewModel.clearAddedHost() }
+    }
+
     LaunchedEffect(state.lastBaseUrl) {
         val remembered = state.lastBaseUrl
         if (manualBaseUrl.isBlank() && !remembered.isNullOrBlank()) manualBaseUrl = remembered
     }
 
-    Scaffold { padding ->
+    Scaffold(
+        topBar = {
+            // 仅添加模式有顶栏：首次配对时这一屏就是全屏路由，
+            // 多一条顶栏只会把 hero 往下挤。
+            if (addMode) {
+                TopAppBar(
+                    navigationIcon = {
+                        if (onCancel != null) {
+                            AppIconButton(onClick = onCancel, contentDescription = "返回") {
+                                Icon(Icons.Default.ArrowBack, contentDescription = null)
+                            }
+                        }
+                    },
+                    title = {
+                        Column {
+                            Text(
+                                text = "添加远程",
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            Text(
+                                text = "配对成功后加入列表，不会覆盖当前主机",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    },
+                )
+            }
+        },
+    ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -153,6 +218,64 @@ fun PairScreen(
             PairHero(entry = entry)
 
             PairEntryPicker(selected = entry, onSelect = { entry = it })
+
+            // 添加模式的成功卡（原型 s3 的「现在切过去吗」）。
+            //
+            // 为什么要问而不是直接切：用户可能只是想把第二台存进列表（例如在办公室配好家里
+            // 的那台，之后回家才用）。直接切过去会把他正在做的事打断，而且新主机
+            // 刚配对、很可能还没数据，落地就是空列表。
+            state.addedHost?.let { added ->
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = LocalStatusRunning.current,
+                            )
+                            Spacer(Modifier.width(7.dp))
+                            Text(
+                                text = "已加入列表",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                        Text(
+                            text = added.displayName,
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                        Text(
+                            text = added.endpointLabel,
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 1.dp),
+                        )
+                        Text(
+                            text = "当前仍在原来那台，随时可以在设备栏里切过去。",
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            TextButton(onClick = { onAdded(added) }) { Text("留在当前主机") }
+                            TextButton(onClick = { onSwitchToAdded(added) }) { Text("现在切过去") }
+                        }
+                    }
+                }
+            }
 
             when (entry) {
                 PairEntry.Scan -> ScanCard(

@@ -31,15 +31,30 @@ import androidx.compose.runtime.Composable
 fun ConfirmUnpairDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
+    /**
+     * 凭证簿里还有几台（R054）。
+     *
+     * 单主机时这句话是「退出配对」，多主机时它其实是「把所有远程都删掉」——
+     * 动作一样、后果差很多。文案必须跟着变，否则用户在多主机下读到「退出配对」，
+     * 会以为只影响当前那台。
+     */
+    hostCount: Int = 1,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("退出配对？") },
+        title = { Text(if (hostCount > 1) "移除全部 $hostCount 台远程？" else "退出配对？") },
         text = {
             Text(
-                "会清掉本机保存的设备凭证，之后需要回到桌面端重新发起配对" +
-                    "（用链接或二维码）才能再次连接。\n\n" +
-                    "缓存的会话与消息会保留，重新配对后仍可查看。",
+                if (hostCount > 1) {
+                    "会清掉本机保存的全部 $hostCount 台设备凭证，不是只删当前这台。" +
+                        "之后需要回到桌面端重新发起配对（用链接或二维码）才能再次连接。\n\n" +
+                        "只想删当前这一台的话，用上一行的「断开当前远程」。\n\n" +
+                        "缓存的会话与消息会保留，重新配对后仍可查看。"
+                } else {
+                    "会清掉本机保存的设备凭证，之后需要回到桌面端重新发起配对" +
+                        "（用链接或二维码）才能再次连接。\n\n" +
+                        "缓存的会话与消息会保留，重新配对后仍可查看。"
+                },
             )
         },
         confirmButton = {
@@ -52,7 +67,7 @@ fun ConfirmUnpairDialog(
                     contentColor = MaterialTheme.colorScheme.error,
                 ),
             ) {
-                Text("退出配对")
+                Text(if (hostCount > 1) "全部移除" else "退出配对")
             }
         },
         dismissButton = {

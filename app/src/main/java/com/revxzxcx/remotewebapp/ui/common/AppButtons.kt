@@ -14,6 +14,8 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 
 /**
@@ -146,6 +148,25 @@ fun OverflowMenuDivider() {
  * 不是列表行。若日后想要内缩，把同一个 source 传给 `rememberPressScale`
  * 即可（见 PressFeedback.kt 的 KDoc）。
  */
+/**
+ * 溢出菜单里的**分区标题**（R054）：多主机之后菜单多了「远程」这一组，
+ * 需要一个小字标题把「页面动作」与「主机配置」分开。
+ *
+ * 规格照原型 s4 的 `.mhead`：9sp、字距 0.6sp、onSurfaceVariant、上下留白比其他项窄。
+ * 与 [OverflowItem] 的区别是它**不可点**——它只是分组的标签，不是动作。
+ */
+@Composable
+fun OverflowMenuSectionHeader(text: String) {
+    Text(
+        text = text,
+        modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 7.dp, bottom = 5.dp),
+        fontSize = 9.sp,
+        letterSpacing = 0.6.sp,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
 @Composable
 fun OverflowMenuIconButton(
     expanded: Boolean,

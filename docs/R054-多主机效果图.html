@@ -1,0 +1,1070 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>R054 效果图 · 多主机切换 + 菜单与设置重构</title>
+<style>
+:root{
+  --primary:#5AA2FF; --onPrimary:#04121F;
+  --background:#0B1420; --onBackground:#E6EFFA;
+  --surface:#111C2B; --onSurface:#E6EFFA;
+  --surfaceVariant:#1A2942; --onSurfaceVariant:#9BB0C8;
+  --outline:#31485F; --outlineVariant:#22334A;
+  --tertiary:#F2C14E; --running:#4ADE80; --error:#FF8A80;
+  --r-xs:6px; --r-sm:10px; --r-md:14px; --r-lg:20px; --r-xl:28px; --r-pill:999px;
+  --t-fast:140ms; --t-med:240ms; --t-slow:360ms;
+  --ease:cubic-bezier(.2,0,0,1);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#060B12;color:var(--onBackground);
+  font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:13px;line-height:1.6;padding:28px 24px 80px}
+.wrap{max-width:1640px;margin:0 auto}
+h1{font-size:19px;font-weight:600;letter-spacing:.2px}
+.sub{color:var(--onSurfaceVariant);font-size:12px;margin-top:6px;line-height:1.8}
+.sub code{font-family:ui-monospace,monospace;font-size:11px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+section{margin-top:40px}
+h2{font-size:14px;font-weight:600;color:var(--primary);display:flex;align-items:center;gap:8px}
+h2 .n{width:20px;height:20px;border-radius:50%;background:rgba(90,162,255,.14);
+  border:1px solid rgba(90,162,255,.4);font-size:11px;display:flex;
+  align-items:center;justify-content:center;color:var(--primary);flex:0 0 20px}
+.note{color:var(--onSurfaceVariant);font-size:11.5px;line-height:1.85;margin-top:8px}
+.note b{color:var(--onSurface);font-weight:600}
+.note code{font-family:ui-monospace,monospace;font-size:10.5px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+.row{display:flex;gap:26px;align-items:flex-start;flex-wrap:wrap;margin-top:16px}
+
+/* ── 手机外壳 ─────────────────────────────────────────── */
+.phone{width:360px;flex:0 0 360px;background:var(--background);
+  border-radius:22px;border:1px solid var(--outlineVariant);
+  overflow:hidden;box-shadow:0 22px 60px rgba(0,0,0,.6);
+  display:flex;flex-direction:column;min-height:640px;position:relative}
+.phone.light{--background:#F4F7FB;--onBackground:#182430;--surface:#FFFFFF;
+  --onSurface:#182430;--surfaceVariant:#E9EFF7;--onSurfaceVariant:#45586D;
+  --outline:#C7D5E6;--outlineVariant:#DDE6F1;--primary:#1F6FEB;
+  --tertiary:#C08A12;--running:#15803D;--error:#C62828;
+  color:var(--onBackground);background:var(--background)}
+.cap{font-size:10.5px;color:var(--onSurfaceVariant);margin-top:7px;text-align:center;
+  width:360px;flex:0 0 360px;line-height:1.6}
+.cap b{color:var(--primary);font-weight:600}
+.status{height:26px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 13px;font-size:9.5px;color:var(--onSurfaceVariant);letter-spacing:.3px;flex:0 0 auto}
+
+/* ── 顶栏（旧版，对照用） ─────────────────────────────── */
+.topbar{height:46px;display:flex;align-items:center;gap:8px;padding:0 6px 0 4px;
+  border-bottom:1px solid var(--outlineVariant);flex:0 0 auto}
+.tb-btn{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;color:var(--onSurface);position:relative;font-size:15px}
+.tb-btn .badge{position:absolute;right:5px;bottom:5px;width:5px;height:5px;
+  border-radius:50%;background:var(--primary);box-shadow:0 0 0 2px var(--background)}
+.tb-mid{flex:1;min-width:0}
+.tb-t1{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb-t2{font-size:9.5px;color:var(--onSurfaceVariant);margin-top:1px}
+
+/* ── 顶栏（新版：标题可点 + 加号） ───────────────────── */
+.topbar.new{padding:0 4px}
+.tb-title{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;
+  padding:4px 6px;border-radius:var(--r-sm);position:relative}
+.tb-title .caret{margin-left:5px;font-size:8px;color:var(--onSurfaceVariant);
+  display:inline-block;vertical-align:middle;transition:transform var(--t-fast) var(--ease)}
+.tb-title.open{background:var(--surfaceVariant)}
+.tb-title.open .caret{transform:rotate(180deg)}
+.tb-l1{display:flex;align-items:center;min-width:0}
+.tb-l1 .name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;min-width:0}
+.tb-l2{font-size:9.5px;color:var(--onSurfaceVariant);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.tb-add{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;color:var(--primary);font-size:17px;font-weight:400;
+  background:rgba(90,162,255,.12);border:1px solid rgba(90,162,255,.32);
+  margin-right:2px;flex:0 0 auto}
+.phone.light .tb-add{background:rgba(31,111,235,.09)}
+
+/* ── 设备栏（向下展开） ───────────────────────────────── */
+.devwrap{position:relative;flex:0 0 auto}
+.devbar{background:var(--surface);border-bottom:1px solid var(--outline);
+  box-shadow:0 14px 34px rgba(0,0,0,.5);position:relative;z-index:3}
+.phone.light .devbar{box-shadow:0 14px 34px rgba(24,36,48,.14)}
+.db-head{display:flex;align-items:center;gap:6px;padding:9px 13px 7px}
+.db-head .t{font-size:10px;font-weight:600;letter-spacing:.6px;color:var(--onSurfaceVariant)}
+.db-head .c{font-size:9px;color:var(--onSurfaceVariant);background:var(--surfaceVariant);
+  padding:0 5px;border-radius:var(--r-pill);font-variant-numeric:tabular-nums}
+.db-head .x{margin-left:auto;font-size:13px;color:var(--onSurfaceVariant);line-height:1}
+.db-list{padding:0 8px 6px;display:flex;flex-direction:column;gap:4px}
+.dev{display:flex;align-items:center;gap:9px;padding:8px 9px;border-radius:var(--r-md);
+  border:1px solid transparent;background:transparent}
+.dev.on{background:rgba(90,162,255,.10);border-color:rgba(90,162,255,.34)}
+.phone.light .dev.on{background:rgba(31,111,235,.07);border-color:rgba(31,111,235,.3)}
+.dev .dot{width:7px;height:7px;border-radius:50%;flex:0 0 7px;background:var(--outline)}
+.dev .dot.ok{background:var(--running);box-shadow:0 0 0 3px rgba(74,222,128,.16)}
+.dev .dot.bad{background:var(--error);box-shadow:0 0 0 3px rgba(255,138,128,.14)}
+.dev .dot.idle{background:var(--onSurfaceVariant);opacity:.5}
+.dev .m{flex:1;min-width:0}
+.dev .m1{font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;display:flex;align-items:center;gap:5px}
+.dev .m2{font-size:8.5px;color:var(--onSurfaceVariant);font-family:ui-monospace,monospace;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.tag{font-size:8px;padding:0 5px;border-radius:var(--r-pill);font-weight:400;
+  border:1px solid currentColor;line-height:14px;flex:0 0 auto}
+.tag.cur{color:var(--primary)}
+.tag.off{color:var(--error)}
+.dev .more{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;color:var(--onSurfaceVariant);font-size:13px;flex:0 0 24px}
+.dev .check{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--outline);
+  flex:0 0 16px;display:flex;align-items:center;justify-content:center;font-size:9px;
+  color:transparent}
+.dev.on .check{border-color:var(--primary);background:var(--primary);color:#04121F}
+.db-add{margin:2px 8px 10px;height:34px;border-radius:var(--r-md);display:flex;
+  align-items:center;justify-content:center;gap:6px;font-size:11px;color:var(--primary);
+  border:1px dashed rgba(90,162,255,.45);background:rgba(90,162,255,.05)}
+.phone.light .db-add{border-color:rgba(31,111,235,.4);background:rgba(31,111,235,.04)}
+.db-tip{padding:0 13px 9px;font-size:8.5px;color:var(--onSurfaceVariant);line-height:1.55}
+.scrim2{position:absolute;inset:0;background:rgba(4,8,14,.42);z-index:1}
+.phone.light .scrim2{background:rgba(24,36,48,.18)}
+
+/* ── 首页列表 ─────────────────────────────────────────── */
+.hlist{flex:1;padding:8px 10px;display:flex;flex-direction:column;gap:6px;
+  overflow:hidden;position:relative;z-index:0}
+.ws{border:1px solid var(--outlineVariant);border-radius:var(--r-md);background:var(--surface);
+  padding:9px 11px;display:flex;align-items:center;gap:9px}
+.ws .ic{width:26px;height:26px;border-radius:8px;background:rgba(90,162,255,.16);
+  display:flex;align-items:center;justify-content:center;color:var(--primary);font-size:12px}
+.ws .t{flex:1;min-width:0}
+.ws .t1{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ws .t2{font-size:9px;color:var(--onSurfaceVariant);margin-top:1px;
+  font-family:ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ws .pills{display:flex;gap:4px;flex:0 0 auto}
+.pill{font-size:8.5px;padding:1.5px 6px;border-radius:var(--r-pill);
+  background:var(--surfaceVariant);color:var(--onSurfaceVariant);
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+.pill.run{border:1px solid rgba(74,222,128,.45);color:var(--running)}
+.pill.arc{border:1px solid rgba(242,193,78,.32);color:var(--tertiary)}
+
+/* ── 行内菜单 / 长按菜单（新风格） ─────────────────────── */
+.menu{background:var(--surface);border:1px solid var(--outline);border-radius:var(--r-md);
+  box-shadow:0 18px 44px rgba(0,0,0,.62);padding:5px;width:212px}
+.phone.light .menu{box-shadow:0 18px 44px rgba(24,36,48,.2)}
+.mi{display:flex;align-items:center;gap:9px;padding:8px 9px;border-radius:var(--r-sm);
+  font-size:12px;color:var(--onSurface)}
+.mi .i{width:16px;text-align:center;font-size:13px;color:var(--onSurfaceVariant);flex:0 0 16px}
+.mi .k{margin-left:auto;font-size:9px;color:var(--onSurfaceVariant);
+  font-family:ui-monospace,monospace}
+.mi.on{background:var(--surfaceVariant)}
+.mi.dgr{color:var(--error)}
+.mi.dgr .i{color:var(--error)}
+.msep{height:1px;background:var(--outlineVariant);margin:4px 6px}
+.mhead{padding:7px 9px 5px;font-size:9px;letter-spacing:.6px;color:var(--onSurfaceVariant);
+  font-weight:600}
+
+/* ── 对话框 ───────────────────────────────────────────── */
+.dlg{background:var(--surface);border:1px solid var(--outline);border-radius:var(--r-xl);
+  box-shadow:0 26px 64px rgba(0,0,0,.7);padding:16px 16px 10px;width:286px}
+.phone.light .dlg{box-shadow:0 26px 64px rgba(24,36,48,.26)}
+.dlg .h{display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600}
+.dlg .h .i{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;font-size:13px;background:rgba(242,193,78,.14);color:var(--tertiary)}
+.dlg .h .i.red{background:rgba(255,138,128,.14);color:var(--error)}
+.dlg .b{font-size:11px;color:var(--onSurfaceVariant);line-height:1.75;margin-top:9px}
+.dlg .b b{color:var(--onSurface);font-weight:600}
+.dlg .why{margin-top:8px;font-size:10px;line-height:1.7;color:var(--tertiary);
+  background:rgba(242,193,78,.08);border-left:2px solid rgba(242,193,78,.5);
+  padding:6px 8px;border-radius:0 var(--r-xs) var(--r-xs) 0}
+.dlg .why.red{color:var(--error);background:rgba(255,138,128,.08);
+  border-left-color:rgba(255,138,128,.5)}
+.dlg .f{display:flex;justify-content:flex-end;gap:4px;margin-top:12px}
+.btn{font-size:12px;padding:7px 13px;border-radius:var(--r-sm);color:var(--primary)}
+.btn.dgr{color:var(--error)}
+.btn.solid{background:var(--error);color:#fff;font-weight:600}
+.fieldwrap{margin-top:9px}
+.fieldwrap .lbl{font-size:9.5px;color:var(--onSurfaceVariant);margin-bottom:4px}
+.inp{height:34px;border-radius:var(--r-sm);border:1px solid var(--outline);
+  background:var(--background);display:flex;align-items:center;padding:0 10px;
+  font-size:12px;color:var(--onSurface)}
+.inp.on{border-color:var(--primary);box-shadow:0 0 0 2px rgba(90,162,255,.16)}
+.phone.light .inp.on{box-shadow:0 0 0 2px rgba(31,111,235,.14)}
+.inp .cursor{width:1px;height:15px;background:var(--primary);margin-left:1px}
+
+/* ── 设置页 ───────────────────────────────────────────── */
+.set-body{flex:1;overflow:hidden;padding:10px 12px 16px;display:flex;
+  flex-direction:column;gap:11px}
+.set-sec{font-size:9.5px;font-weight:600;letter-spacing:.7px;
+  color:var(--onSurfaceVariant);padding:2px 4px 0}
+.set-card{background:var(--surface);border:1px solid var(--outlineVariant);
+  border-radius:var(--r-md);overflow:hidden}
+.sr{display:flex;align-items:center;gap:10px;padding:11px 12px}
+.sr + .sr{border-top:1px solid var(--outlineVariant)}
+.sr .i{width:26px;height:26px;border-radius:8px;display:flex;align-items:center;
+  justify-content:center;font-size:13px;flex:0 0 26px;
+  background:var(--surfaceVariant);color:var(--onSurfaceVariant)}
+.sr .i.pri{background:rgba(90,162,255,.14);color:var(--primary)}
+.sr .i.run{background:rgba(74,222,128,.13);color:var(--running)}
+.sr .i.ter{background:rgba(242,193,78,.13);color:var(--tertiary)}
+.sr .i.red{background:rgba(255,138,128,.13);color:var(--error)}
+.sr .m{flex:1;min-width:0}
+.sr .m1{font-size:12px;font-weight:500;color:var(--onSurface)}
+.sr .m2{font-size:9.5px;color:var(--onSurfaceVariant);margin-top:1px;line-height:1.5}
+.sr .v{font-size:11px;color:var(--onSurfaceVariant);font-variant-numeric:tabular-nums;
+  flex:0 0 auto}
+.sr .chev{font-size:13px;color:var(--onSurfaceVariant);opacity:.6;flex:0 0 auto}
+.seg{display:flex;gap:2px;padding:2px;background:var(--background);
+  border:1px solid var(--outlineVariant);border-radius:var(--r-pill);flex:0 0 auto}
+.seg .s{padding:4px 9px;font-size:10px;border-radius:var(--r-pill);
+  color:var(--onSurfaceVariant);white-space:nowrap}
+.seg .s.on{background:var(--primary);color:var(--onPrimary);font-weight:600}
+.sw{width:34px;height:20px;border-radius:var(--r-pill);background:var(--outline);
+  position:relative;flex:0 0 34px}
+.sw.on{background:var(--primary)}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;
+  border-radius:50%;background:#fff;transition:left var(--t-fast) var(--ease)}
+.sw.on::after{left:16px}
+.foot-note{font-size:9px;color:var(--onSurfaceVariant);line-height:1.7;padding:0 4px}
+
+/* ── 通用块 ───────────────────────────────────────────── */
+.kv{display:flex;align-items:baseline;justify-content:space-between;
+  font-size:10.5px;padding:2.5px 0;font-variant-numeric:tabular-nums}
+.kv span:first-child{color:var(--onSurfaceVariant)}
+.tbl{width:100%;border-collapse:collapse;margin-top:12px;font-size:11.5px}
+.tbl th{text-align:left;font-weight:600;font-size:10px;letter-spacing:.4px;
+  color:var(--onSurfaceVariant);padding:7px 9px;border-bottom:1px solid var(--outline);
+  background:var(--surface);white-space:nowrap}
+.tbl td{padding:7px 9px;border-bottom:1px solid var(--outlineVariant);
+  color:var(--onSurface);vertical-align:top}
+.tbl td code{font-family:ui-monospace,monospace;font-size:10px;
+  color:var(--primary);background:var(--surfaceVariant);padding:1px 4px;border-radius:3px}
+.tbl tr:last-child td{border-bottom:none}
+.tbl .num{font-variant-numeric:tabular-nums;white-space:nowrap}
+.tbl-wrap{background:var(--surface);border:1px solid var(--outlineVariant);
+  border-radius:var(--r-md);overflow:hidden;margin-top:12px}
+.tbl-wrap .tbl{margin-top:0}
+.q{background:var(--surface);border:1px solid var(--outlineVariant);border-radius:var(--r-md);
+  padding:12px 14px;margin-top:10px}
+.q .qt{font-size:12px;font-weight:600;color:var(--primary)}
+.q .qb{font-size:11.5px;color:var(--onSurfaceVariant);line-height:1.8;margin-top:5px}
+.q .qb b{color:var(--onSurface)}
+.opt{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.opt .o{font-size:10.5px;padding:4px 9px;border-radius:var(--r-pill);
+  border:1px solid var(--outline);color:var(--onSurfaceVariant)}
+.opt .o.rec{border-color:rgba(74,222,128,.5);color:var(--running)}
+.badge2{display:inline-block;font-size:9px;padding:1px 6px;border-radius:var(--r-pill);
+  background:rgba(90,162,255,.14);color:var(--primary);border:1px solid rgba(90,162,255,.32)}
+.badge2.warn{background:rgba(242,193,78,.12);color:var(--tertiary);
+  border-color:rgba(242,193,78,.32)}
+.badge2.ok{background:rgba(74,222,128,.12);color:var(--running);
+  border-color:rgba(74,222,128,.32)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>R054 效果图 · 多主机切换 + 右上角菜单与设置页重构</h1>
+<div class="sub">
+  目标：App 能同时记住多台远程主机并随时切换；首页标题变成「当前主机」的可点入口，旁边一个 <code>+</code>；顺带把右上角溢出菜单和设置页重做成与全 App 一致的风格。<br>
+  设计令牌与 <code>docs/R040-效果图.html</code> / <code>R050</code> 完全一致（<code>#5AA2FF</code> / <code>#0B1420</code> / <code>#111C2B</code> / 圆角 <code>6·10·14·20·28</code> / <code>cubic-bezier(.2,0,0,1)</code>）。
+</div>
+
+<section>
+<h2><span class="n">1</span>首页顶栏：标题变入口，右侧加号</h2>
+<div class="note">
+  顶栏左侧原本是「☰」+「远程 Web / 工作区 9 · 会话 34」两行。现在<b>第一行换成当前主机名</b>，整块可点（点开设备栏），名字后带一个小三角表示可展开；<b>右侧「更多」旁加一个 <code>+</code></b>，直接进「添加远程」。
+  <br>副标题保留原来的工作区/会话计数，只在最前面加一个主机状态点——这样不点开也知道<b>当前这台通不通</b>。
+</div>
+<div class="row">
+  <div>
+    <div class="phone" data-fixed="1" style="height:262px">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar">
+        <div class="tb-btn">☰</div>
+        <div class="tb-mid">
+          <div class="tb-t1">远程 Web</div>
+          <div class="tb-t2">工作区 9 · 会话 34</div>
+        </div>
+        <div class="tb-btn">◔</div>
+        <div class="tb-btn">⋮</div>
+      </div>
+      <div class="hlist">
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">bot</div>
+          <div class="t2">F:/bot</div></div>
+          <div class="pills"><span class="pill">12 会话</span></div></div>
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">dsh-plugin</div>
+          <div class="t2">C:/Users/26903/.dsh/plugins</div></div>
+          <div class="pills"><span class="pill run">正在生成</span></div></div>
+      </div>
+    </div>
+    <div class="cap">现在的样子 · 标题是固定的 App 名</div>
+  </div>
+
+  <div>
+    <div class="phone" data-fixed="1" style="height:262px">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar new">
+        <div class="tb-btn">☰</div>
+        <div class="tb-title">
+          <div class="tb-l1"><span class="name">家里的主机</span><span class="caret">▼</span></div>
+          <div class="tb-l2">● 工作区 9 · 会话 34</div>
+        </div>
+        <div class="tb-add">+</div>
+        <div class="tb-btn">◔</div>
+        <div class="tb-btn">⋮</div>
+      </div>
+      <div class="hlist">
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">bot</div>
+          <div class="t2">F:/bot</div></div>
+          <div class="pills"><span class="pill">12 会话</span></div></div>
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">dsh-plugin</div>
+          <div class="t2">C:/Users/26903/.dsh/plugins</div></div>
+          <div class="pills"><span class="pill run">正在生成</span></div></div>
+      </div>
+    </div>
+    <div class="cap"><b>改后</b> · 标题 = 当前主机，<code>+</code> = 添加远程</div>
+  </div>
+
+  <div>
+    <div class="phone" data-fixed="1" style="height:520px">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar new">
+        <div class="tb-btn">☰</div>
+        <div class="tb-title open">
+          <div class="tb-l1"><span class="name">家里的主机</span><span class="caret">▼</span></div>
+          <div class="tb-l2">● 工作区 9 · 会话 34</div>
+        </div>
+        <div class="tb-add">+</div>
+        <div class="tb-btn">◔</div>
+        <div class="tb-btn">⋮</div>
+      </div>
+      <div class="devwrap">
+        <div class="devbar">
+          <div class="db-head"><span class="t">我的远程</span><span class="c">3</span>
+            <span class="x">✕</span></div>
+          <div class="dev-list">
+            <div class="dev on"><div class="dot ok"></div>
+              <div class="m"><div class="m1">家里的主机 <span class="tag cur">当前</span></div>
+                <div class="m2">192.168.1.5:19387</div></div>
+              <div class="more">⋯</div><div class="check">✓</div></div>
+            <div class="dev"><div class="dot bad"></div>
+              <div class="m"><div class="m1">公司服务器 <span class="tag off">离线</span></div>
+                <div class="m2">office.example.com</div></div>
+              <div class="more">⋯</div><div class="check">✓</div></div>
+            <div class="dev"><div class="dot idle"></div>
+              <div class="m"><div class="m1">笔记本（测试）</div>
+                <div class="m2">10.0.0.7:19387</div></div>
+              <div class="more">⋯</div><div class="check">✓</div></div>
+          </div>
+          <div class="db-add">＋ 添加远程 Web</div>
+          <div class="db-tip">点一行即切换。切走后原来的会话不会中断，在桌面端照常跑。</div>
+        </div>
+      </div>
+      <div class="hlist" style="opacity:.26">
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">bot</div>
+          <div class="t2">F:/bot</div></div><div class="pills"><span class="pill">12 会话</span></div></div>
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">dsh-plugin</div>
+          <div class="t2">C:/Users/26903/.dsh/plugins</div></div>
+          <div class="pills"><span class="pill run">正在生成</span></div></div>
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">remote-web-app</div>
+          <div class="t2">F:/bot/remote-web-app</div></div>
+          <div class="pills"><span class="pill">6 会话</span></div></div>
+      </div>
+    </div>
+    <div class="cap">点标题 → <b>设备栏向下展开</b>（只把内容推下去，顶栏位置不动）</div>
+  </div>
+</div>
+</section>
+
+<section>
+<h2><span class="n">2</span>设备栏里的操作：重命名 / 编辑 / 删除 / 添加</h2>
+<div class="note">
+  每行右侧 <code>⋯</code> 弹出这一台的菜单。<b>「切换」和「管理」是两件事</b>——点行是切换，点 <code>⋯</code> 才是管理，避免想切过去却点进了删除。
+  <br>删除用<b>琥珀色确认框</b>而不是红色惊呼：这台只是从手机列表里移除，桌面端完全不受影响，重配一次就能加回来——代价没有「解除配对」那么大。
+</div>
+<div class="row">
+  <div>
+    <div class="phone" data-fixed="1" style="height:470px">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar new">
+        <div class="tb-btn">☰</div>
+        <div class="tb-title open">
+          <div class="tb-l1"><span class="name">家里的主机</span><span class="caret">▼</span></div>
+          <div class="tb-l2">● 工作区 9 · 会话 34</div>
+        </div>
+        <div class="tb-add">+</div>
+        <div class="tb-btn">◔</div>
+        <div class="tb-btn">⋮</div>
+      </div>
+      <div class="devwrap">
+        <div class="devbar">
+          <div class="db-head"><span class="t">我的远程</span><span class="c">3</span>
+            <span class="x">✕</span></div>
+          <div class="dev-list">
+            <div class="dev on"><div class="dot ok"></div>
+              <div class="m"><div class="m1">家里的主机 <span class="tag cur">当前</span></div>
+                <div class="m2">192.168.1.5:19387</div></div>
+              <div class="more">⋯</div><div class="check">✓</div></div>
+            <div class="dev"><div class="dot bad"></div>
+              <div class="m"><div class="m1">公司服务器 <span class="tag off">离线</span></div>
+                <div class="m2">office.example.com</div></div>
+              <div class="more" style="background:var(--surfaceVariant);color:var(--onSurface)">⋯</div>
+              <div class="check">✓</div></div>
+            <div class="dev"><div class="dot idle"></div>
+              <div class="m"><div class="m1">笔记本（测试）</div>
+                <div class="m2">10.0.0.7:19387</div></div>
+              <div class="more">⋯</div><div class="check">✓</div></div>
+          </div>
+          <div class="db-add">＋ 添加远程 Web</div>
+          <div class="db-tip">点一行即切换。切走后原来的会话不会中断，在桌面端照常跑。</div>
+        </div>
+        <div class="menu" style="position:absolute;right:12px;top:150px;z-index:5">
+          <div class="mhead">公司服务器</div>
+          <div class="mi"><span class="i">✎</span>重命名<span class="k"></span></div>
+          <div class="mi"><span class="i">⚙</span>编辑地址与凭据</div>
+          <div class="mi"><span class="i">⟳</span>测试连接</div>
+          <div class="msep"></div>
+          <div class="mi dgr"><span class="i">⊗</span>从列表移除</div>
+        </div>
+      </div>
+      <div class="hlist" style="opacity:.24">
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">bot</div>
+          <div class="t2">F:/bot</div></div><div class="pills"><span class="pill">12 会话</span></div></div>
+      </div>
+    </div>
+    <div class="cap">行末 <code>⋯</code> → 这一台的<b>管理菜单</b>（切换不在这里）</div>
+  </div>
+
+  <div>
+    <div class="phone" data-fixed="1" style="height:470px">
+      <div class="scrim2"></div>
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar new">
+        <div class="tb-btn">☰</div>
+        <div class="tb-title open">
+          <div class="tb-l1"><span class="name">家里的主机</span><span class="caret">▼</span></div>
+          <div class="tb-l2">● 工作区 9 · 会话 34</div>
+        </div>
+        <div class="tb-add">+</div>
+        <div class="tb-btn">◔</div>
+        <div class="tb-btn">⋮</div>
+      </div>
+      <div class="devwrap">
+        <div class="devbar">
+          <div class="db-head"><span class="t">我的远程</span><span class="c">3</span>
+            <span class="x">✕</span></div>
+          <div class="dev-list">
+            <div class="dev on"><div class="dot ok"></div>
+              <div class="m"><div class="m1">家里的主机 <span class="tag cur">当前</span></div>
+                <div class="m2">192.168.1.5:19387</div></div>
+              <div class="more">⋯</div><div class="check">✓</div></div>
+            <div class="dev"><div class="dot bad"></div>
+              <div class="m"><div class="m1">公司服务器 <span class="tag off">离线</span></div>
+                <div class="m2">office.example.com</div></div>
+              <div class="more">⋯</div><div class="check">✓</div></div>
+          </div>
+          <div class="db-add">＋ 添加远程 Web</div>
+        </div>
+      </div>
+      <div style="position:absolute;left:0;right:0;bottom:44px;display:flex;
+        justify-content:center;z-index:6">
+        <div class="dlg">
+          <div class="h"><span class="i">✎</span>重命名</div>
+          <div class="fieldwrap">
+            <div class="lbl">这一台在你手机上的名字</div>
+            <div class="inp on">公司服务器<span class="cursor"></span></div>
+          </div>
+          <div class="b" style="margin-top:7px">只改手机上显示的名字，桌面端不受影响。</div>
+          <div class="f"><div class="btn">取消</div><div class="btn" style="font-weight:600">保存</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>重命名</b> · 只影响本机显示名</div>
+  </div>
+
+  <div>
+    <div class="phone" data-fixed="1" style="height:470px">
+      <div class="scrim2"></div>
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar new">
+        <div class="tb-btn">☰</div>
+        <div class="tb-title open">
+          <div class="tb-l1"><span class="name">家里的主机</span><span class="caret">▼</span></div>
+          <div class="tb-l2">● 工作区 9 · 会话 34</div>
+        </div>
+        <div class="tb-add">+</div>
+        <div class="tb-btn">◔</div>
+        <div class="tb-btn">⋮</div>
+      </div>
+      <div class="devwrap">
+        <div class="devbar">
+          <div class="db-head"><span class="t">我的远程</span><span class="c">3</span>
+            <span class="x">✕</span></div>
+          <div class="dev-list">
+            <div class="dev on"><div class="dot ok"></div>
+              <div class="m"><div class="m1">家里的主机 <span class="tag cur">当前</span></div>
+                <div class="m2">192.168.1.5:19387</div></div>
+              <div class="more">⋯</div><div class="check">✓</div></div>
+          </div>
+          <div class="db-add">＋ 添加远程 Web</div>
+        </div>
+      </div>
+      <div style="position:absolute;left:0;right:0;bottom:36px;display:flex;
+        justify-content:center;z-index:6">
+        <div class="dlg">
+          <div class="h"><span class="i">⊗</span>从列表移除？</div>
+          <div class="b">
+            这台是<b>「公司服务器」</b>（office.example.com）。移除后手机上不再显示它，
+            <b>桌面端不受影响</b>，它的会话与工作区都还在。
+          </div>
+          <div class="why">本机为它缓存的工作区与消息会被清掉。<br>
+            想再连它，重新发起一次配对即可。</div>
+          <div class="f"><div class="btn">取消</div>
+            <div class="btn dgr" style="font-weight:600">移除</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>移除确认</b> · 琥珀色，说明代价与可逆性</div>
+  </div>
+</div>
+</section>
+
+<section>
+<h2><span class="n">3</span>添加远程：复用现有配对流程</h2>
+<div class="note">
+  点 <code>+</code> 或设备栏里的「添加远程 Web」，进的是<b>已有的配对页</b>——不新造流程，只是把它当「新主机」加进列表而不是覆盖当前凭证。
+  <br>区别只有一处：配对成功后<b>不切走当前主机</b>，而是问一句「现在切过去吗」。
+</div>
+<div class="row">
+  <div>
+    <div class="phone" data-fixed="1" style="height:400px">
+      <div class="scrim2"></div>
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar new">
+        <div class="tb-btn">☰</div>
+        <div class="tb-title open">
+          <div class="tb-l1"><span class="name">家里的主机</span><span class="caret">▼</span></div>
+          <div class="tb-l2">● 工作区 9 · 会话 34</div>
+        </div>
+        <div class="tb-add" style="background:var(--primary);color:var(--onPrimary)">+</div>
+        <div class="tb-btn">◔</div>
+        <div class="tb-btn">⋮</div>
+      </div>
+      <div class="devwrap">
+        <div class="devbar">
+          <div class="db-head"><span class="t">我的远程</span><span class="c">3</span>
+            <span class="x">✕</span></div>
+          <div class="dev-list">
+            <div class="dev on"><div class="dot ok"></div>
+              <div class="m"><div class="m1">家里的主机 <span class="tag cur">当前</span></div>
+                <div class="m2">192.168.1.5:19387</div></div>
+              <div class="more">⋯</div><div class="check">✓</div></div>
+            <div class="dev"><div class="dot bad"></div>
+              <div class="m"><div class="m1">公司服务器 <span class="tag off">离线</span></div>
+                <div class="m2">office.example.com</div></div>
+              <div class="more">⋯</div><div class="check">✓</div></div>
+            <div class="dev"><div class="dot idle"></div>
+              <div class="m"><div class="m1">笔记本（测试）</div>
+                <div class="m2">10.0.0.7:19387</div></div>
+              <div class="more">⋯</div><div class="check">✓</div></div>
+          </div>
+          <div class="db-add" style="background:rgba(90,162,255,.14);
+            border-style:solid;border-color:rgba(90,162,255,.5);font-weight:600">
+            ＋ 添加远程 Web</div>
+          <div class="db-tip">点这里 → 进入配对页（扫码 / 手输 / 贴链接）</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap">两个入口等价：顶栏 <code>+</code> 与栏内「＋ 添加远程 Web」</div>
+  </div>
+
+  <div>
+    <div class="phone" data-fixed="1" style="height:400px">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar">
+        <div class="tb-btn">←</div>
+        <div class="tb-mid"><div class="tb-t1">添加远程</div>
+          <div class="tb-t2">配对成功后加入列表，不会覆盖「家里的主机」</div></div>
+      </div>
+      <div class="set-body">
+        <div class="set-card">
+          <div class="sr"><div class="i pri">◉</div>
+            <div class="m"><div class="m1">扫码配对</div>
+              <div class="m2">用桌面端的二维码，最快</div></div>
+            <div class="chev">›</div></div>
+          <div class="sr"><div class="i">⌨</div>
+            <div class="m"><div class="m1">手动输入</div>
+              <div class="m2">服务器地址 + 设备 id</div></div>
+            <div class="chev">›</div></div>
+          <div class="sr"><div class="i">🔗</div>
+            <div class="m"><div class="m1">粘贴配对链接</div>
+              <div class="m2">以 pair-accept?pair= 开头的网址</div></div>
+            <div class="chev">›</div></div>
+        </div>
+        <div class="foot-note">这里就是现有的配对页，三种方式一个不改。</div>
+      </div>
+    </div>
+    <div class="cap">「添加远程」= 现有配对页 + 一行说明</div>
+  </div>
+
+  <div>
+    <div class="phone" data-fixed="1" style="height:400px">
+      <div class="scrim2"></div>
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar new">
+        <div class="tb-btn">☰</div>
+        <div class="tb-title">
+          <div class="tb-l1"><span class="name">家里的主机</span><span class="caret">▼</span></div>
+          <div class="tb-l2">● 工作区 9 · 会话 34</div>
+        </div>
+        <div class="tb-add">+</div>
+        <div class="tb-btn">◔</div>
+        <div class="tb-btn">⋮</div>
+      </div>
+      <div class="hlist" style="opacity:.3">
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">bot</div>
+          <div class="t2">F:/bot</div></div><div class="pills"><span class="pill">12 会话</span></div></div>
+      </div>
+      <div style="position:absolute;left:0;right:0;bottom:30px;display:flex;
+        justify-content:center;z-index:6">
+        <div class="dlg">
+          <div class="h"><span class="i" style="background:rgba(74,222,128,.14);
+            color:var(--running)">✓</span>已添加「书房小主机」</div>
+          <div class="b">配对成功。现在切过去吗？<br>
+            留在<b>「家里的主机」</b>也可以，随时从设备栏切。</div>
+          <div class="f"><div class="btn">留在当前</div>
+            <div class="btn" style="font-weight:600">切过去</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="cap">配对成功后<b>不强行切走</b>，让用户自己决定</div>
+  </div>
+</div>
+</section>
+
+<section>
+<h2><span class="n">4</span>重构一：右上角 <code>⋮</code> 溢出菜单</h2>
+<div class="note">
+  现在用的是 Material 默认 <code>DropdownMenu</code>——底色走 <code>surfaceContainer</code>、项高 48dp、图标 24dp、没有分组，和全 App 的<b>「#111C2B 表面 + 1px outline 描边 + 14px 圆角」</b>完全不是一套。
+  <br>改后对齐 R033 长按菜单的规格：<b>14px 圆角 / 1px 描边 / 项高 38dp / 图标 16dp / 主色分区标题</b>，破坏性项隔一条线再用 error 色。
+</div>
+<div class="row">
+  <div>
+    <div class="phone" data-fixed="1" style="height:400px">
+      <div class="scrim2"></div>
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar new">
+        <div class="tb-btn">☰</div>
+        <div class="tb-title">
+          <div class="tb-l1"><span class="name">家里的主机</span><span class="caret">▼</span></div>
+          <div class="tb-l2">● 工作区 9 · 会话 34</div>
+        </div>
+        <div class="tb-add">+</div>
+        <div class="tb-btn">◔</div>
+        <div class="tb-btn" style="background:var(--surfaceVariant)">⋮</div>
+      </div>
+      <div class="hlist" style="opacity:.3">
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">bot</div>
+          <div class="t2">F:/bot</div></div><div class="pills"><span class="pill">12 会话</span></div></div>
+      </div>
+      <!-- 旧：M3 默认 DropdownMenu 观感 -->
+      <div style="position:absolute;right:8px;top:52px;width:186px;z-index:5;
+        background:#2A2A33;border-radius:4px;padding:8px 0;
+        box-shadow:0 8px 24px rgba(0,0,0,.5)">
+        <div style="display:flex;align-items:center;gap:12px;height:48px;padding:0 16px;
+          font-size:13px;color:var(--onSurface)"><span style="font-size:18px;opacity:.8">⟳</span>刷新</div>
+        <div style="display:flex;align-items:center;gap:12px;height:48px;padding:0 16px;
+          font-size:13px;color:var(--onSurface)"><span style="font-size:18px;opacity:.8">ⓘ</span>诊断</div>
+        <div style="display:flex;align-items:center;gap:12px;height:48px;padding:0 16px;
+          font-size:13px;color:var(--onSurface)"><span style="font-size:18px;opacity:.8">⚙</span>设置</div>
+        <div style="height:1px;background:rgba(255,255,255,.12);margin:8px 0"></div>
+        <div style="display:flex;align-items:center;gap:12px;height:48px;padding:0 16px;
+          font-size:13px;color:var(--error)"><span style="font-size:18px">⇥</span>退出配对</div>
+      </div>
+    </div>
+    <div class="cap">现在 · Material 默认菜单（4px 圆角、48dp 项高、无分组）</div>
+  </div>
+
+  <div>
+    <div class="phone" data-fixed="1" style="height:400px">
+      <div class="scrim2"></div>
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar new">
+        <div class="tb-btn">☰</div>
+        <div class="tb-title">
+          <div class="tb-l1"><span class="name">家里的主机</span><span class="caret">▼</span></div>
+          <div class="tb-l2">● 工作区 9 · 会话 34</div>
+        </div>
+        <div class="tb-add">+</div>
+        <div class="tb-btn">◔</div>
+        <div class="tb-btn" style="background:var(--surfaceVariant)">⋮</div>
+      </div>
+      <div class="hlist" style="opacity:.3">
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">bot</div>
+          <div class="t2">F:/bot</div></div><div class="pills"><span class="pill">12 会话</span></div></div>
+      </div>
+      <div class="menu" style="position:absolute;right:10px;top:52px;width:206px;z-index:5">
+        <div class="mi"><span class="i">⟳</span>刷新列表</div>
+        <div class="mi"><span class="i">◐</span>连接与缓存诊断</div>
+        <div class="msep"></div>
+        <div class="mhead">远程</div>
+        <div class="mi"><span class="i">⇄</span>切换远程<span class="k">3</span></div>
+        <div class="mi"><span class="i">＋</span>添加远程 Web</div>
+        <div class="msep"></div>
+        <div class="mi"><span class="i">⚙</span>设置</div>
+        <div class="mi dgr"><span class="i">⊗</span>断开当前远程</div>
+      </div>
+    </div>
+    <div class="cap"><b>改后</b> · 同款圆角/描边/项高，远程操作单独成区</div>
+  </div>
+
+  <div style="flex:1;min-width:280px">
+    <div class="note" style="margin-top:0">
+      <b>为什么「退出配对」要改叫「断开当前远程」</b><br>
+      多主机之后，「退出配对」这个词只在一台主机时讲得通。有 3 台时它会被误解成「清空所有远程」。
+      <br><br>
+      新的语义分两层：<br>
+      · <b>断开当前远程</b> = 只把当前这台从列表移除（等价于设备栏 <code>⋯</code> 里的「从列表移除」）<br>
+      · <b>移除全部远程</b> = 真正的「清空」，放在设置页最底部，红色，带二次确认<br><br>
+      原来「退出配对」的确认框文案也要跟着改，说清楚<b>只影响这一台</b>。
+    </div>
+  </div>
+</div>
+</section>
+
+<section>
+<h2><span class="n">5</span>重构二：设置页</h2>
+<div class="note">
+  现在是「标题 + 说明文字」平铺一列，中间用 <code>HorizontalDivider</code> 硬切——没有容器、没有图标、信息层级靠字号硬撑，和首页卡片、R040 侧栏卡片完全两个世界。
+  <br>改后沿用全 App 的<b>卡片分组</b>：每组一张 <code>#111C2B</code> 卡、组内行与行用 1px 分隔、行首一枚 26dp 图标方块（按语义着色）。
+  <br><b>内容不增不减</b>——只重排，不加新开关。
+</div>
+<div class="row">
+  <div>
+    <div class="phone" data-fixed="1" style="height:560px">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar">
+        <div class="tb-btn">←</div>
+        <div class="tb-mid"><div class="tb-t1">设置</div></div>
+      </div>
+      <div class="set-body">
+        <div class="set-sec">外观</div>
+        <div style="font-size:12px">主题</div>
+        <div style="font-size:10px;color:var(--onSurfaceVariant);line-height:1.6">
+          跟随系统 = 用手机当前的深浅色设置；浅色 / 深色 = 固定不变。</div>
+        <div style="display:flex;border:1px solid var(--outlineVariant);border-radius:var(--r-pill);
+          overflow:hidden;margin-top:2px">
+          <div style="flex:1;text-align:center;padding:7px;font-size:10.5px;
+            color:var(--onSurfaceVariant)">跟随系统</div>
+          <div style="flex:1;text-align:center;padding:7px;font-size:10.5px;
+            color:var(--onSurfaceVariant)">浅色</div>
+          <div style="flex:1;text-align:center;padding:7px;font-size:10.5px;
+            color:var(--onSurfaceVariant)">深色</div>
+        </div>
+        <div style="height:1px;background:var(--outlineVariant);margin:3px 0"></div>
+        <div class="set-sec">能力</div>
+        <div style="font-size:12px">Markdown 渲染</div>
+        <div style="font-size:10px;color:var(--onSurfaceVariant);line-height:1.6">
+          标题 / 列表 / 表格 / 代码块 / 链接，自绘解析</div>
+        <div style="font-size:12px;margin-top:6px">代码高亮</div>
+        <div style="font-size:10px;color:var(--onSurfaceVariant);line-height:1.6">
+          深色浅色各一套配色</div>
+        <div style="font-size:12px;margin-top:6px">长文件分页</div>
+        <div style="font-size:10px;color:var(--onSurfaceVariant);line-height:1.6">
+          每次 5000 行，滚到底自动续读</div>
+        <div style="height:1px;background:var(--outlineVariant);margin:3px 0"></div>
+        <div style="font-size:12px;color:var(--onSurfaceVariant)">连接与缓存诊断 ›</div>
+        <div style="font-size:12px;margin-top:5px">版本</div>
+        <div style="font-size:10px;color:var(--onSurfaceVariant)">远程 Web 0.1.0</div>
+        <div style="border-top:1px solid var(--outlineVariant);margin-top:8px;padding-top:6px;
+          font-size:12px;color:var(--error)">解除配对</div>
+      </div>
+    </div>
+    <div class="cap">现在 · 平铺一列，靠分隔线硬切</div>
+  </div>
+
+  <div>
+    <div class="phone" data-fixed="1" style="height:560px">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar new">
+        <div class="tb-btn">←</div>
+        <div class="tb-mid" style="padding-left:2px">
+          <div class="tb-t1">设置</div>
+          <div class="tb-t2">远程 Web 0.1.0</div>
+        </div>
+      </div>
+      <div class="set-body">
+        <div class="set-sec">外观</div>
+        <div class="set-card">
+          <div class="sr"><div class="i pri">◐</div>
+            <div class="m"><div class="m1">主题</div>
+              <div class="m2">代码高亮两套配色，两种模式都能读</div></div>
+            <div class="seg"><span class="s">跟随</span><span class="s">浅</span>
+              <span class="s on">深</span></div></div>
+        </div>
+
+        <div class="set-sec">能力</div>
+        <div class="set-card">
+          <div class="sr"><div class="i">▤</div>
+            <div class="m"><div class="m1">Markdown 渲染</div>
+              <div class="m2">标题 / 列表 / 表格 / 代码块 / 链接，自绘解析</div></div>
+            <div class="sw on"></div></div>
+          <div class="sr"><div class="i">⌗</div>
+            <div class="m"><div class="m1">代码高亮</div>
+              <div class="m2">深色浅色各一套，超长代码块自动跳过</div></div>
+            <div class="sw on"></div></div>
+          <div class="sr"><div class="i">⇥</div>
+            <div class="m"><div class="m1">长文件分页</div>
+              <div class="m2">每次 5000 行，滚到底自动续读</div></div>
+            <div class="sw on"></div></div>
+          <div class="sr"><div class="i">✎</div>
+            <div class="m"><div class="m1">改动文件卡片</div>
+              <div class="m2">轮次结束时显示已编辑文件与行数</div></div>
+            <div class="sw on"></div></div>
+        </div>
+
+        <div class="set-sec">远程</div>
+        <div class="set-card">
+          <div class="sr"><div class="i run">⇄</div>
+            <div class="m"><div class="m1">我的远程</div>
+              <div class="m2">3 台 · 当前「家里的主机」</div></div>
+            <div class="chev">›</div></div>
+          <div class="sr"><div class="i ter">◐</div>
+            <div class="m"><div class="m1">连接与缓存诊断</div>
+              <div class="m2">地址、设备标识、收发帧计数、缓存行数</div></div>
+            <div class="chev">›</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>改后</b> · 卡片分组 + 图标方块；开关能真关</div>
+  </div>
+
+  <div>
+    <div class="phone" data-fixed="1" style="height:560px">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar new">
+        <div class="tb-btn">←</div>
+        <div class="tb-mid" style="padding-left:2px">
+          <div class="tb-t1">设置</div>
+          <div class="tb-t2">远程 Web 0.1.0</div>
+        </div>
+      </div>
+      <div class="set-body">
+        <div class="set-sec">外观</div>
+        <div class="set-card">
+          <div class="sr"><div class="i pri">◐</div>
+            <div class="m"><div class="m1">主题</div>
+              <div class="m2">深色</div></div>
+            <div class="seg"><span class="s">跟随</span><span class="s">浅</span>
+              <span class="s on">深</span></div></div>
+        </div>
+
+        <div class="set-sec">远程</div>
+        <div class="set-card">
+          <div class="sr"><div class="i run">⇄</div>
+            <div class="m"><div class="m1">我的远程</div>
+              <div class="m2">3 台 · 当前「家里的主机」</div></div>
+            <div class="chev">›</div></div>
+        </div>
+
+        <div class="set-sec">高级</div>
+        <div class="set-card">
+          <div class="sr"><div class="i">◐</div>
+            <div class="m"><div class="m1">连接与缓存诊断</div>
+              <div class="m2">连不上 / 不刷新时先看这里</div></div>
+            <div class="chev">›</div></div>
+          <div class="sr"><div class="i">◇</div>
+            <div class="m"><div class="m1">版本</div></div>
+            <div class="v">0.1.0 (1)</div></div>
+        </div>
+
+        <div class="set-sec" style="color:var(--error)">危险操作</div>
+        <div class="set-card">
+          <div class="sr"><div class="i red">⊗</div>
+            <div class="m"><div class="m1" style="color:var(--error)">断开当前远程</div>
+              <div class="m2">只移除「家里的主机」，其余 2 台保留</div></div>
+            <div class="chev" style="color:var(--error)">›</div></div>
+          <div class="sr"><div class="i red">⊗</div>
+            <div class="m"><div class="m1" style="color:var(--error)">移除全部远程</div>
+              <div class="m2">清空本机凭证与缓存，回到配对页</div></div>
+            <div class="chev" style="color:var(--error)">›</div></div>
+        </div>
+        <div class="foot-note">移除后必须回桌面端重新发起配对。本地缓存的会话与消息会一并清掉。</div>
+      </div>
+    </div>
+    <div class="cap">同页下半 · <b>危险操作独立成组</b>，两个语义分开</div>
+  </div>
+</div>
+</section>
+
+<section>
+<h2><span class="n">6</span>亮色主题</h2>
+<div class="note">同一套结构在浅色下的表现。设备栏的投影要收窄——深色下靠影子分层的做法在浅色里会糊成一片灰边。</div>
+<div class="row">
+  <div>
+    <div class="phone light" data-fixed="1" style="height:430px">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar new">
+        <div class="tb-btn">☰</div>
+        <div class="tb-title open">
+          <div class="tb-l1"><span class="name">家里的主机</span><span class="caret">▼</span></div>
+          <div class="tb-l2">● 工作区 9 · 会话 34</div>
+        </div>
+        <div class="tb-add">+</div>
+        <div class="tb-btn">◔</div>
+        <div class="tb-btn">⋮</div>
+      </div>
+      <div class="devwrap">
+        <div class="devbar">
+          <div class="db-head"><span class="t">我的远程</span><span class="c">3</span>
+            <span class="x">✕</span></div>
+          <div class="dev-list">
+            <div class="dev on"><div class="dot ok"></div>
+              <div class="m"><div class="m1">家里的主机 <span class="tag cur">当前</span></div>
+                <div class="m2">192.168.1.5:19387</div></div>
+              <div class="more">⋯</div><div class="check">✓</div></div>
+            <div class="dev"><div class="dot bad"></div>
+              <div class="m"><div class="m1">公司服务器 <span class="tag off">离线</span></div>
+                <div class="m2">office.example.com</div></div>
+              <div class="more">⋯</div><div class="check">✓</div></div>
+          </div>
+          <div class="db-add">＋ 添加远程 Web</div>
+          <div class="db-tip">点一行即切换。切走后原来的会话不会中断。</div>
+        </div>
+      </div>
+      <div class="hlist" style="opacity:.4">
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">bot</div>
+          <div class="t2">F:/bot</div></div><div class="pills"><span class="pill">12 会话</span></div></div>
+      </div>
+    </div>
+    <div class="cap">设备栏 · 浅色</div>
+  </div>
+
+  <div>
+    <div class="phone light" data-fixed="1" style="height:430px">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar new">
+        <div class="tb-btn">←</div>
+        <div class="tb-mid" style="padding-left:2px">
+          <div class="tb-t1">设置</div>
+          <div class="tb-t2">远程 Web 0.1.0</div>
+        </div>
+      </div>
+      <div class="set-body">
+        <div class="set-sec">外观</div>
+        <div class="set-card">
+          <div class="sr"><div class="i pri">◐</div>
+            <div class="m"><div class="m1">主题</div>
+              <div class="m2">代码高亮两套配色</div></div>
+            <div class="seg"><span class="s on">跟随</span><span class="s">浅</span>
+              <span class="s">深</span></div></div>
+        </div>
+        <div class="set-sec">能力</div>
+        <div class="set-card">
+          <div class="sr"><div class="i">▤</div>
+            <div class="m"><div class="m1">Markdown 渲染</div>
+              <div class="m2">标题 / 列表 / 表格 / 代码块</div></div>
+            <div class="sw on"></div></div>
+          <div class="sr"><div class="i">⇥</div>
+            <div class="m"><div class="m1">长文件分页</div>
+              <div class="m2">每次 5000 行</div></div>
+            <div class="sw on"></div></div>
+        </div>
+        <div class="set-sec">远程</div>
+        <div class="set-card">
+          <div class="sr"><div class="i run">⇄</div>
+            <div class="m"><div class="m1">我的远程</div>
+              <div class="m2">3 台 · 当前「家里的主机」</div></div>
+            <div class="chev">›</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="cap">设置页 · 浅色</div>
+  </div>
+
+  <div>
+    <div class="phone light" data-fixed="1" style="height:430px">
+      <div class="scrim2"></div>
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar new">
+        <div class="tb-btn">☰</div>
+        <div class="tb-title">
+          <div class="tb-l1"><span class="name">家里的主机</span><span class="caret">▼</span></div>
+          <div class="tb-l2">● 工作区 9 · 会话 34</div>
+        </div>
+        <div class="tb-add">+</div>
+        <div class="tb-btn">◔</div>
+        <div class="tb-btn" style="background:var(--surfaceVariant)">⋮</div>
+      </div>
+      <div class="hlist" style="opacity:.35">
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">bot</div>
+          <div class="t2">F:/bot</div></div><div class="pills"><span class="pill">12 会话</span></div></div>
+      </div>
+      <div class="menu" style="position:absolute;right:10px;top:52px;width:206px;z-index:5">
+        <div class="mi"><span class="i">⟳</span>刷新列表</div>
+        <div class="mi"><span class="i">◐</span>连接与缓存诊断</div>
+        <div class="msep"></div>
+        <div class="mhead">远程</div>
+        <div class="mi"><span class="i">⇄</span>切换远程<span class="k">3</span></div>
+        <div class="mi"><span class="i">＋</span>添加远程 Web</div>
+        <div class="msep"></div>
+        <div class="mi"><span class="i">⚙</span>设置</div>
+        <div class="mi dgr"><span class="i">⊗</span>断开当前远程</div>
+      </div>
+    </div>
+    <div class="cap">溢出菜单 · 浅色</div>
+  </div>
+</div>
+</section>
+
+<section>
+<h2><span class="n">7</span>可行性：要动哪些层</h2>
+<div class="note">
+  <b>这不是纯 UI 改动。</b>现在凭证只有一份、连接只有一个，多主机必须先改数据层。下面是已核实的现状与代价。
+</div>
+<div class="tbl-wrap">
+<table class="tbl">
+<tr><th>层</th><th>现状</th><th>要改成</th><th class="num">工作量</th></tr>
+<tr><td><code>CredentialStore</code></td><td>单份：<code>load/save/clear</code>，<code>save</code> 覆盖旧的</td><td>列表 + 激活项：<code>list/save/remove/setActive</code>；文件格式要带版本号向后兼容</td><td class="num">中</td></tr>
+<tr><td><code>AppContainer</code></td><td>单条 <code>connection</code></td><td>按 id 懒建、缓存 N 条 <code>DshConnection</code>；切换时不重建旧的</td><td class="num">中</td></tr>
+<tr><td>缓存分区</td><td>已按 <code>ownerId = SHA256(baseUrl\\0deviceId)</code> 分区</td><td><b>不用改</b>，天然支持多主机</td><td class="num">—</td></tr>
+<tr><td>ViewModel key</td><td>已全部带 <code>deviceId</code></td><td><b>不用改</b></td><td class="num">—</td></tr>
+<tr><td>UI</td><td>顶栏标题固定</td><td>标题入口 + 设备栏 + 三个对话框 + 设置页重排</td><td class="num">大</td></tr>
+</table>
+</div>
+<div class="note" style="margin-top:10px">
+  <b>两个白捡的好处</b>：① 缓存分区键早就带了 <code>deviceId</code>，各主机的消息本来就分开存，不需要迁移；② 所有 ViewModel 的 <code>key</code> 都带了 <code>deviceId</code>，切换时不会串数据。
+  <br><b>一个真实代价</b>：<code>KeystoreCredentialStore</code> 的文件格式目前是「2 字节头 + AES-GCM 密文」，改成列表要写迁移：读到旧格式时当成「只有一条」并立刻回写新格式，失败则保留旧文件不删。
+</div>
+</section>
+
+<section>
+<h2><span class="n">8</span>要你拍板的四件事</h2>
+
+<div class="q">
+<div class="qt">Q1 · 删除的措辞</div>
+<div class="qb">设备栏里那台主机，用「从列表移除」还是「删除远程」？前者强调的是「本机不再显示」，后者容易被理解成「把桌面端那台机器也删了」。</div>
+<div class="opt"><span class="o rec">从列表移除（推荐）</span><span class="o">删除远程</span></div>
+</div>
+
+<div class="q">
+<div class="qt">Q2 · 设置页的开关</div>
+<div class="qb">现在「能力」那一段是<b>只读文字</b>（Markdown 渲染 / 代码高亮 / 长文件分页），代码注释里写明了理由：这些能力没有关闭的理由，做成开关等于让用户切进一个从没测过的组合。
+<br>但我在原型里画成了<b>可点的开关</b>（视觉上更完整）。要哪种？</div>
+<div class="opt"><span class="o rec">保持只读（推荐 · 不变功能）</span><span class="o">真做成开关（要补实现与测试）</span></div>
+</div>
+
+<div class="q">
+<div class="qt">Q3 · 切换时如何处理原主机的连接</div>
+<div class="qb">从「家里的主机」切到「公司服务器」时，前者的 WebSocket 是<b>保持挂着</b>（回来秒开，但白占内存与电量），还是<b>断开</b>（省资源，回来要重连约 1 秒）？</div>
+<div class="opt"><span class="o rec">断开（推荐 · 同一时刻只连一台）</span><span class="o">保持（最多缓存 3 条）</span></div>
+</div>
+
+<div class="q">
+<div class="qt">Q4 · 未读圆点要不要跨主机汇总</div>
+<div class="qb">上一轮刚做的未读圆点，现在是按当前主机的会话算的。多主机之后，<b>别的</b>主机上有会话跑完了，要不要在设备栏那一行也点亮一个圆点？</div>
+<div class="opt"><span class="o rec">要（推荐 · 不然切过去才发现）</span><span class="o">不要（只看当前主机）</span></div>
+</div>
+
+<div class="note" style="margin-top:16px">
+  <b>我的建议按这个顺序做</b>：先落地数据层（凭证列表 + 容器多连接），这一步不改任何界面、可单独验证；
+  再做首页标题与设备栏；最后才是溢出菜单与设置页的重构——那两个是纯视觉，风险最低，放最后即使来不及也不影响主体功能。
+</div>
+</section>
+
+</div>
+</body>
+</html>

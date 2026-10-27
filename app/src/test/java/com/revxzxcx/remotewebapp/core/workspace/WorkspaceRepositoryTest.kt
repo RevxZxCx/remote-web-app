@@ -97,7 +97,7 @@ class WorkspaceRepositoryTest {
     }
 
     private fun connection(): DshConnection = DshConnection(
-        credential = DeviceCredential(
+        initialCredential = DeviceCredential(
             baseUrl = server.url("/").toString().trimEnd('/'),
             deviceId = "dev-42",
             pairedAt = 0L,

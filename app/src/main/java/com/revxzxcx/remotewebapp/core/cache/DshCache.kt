@@ -288,12 +288,18 @@ class DshCache private constructor(
     }
 
     /**
-     * 首次拿到凭证时调用：清掉别的设备留下的行。
+     * 清掉**某台主机**留下的全部缓存行（R054：用户把主机从列表里移除时调用）。
      *
-     * 不这样做的话，表会随配对次数无界增长（虽然那些行永远查不到）。
+     * 早先叫 `pruneOtherOwners(ownerId)`，语义是「除了这台，其他的都删」——那在
+     * 「一台手机只连一台桌面端」时是对的。多主机之后这个语义会变成「切到 B 就把 A 的
+     * 缓存全删了」，切回来又要重拉一遍 `session/list`（单次实测 1.78 MB），
+     * 所以改成按分区精确删除：只在用户真正删除某台主机时清它自己那一片。
+     *
+     * 分区之间天然隔离（`ownerId` 是 `SHA-256(baseUrl + deviceId)` 的前 8 字节），
+     * 留着别的主机不会串数据。
      */
-    suspend fun pruneOtherOwners(ownerId: String) = guard("pruneOtherOwners") {
-        dao.deleteOtherOwners(ownerId)
+    suspend fun pruneOwner(ownerId: String) = guard("pruneOwner") {
+        dao.deleteOwner(ownerId)
     }
 
     /**

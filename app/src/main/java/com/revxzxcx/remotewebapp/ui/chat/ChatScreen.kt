@@ -206,7 +206,14 @@ fun ChatScreen(
     title: String,
     onBack: () -> Unit,
     onOpenFile: (FileTarget) -> Unit,
-    onUnpair: (() -> Unit)? = null,
+    /**
+     * 「重新配对」入口（R054 修正）。
+     *
+     * 本屏只有 [ConnectionBanner] 用到它，语义是「当前这台失效了，重配」，
+     * 不是「清空本机全部凭证」。改名后与 HomeScreen 的 onRepairRequest 对齐，
+     * 免得上层误接 `container.unpair()` 把别的主机一起删掉。
+     */
+    onRepairRequest: (() -> Unit)? = null,
     sidebarOpen: Boolean = false,
     onSidebarOpenChange: (Boolean) -> Unit = {},
     sidebarTab: DetailTab = DetailTab.SESSION,
@@ -589,7 +596,7 @@ fun ChatScreen(
                             carrier = carrier,
                             // 「重新配对」= 退出配对 + 重新配对，是破坏性操作（会擦凭证）。
                             // 确认框由 AppRoot 统一渲染（R018 P1-1）。
-                            onRepairRequest = onUnpair,
+                            onRepairRequest = onRepairRequest,
                             onRetry = viewModel::retry,
                         )
                     }

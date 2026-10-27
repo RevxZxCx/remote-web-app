@@ -34,11 +34,14 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Menu
@@ -78,6 +81,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.contentDescription
@@ -98,7 +102,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.revxzxcx.remotewebapp.core.credentials.CredentialBook
+import com.revxzxcx.remotewebapp.core.credentials.DeviceCredential
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
+import com.revxzxcx.remotewebapp.core.pairing.PairStatus
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.session.SessionStatus
 import com.revxzxcx.remotewebapp.core.session.statusOf
@@ -114,6 +121,7 @@ import com.revxzxcx.remotewebapp.ui.common.GlyphSize
 import com.revxzxcx.remotewebapp.ui.common.OverflowItem
 import com.revxzxcx.remotewebapp.ui.common.OverflowMenuIconButton
 import com.revxzxcx.remotewebapp.ui.common.OverflowMenuDivider
+import com.revxzxcx.remotewebapp.ui.common.OverflowMenuSectionHeader
 import com.revxzxcx.remotewebapp.ui.common.rememberPressScale
 import com.revxzxcx.remotewebapp.ui.common.rememberPressTint
 import com.revxzxcx.remotewebapp.ui.theme.LocalStatusRunning
@@ -140,6 +148,49 @@ fun HomeScreen(
     onOpenSession: ((SessionSummary, Workspace?) -> Unit)? = null,
     onOpenDebug: (() -> Unit)? = null,
     onOpenSettings: (() -> Unit)? = null,
+    // ── R054 多主机 ────────────────────────────────────────────────────────
+    /** 当前凭证簿（设备栏要列出全部主机）。默认空簿，让既有渲染测试不必改。 */
+    book: CredentialBook = CredentialBook.EMPTY,
+    /** 切换主机。 */
+    onSwitchHost: (String) -> Unit = {},
+    /** 改名 / 改地址 / 测试连接 / 从列表移除。 */
+    onRenameHost: (DeviceCredential, String) -> Unit = { _, _ -> },
+    onEditHostEndpoint: (DeviceCredential, String) -> Unit = { _, _ -> },
+    /**
+     * 测一下这台主机连得上不连得上（R054）。
+     *
+     * 为什么是**挂起回调**而不是普通回调：结果要回到这一屏的 snackbar。
+     * 若把结果往上推给 [com.revxzxcx.remotewebapp.ui.AppRoot]，得再开一个跨屏状态只为了
+     * 一句话；而测试连接本来就是「点一下、看一眼」的就地反馈。
+     * 传 `null` 表示这个入口不可用（渲染测试里不会真发请求）。
+     */
+    onProbeHost: (suspend (DeviceCredential) -> PairStatus?)? = null,
+    onRemoveHost: (DeviceCredential) -> Unit = {},
+    /**
+     * 「重新配对」（R054 修正）。
+     *
+     * 与 [onUnpair] 分开：onUnpair 是「断开当前远程」溢出菜单，删完留在首页好让用户
+     * 切到别台；本参数是错误横幅 / ConnectionBanner / 连接面板的「重新配对」，
+     * 删完当前这台要去配对页。两者都**只删这一台**，区别只在确认后的去向。
+     *
+     * R054 之前两者共用 onUnpair，而 AppRoot 的 onUnpair 走 `container.unpair()`，
+     * 会 `clear()` 整个凭证文件——多主机下等于把另外几台一起删了。
+     */
+    onRepairRequest: (() -> Unit)? = null,
+    /** 「添加远程」＝进配对页（不覆盖当前主机）。 */
+    onAddRemote: () -> Unit = {},
+    /** 当前主机的连接是否出过错（设备栏里把它画成红点）。 */
+    activeHostFailed: Boolean = false,
+    /**
+     * 挂载时是否立刻展开设备栏（设置页「我的远程」跳过来的场景，R054）。
+     *
+     * 为什么需要一个入参而不是让调用方直接改状态：设备栏的开合是这一屏的局部
+     * `rememberSaveable`，AppRoot 拿不到句柄；而「从设置页跳过来」必须让它在**挂载那一刻**
+     * 就是展开的，否则用户落地看到普通首页、还得再点一次标题。
+     */
+    expandDeviceBarOnStart: Boolean = false,
+    /** 已经消费掉 [expandDeviceBarOnStart]，调用方可以把它清回 false。 */
+    onDeviceBarExpanded: () -> Unit = {},
 ) {
     val state by viewModel.state.collectAsState()
     val actionBusy by viewModel.actionBusy.collectAsState()
@@ -158,6 +209,20 @@ fun HomeScreen(
     // rememberSaveable（R018 P3-4）：旋屏时菜单收起只是要重开一次，
     // 但若确认框的可见性挂在 remember 上，旋屏会让它静默消失 = 防护被绕过。
     var menuOpen by rememberSaveable { mutableStateOf(false) }
+
+    // R054：设备栏（多主机）。与 `menuOpen` 一样用 rememberSaveable——旋屏后收起只是
+    // 要重点一次，不算问题；但**不能**用 remember，那样旋屏会静默收起，而用户此刻
+    // 正在「看有哪几台」这件事上，收起等于打断。
+    var deviceBarOpen by rememberSaveable { mutableStateOf(expandDeviceBarOnStart) }
+
+    // 设置页跳过来时展开一次即清掉请求位（否则退出设置页再进首页会又自己弹开）。
+    // key 用 requestDeviceBar 的布尔量本身：同一实例内它只会由 false→true 一次。
+    LaunchedEffect(expandDeviceBarOnStart) {
+        if (expandDeviceBarOnStart) {
+            deviceBarOpen = true
+            onDeviceBarExpanded()
+        }
+    }
 
     // R050：洞察抽屉。`insightsReveal` 是 0..1 的**揭开比例**（0 = 完全收起，1 = 完全打开），
     // 手势在拖动时直接改它、松手后由它决定开还是合，见 [settleInsightsOpen]。
@@ -320,16 +385,43 @@ fun HomeScreen(
                                 }
                             },
                             title = {
-                                // 两行：App 名 + 副标题。原来顶栏横排的「已连接 5 · 会话 58」
-                                // 与「刷新/诊断/设置/退出」四个文字按钮都收进来——顶栏从
-                                // 4 个文字 + 1 个文字导航挤成 2 个图标 + 1 个菜单。
-                                Column {
-                                    Text(
-                                        "远程 Web",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
+                                // 两行：主机名 + 副标题。R054 起第一行不再是固定的 App 名，
+                                // 而是**当前主机名**，整块可点展开设备栏（原型 s1）。
+                                //
+                                // 为什么标题要变成入口：多主机之后「我在操作哪一台」是首页
+                                // 最重要的上下文，而顶栏这一行的字面意思就是它。把它做成
+                                // 入口比加一个「切换」按钮更直接——用户想看「还有什么主机」
+                                // 时，第一反应就是点那个名字。
+                                Column(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable(role = Role.Button) {
+                                            deviceBarOpen = !deviceBarOpen
+                                        }
+                                        .padding(vertical = 2.dp, horizontal = 2.dp),
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                    ) {
+                                        Text(
+                                            text = book.active?.displayName ?: "远程 Web",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false),
+                                        )
+                                        // 小三角：不点也知道这块能展开。用 KeyboardArrowDown
+                                        // 并在展开时旋转 180°，与「展开/收起」的状态同步。
+                                        Icon(
+                                            imageVector = Icons.Default.KeyboardArrowDown,
+                                            contentDescription = null,
+                                            modifier = Modifier
+                                                .size(16.dp)
+                                                .rotate(if (deviceBarOpen) 180f else 0f),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
                                     val subtitle = when {
                                         state.loading -> "连接中…"
                                         state.error != null -> state.error.orEmpty()
@@ -345,13 +437,31 @@ fun HomeScreen(
                                             "工作区 $workspaces · 会话 ${state.sessions.visible.size}"
                                         }
                                     }
-                                    Text(
-                                        subtitle,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        // 主机状态点（原型 s1）：不点开设备栏也知道当前这台通不通。
+                                        Box(
+                                            modifier = Modifier
+                                                .size(5.dp)
+                                                .clip(CircleShape)
+                                                .background(
+                                                    when {
+                                                        activeHostFailed -> MaterialTheme.colorScheme.error
+                                                        book.hosts.isNotEmpty() -> LocalStatusRunning.current
+                                                        else -> MaterialTheme.colorScheme.outline
+                                                    },
+                                                ),
+                                        )
+                                        Text(
+                                            subtitle,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
                                 }
                             },
                             actions = {
@@ -373,6 +483,30 @@ fun HomeScreen(
                                 // 洞察是全 App 导航级的第二个视图，与左端的 ☰ 是对称的一对，
                                 // 不属于「一堆功能图标挤在右端」那种情况。圆点是提醒不是状态，
                                 // 打开抽屉即灭（[HomeViewModel.markInsightsSeen]）。
+                                // R054: plus = "add remote web", equivalent to the
+                                // "add remote web" row at the bottom of the device bar
+                                // (prototype s1 caption says the two entries are equal).
+                                // Why not only in the overflow menu: adding a host is a
+                                // low-frequency but *discoverability* action. A user who
+                                // has never added a second host does not go looking in a
+                                // menu; a plus in the top bar is the shortest path.
+                                // It does not violate R017's "actions allows only one
+                                // function icon" -- that rule targets page actions
+                                // (refresh/settings); host management is global config,
+                                // same navigation layer as the menu and insights icons.
+                                AppIconButton(
+                                    onClick = {
+                                        // Close the device bar before pairing: pairing is
+                                        // a full-screen route. Coming back with the bar
+                                        // still open would make it look like the new host
+                                        // was added from the bar, which it was not.
+                                        deviceBarOpen = false
+                                        onAddRemote()
+                                    },
+                                    contentDescription = "添加远程 Web",
+                                ) {
+                                    Icon(Icons.Default.Add, contentDescription = null)
+                                }
                                 InsightsIconButton(
                                     hasNew = state.insightsDot,
                                     onClick = {
@@ -384,10 +518,10 @@ fun HomeScreen(
                                 ConnectionIndicator(
                                     carrier = carrier,
                                     details = connectionDetails,
-                                    // 「重新配对」= 退出配对 + 重新配对，是破坏性操作（会擦凭证）。
-                                    // AppRoot 层的 onUnpair 只置位 pendingUnpair，确认框由
-                                    // AppRoot 统一渲染（R018 P1-1）——面板里不能另开一条不确认的路。
-                                    onRepairRequest = onUnpair,
+                                    // 「重新配对」= 只移除当前这台 + 去配对页（R054）。
+                                    // 确认框仍由 AppRoot 统一渲染（R018 P1-1），面板里不能
+                                    // 另开一条不确认的路；这里只是把「确认后去哪」交给上层。
+                                    onRepairRequest = onRepairRequest,
                                     onRetry = viewModel::retry,
                                     onOpenDebug = onOpenDebug,
                                 )
@@ -404,38 +538,127 @@ fun HomeScreen(
                                     icon = { Icon(Icons.Default.MoreVert, contentDescription = null) },
                                 ) {
                                     OverflowItem(
-                                        text = "刷新",
+                                        text = "刷新列表",
                                         leadingIcon = {
                                             Icon(Icons.Default.Refresh, contentDescription = null)
                                         },
                                     ) { viewModel.retry() }
                                     if (onOpenDebug != null) {
                                         OverflowItem(
-                                            text = "诊断",
+                                            text = "连接与缓存诊断",
                                             leadingIcon = {
                                                 Icon(Icons.Default.Info, contentDescription = null)
                                             },
                                         ) { onOpenDebug() }
                                     }
+                                    // R054: the "remote" group gets its own section. With
+                                    // multiple hosts, "which host am I on" is not the same
+                                    // kind of thing as refresh/diagnostics/settings --
+                                    // the former changes who you are talking to, the
+                                    // latter are page actions. Mixing them makes a user
+                                    // hunting for "switch" wade through unrelated rows.
+                                    OverflowMenuDivider()
+                                    OverflowMenuSectionHeader("远程")
+                                    OverflowItem(
+                                        text = "切换远程",
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Default.KeyboardArrowRight,
+                                                contentDescription = null,
+                                            )
+                                        },
+                                    ) {
+                                        // Do not nest a host list inside the menu: two
+                                        // stacked popup layers dismiss each other easily on
+                                        // touch. Open the device bar instead -- it carries
+                                        // the full information (address, status dot,
+                                        // current marker).
+                                        menuOpen = false
+                                        deviceBarOpen = true
+                                    }
+                                    OverflowItem(
+                                        text = "添加远程 Web",
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Add, contentDescription = null)
+                                        },
+                                    ) {
+                                        menuOpen = false
+                                        onAddRemote()
+                                    }
                                     if (onOpenSettings != null) {
+                                        OverflowMenuDivider()
                                         OverflowItem(
                                             text = "设置",
                                             leadingIcon = {
-                                                Icon(Icons.Default.Settings, contentDescription = null)
+                                                Icon(
+                                                    Icons.Default.Settings,
+                                                    contentDescription = null,
+                                                )
                                             },
                                         ) { onOpenSettings() }
                                     }
-                                    // 分隔线 + error 色：破坏性动作不与常用项相邻，
-                                    // 也不会和「刷新」只差几十像素。
                                     OverflowMenuDivider()
+                                    // R054 wording change: "quit pairing" -> "disconnect
+                                    // current remote". With multiple hosts the old wording
+                                    // reads as "clear every remote", while it really only
+                                    // affects this one (equivalent to "remove from list" in
+                                    // the device bar row menu). The real "remove all" lives
+                                    // at the bottom of the settings page, with red text and
+                                    // a confirmation.
                                     OverflowItem(
-                                        text = "退出配对",
+                                        text = "断开当前远程",
                                         leadingIcon = {
-                                            Icon(Icons.Default.ExitToApp, contentDescription = null)
+                                            Icon(
+                                                Icons.Default.ExitToApp,
+                                                contentDescription = null,
+                                            )
                                         },
                                         destructive = true,
                                     ) { onUnpair() }
                                 }
+                            },
+                        )
+
+                        // R054：设备栏挂在顶栏**下面**，是顶栏被展开出来的那一部分
+                        // （原型 s1），不是 modal bottom sheet。理由：它是标题的下拉，
+                        // 所以必须从栏底长出来；用 bottom sheet 会把视线拉到整个列表上，
+                        // 还要跟已有的两层浮层（会话抽屉、洞察抽屉）抢层次。
+                        //
+                        // 位置教训（R054 真机验收）：这段一度被误插进上面 `subtitle`
+                        // 的 `when` 表达式里、`state.fromCache` 分支内，于是只有「正在显示
+                        // 缓存内容」时才渲染，平时点标题完全没反应。它是**兄弟节点**，
+                        // 不能待在任何一个 lambda 的表达式体里。
+                        DeviceBar(
+                            book = book,
+                            expanded = deviceBarOpen,
+                            activeFailed = activeHostFailed,
+                            onDismiss = { deviceBarOpen = false },
+                            onSwitch = { hostId ->
+                                deviceBarOpen = false
+                                onSwitchHost(hostId)
+                            },
+                            onRename = onRenameHost,
+                            onEditEndpoint = onEditHostEndpoint,
+                            onTestConnection = { host ->
+                                // 测试连接不改任何状态，只回一句话。用这一屏的 scope（而非
+                                // 容器 scope）是刻意的：食栏消息属于当前界面，用户离开这一屏后
+                                // 没必要再弹一个看不到的提示。
+                                if (onProbeHost == null) return@DeviceBar
+                                scope.launch {
+                                    val status = onProbeHost(host)
+                                    snackbar.showSnackbar(
+                                        if (status != null) {
+                                            "${host.displayName} 连得上"
+                                        } else {
+                                            "${host.displayName} 连不上，请检查地址与网络"
+                                        },
+                                    )
+                                }
+                            },
+                            onRemove = onRemoveHost,
+                            onAddRemote = {
+                                deviceBarOpen = false
+                                onAddRemote()
                             },
                         )
 
@@ -489,7 +712,7 @@ fun HomeScreen(
                                     color = MaterialTheme.colorScheme.onErrorContainer,
                                 )
                                 if (state.needsRepair) {
-                                    Button(onClick = onUnpair) { Text("重新配对") }
+                                    Button(onClick = { onRepairRequest?.invoke() }) { Text("重新配对") }
                                 } else {
                                     Button(onClick = viewModel::retry) { Text("重试") }
                                 }

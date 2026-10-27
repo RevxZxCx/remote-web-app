@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>动效缓动对比 · 平台默认 vs 设计稿</title>
+<style>
+:root{
+  --background:#0B1420; --surface:#111C2B; --surfaceVariant:#1A2942;
+  --onBackground:#E6EFFA; --onSurfaceVariant:#9BB0C8;
+  --outline:#31485F; --outlineVariant:#22334A;
+  --primary:#5AA2FF; --tertiary:#F2C14E; --running:#4ADE80; --error:#FF8A80;
+  --r-sm:10px; --r-md:14px; --r-lg:20px; --r-pill:999px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--background); color:var(--onBackground);
+  font-family:"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  padding:40px 44px 48px; line-height:1.6;
+}
+h1{font-size:23px; font-weight:650; letter-spacing:.2px}
+.sub{color:var(--onSurfaceVariant); font-size:13.5px; margin-top:7px}
+h2{
+  font-size:16px; font-weight:620; margin:38px 0 15px;
+  padding-left:11px; border-left:3px solid var(--primary); line-height:1.2;
+}
+.card{
+  background:var(--surface); border:1px solid var(--outlineVariant);
+  border-radius:var(--r-md); padding:22px 24px;
+}
+.two{display:grid; grid-template-columns:1fr 1fr; gap:18px}
+.three{display:grid; grid-template-columns:repeat(3,1fr); gap:18px}
+
+/* 曲线图 */
+.curve-wrap{display:flex; gap:34px; align-items:flex-start}
+svg.curve{flex:0 0 auto; background:#0A121E; border-radius:var(--r-sm); border:1px solid var(--outlineVariant)}
+.legend-box{flex:1; min-width:0}
+.lg{display:flex; align-items:flex-start; gap:11px; padding:11px 0; border-bottom:1px solid var(--outlineVariant)}
+.lg:last-child{border-bottom:0}
+.swatch{width:13px; height:13px; border-radius:3px; margin-top:6px; flex:0 0 auto}
+.lg-name{font-size:13.5px; font-weight:600}
+.lg-eq{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace; font-size:11.5px; color:var(--onSurfaceVariant); margin-top:2px}
+.lg-note{font-size:12px; color:var(--onSurfaceVariant); margin-top:4px}
+
+/* 数值表 */
+table{width:100%; border-collapse:collapse; font-size:13px}
+th,td{padding:9px 12px; text-align:right; border-bottom:1px solid var(--outlineVariant)}
+th{color:var(--onSurfaceVariant); font-weight:600; font-size:12px; text-transform:none}
+th:first-child,td:first-child{text-align:left}
+td.num{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace; font-size:12.5px}
+.gap-hot{color:var(--tertiary); font-weight:700}
+.gap-cool{color:var(--onSurfaceVariant)}
+tr.hi td{background:rgba(90,162,255,.09)}
+
+/* 淡入演示 */
+.demo-row{display:flex; align-items:center; gap:9px; margin-bottom:13px}
+.demo-label{width:104px; font-size:12px; color:var(--onSurfaceVariant); flex:0 0 auto}
+.frame{
+  width:38px; height:26px; border-radius:5px; flex:0 0 auto;
+  display:flex; align-items:center; justify-content:center;
+  font-size:9.5px; color:#08101a; font-weight:700;
+}
+.frame-bg{background:var(--primary)}
+.tick-row{display:flex; gap:9px; margin-left:113px; margin-bottom:5px}
+.tick{width:38px; text-align:center; font-size:10px; color:var(--onSurfaceVariant); font-family:ui-monospace,monospace}
+
+.badge{
+  display:inline-block; padding:2px 8px; border-radius:var(--r-pill);
+  font-size:11px; font-weight:600; vertical-align:2px; margin-left:8px;
+}
+.b-ok{background:rgba(74,222,128,.14); color:var(--running)}
+.b-bad{background:rgba(255,138,128,.14); color:var(--error)}
+.b-warn{background:rgba(242,193,78,.14); color:var(--tertiary)}
+
+.note{
+  margin-top:15px; padding:13px 16px; border-radius:var(--r-sm);
+  background:var(--surfaceVariant); font-size:12.5px; color:var(--onSurfaceVariant);
+}
+.note b{color:var(--onBackground)}
+code{
+  font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;
+  font-size:12px; background:rgba(90,162,255,.12); color:var(--primary);
+  padding:1px 5px; border-radius:4px;
+}
+.foot{color:var(--onSurfaceVariant); font-size:12px; margin-top:26px; padding-top:16px; border-top:1px solid var(--outlineVariant)}
+</style>
+</head>
+<body>
+
+<h1>动效缓动：平台默认 vs 设计稿基准</h1>
+<div class="sub">同样是 240ms 的淡入，两条曲线的差别在「前 1/4 时间里走了多少」——不是时长问题，是节奏问题。</div>
+
+<h2>一、两条曲线差在哪</h2>
+<div class="card">
+  <div class="curve-wrap">
+    <svg class="curve" width="360" height="360" viewBox="0 0 360 360">
+      <!-- 网格 -->
+      <g stroke="#22334A" stroke-width="1">
+        <line x1="46" y1="314" x2="336" y2="314"/>
+        <line x1="46" y1="247" x2="336" y2="247"/>
+        <line x1="46" y1="180" x2="336" y2="180"/>
+        <line x1="46" y1="113" x2="336" y2="113"/>
+        <line x1="46" y1="46"  x2="336" y2="46"/>
+        <line x1="46"  y1="46" x2="46"  y2="314"/>
+        <line x1="118" y1="46" x2="118" y2="314"/>
+        <line x1="191" y1="46" x2="191" y2="314"/>
+        <line x1="263" y1="46" x2="263" y2="314"/>
+        <line x1="336" y1="46" x2="336" y2="314"/>
+      </g>
+      <!-- 对角线参考 -->
+      <line x1="46" y1="314" x2="336" y2="46" stroke="#31485F" stroke-width="1" stroke-dasharray="3 5"/>
+      <!-- t=0.25 竖线 -->
+      <line x1="118" y1="46" x2="118" y2="314" stroke="#F2C14E" stroke-width="1" stroke-dasharray="4 4" opacity=".55"/>
+
+      <!-- 平台默认 FastOutSlowIn (0.4,0,0.2,1)。SVG 的 y 轴向下，控制点需翻转 -->
+      <path d="M 46 314 C 162.8 314, 118 46, 336 46"
+            fill="none" stroke="#FF8A80" stroke-width="3.2" stroke-linecap="round"/>
+      <!-- 设计稿 Emphasized (0.2,0,0,1) -->
+      <path d="M 46 314 C 104 314, 46 46, 336 46"
+            fill="none" stroke="#5AA2FF" stroke-width="3.2" stroke-linecap="round"/>
+
+      <!-- t=0.25 处两点 -->
+      <circle cx="118" cy="248.9" r="5" fill="#FF8A80"/>
+      <circle cx="118" cy="111.2" r="5" fill="#5AA2FF"/>
+      <!-- 差值标注 -->
+      <line x1="132" y1="248.9" x2="132" y2="111.2" stroke="#F2C14E" stroke-width="1.6"/>
+      <line x1="126" y1="248.9" x2="138" y2="248.9" stroke="#F2C14E" stroke-width="1.6"/>
+      <line x1="126" y1="111.2" x2="138" y2="111.2" stroke="#F2C14E" stroke-width="1.6"/>
+      <text x="144" y="186" fill="#F2C14E" font-size="12.5" font-weight="700"
+            font-family="ui-monospace,Consolas,monospace">37 pt</text>
+
+      <!-- 轴标签 -->
+      <text x="336" y="336" fill="#9BB0C8" font-size="11" text-anchor="end"
+            font-family="ui-monospace,Consolas,monospace">时间进度 1.0</text>
+      <text x="46" y="336" fill="#9BB0C8" font-size="11"
+            font-family="ui-monospace,Consolas,monospace">0</text>
+      <text x="30" y="50" fill="#9BB0C8" font-size="11" text-anchor="middle"
+            font-family="ui-monospace,Consolas,monospace">1</text>
+      <text x="30" y="318" fill="#9BB0C8" font-size="11" text-anchor="middle"
+            font-family="ui-monospace,Consolas,monospace">0</text>
+      <text x="19" y="180" fill="#9BB0C8" font-size="10.5" text-anchor="middle"
+            transform="rotate(-90 19 180)">动画完成度</text>
+      <text x="118" y="30" fill="#F2C14E" font-size="10.5" text-anchor="middle"
+            font-family="ui-monospace,Consolas,monospace">t=0.25</text>
+    </svg>
+
+    <div class="legend-box">
+      <div class="lg">
+        <div class="swatch" style="background:#5AA2FF"></div>
+        <div>
+          <div class="lg-name">设计稿基准 <span class="badge b-ok">应统一到这条</span></div>
+          <div class="lg-eq">cubic-bezier(.2, 0, 0, 1) · Motion.Emphasized</div>
+          <div class="lg-note">起步就快，接近终点时明显减速——「被推出去然后停住」。</div>
+        </div>
+      </div>
+      <div class="lg">
+        <div class="swatch" style="background:#FF8A80"></div>
+        <div>
+          <div class="lg-name">平台默认 <span class="badge b-bad">69 处实际在用它</span></div>
+          <div class="lg-eq">FastOutSlowInEasing(0.4, 0, 0.2, 1)</div>
+          <div class="lg-note">两头都慢、中间急。标准 ease-in-out，和设计稿不是同一种手感。</div>
+        </div>
+      </div>
+      <div class="lg">
+        <div class="swatch" style="background:#31485F"></div>
+        <div>
+          <div class="lg-name">对角线 = 匀速</div>
+          <div class="lg-eq">linear</div>
+          <div class="lg-note">只作参照。两条曲线都在它上方 = 都是「先快后慢」。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h2>二、同一段动画，两条曲线的进度对照</h2>
+<div class="card">
+  <table>
+    <thead>
+      <tr>
+        <th>走到的时间</th>
+        <th>平台默认已完成</th>
+        <th>设计稿已完成</th>
+        <th>差</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr class="hi"><td>10%</td><td class="num">2.6%</td><td class="num">15.6%</td><td class="num gap-hot">+13.0 pt</td></tr>
+      <tr class="hi"><td>25%</td><td class="num">23.7%</td><td class="num">60.7%</td><td class="num gap-hot">+37.1 pt</td></tr>
+      <tr><td>40%</td><td class="num">61.4%</td><td class="num">80.2%</td><td class="num gap-hot">+18.9 pt</td></tr>
+      <tr><td>50%</td><td class="num">77.6%</td><td class="num">87.8%</td><td class="num gap-cool">+10.2 pt</td></tr>
+      <tr><td>60%</td><td class="num">87.6%</td><td class="num">92.9%</td><td class="num gap-cool">+5.3 pt</td></tr>
+      <tr><td>75%</td><td class="num">95.9%</td><td class="num">97.5%</td><td class="num gap-cool">+1.6 pt</td></tr>
+      <tr><td>90%</td><td class="num">99.4%</td><td class="num">99.6%</td><td class="num gap-cool">+0.2 pt</td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    最大差距落在 <b>25% 时间点</b>：平台默认才走完 23.7%，设计稿已经走完 60.7%。
+    到 75% 之后两条曲线几乎重合——所以差别集中在<b>动画的前半段</b>，也就是「起手跟不跟手」。
+  </div>
+</div>
+
+<h2>三、240ms 淡入，逐帧看起来是这样</h2>
+<div class="card">
+  <div class="tick-row">
+    <div class="tick">0ms</div><div class="tick">60ms</div><div class="tick">120ms</div>
+    <div class="tick">180ms</div><div class="tick">240ms</div>
+  </div>
+
+  <div class="demo-row">
+    <div class="demo-label">平台默认</div>
+    <div class="frame frame-bg" style="opacity:.03">3%</div>
+    <div class="frame frame-bg" style="opacity:.14">14%</div>
+    <div class="frame frame-bg" style="opacity:.62">62%</div>
+    <div class="frame frame-bg" style="opacity:.90">90%</div>
+    <div class="frame frame-bg" style="opacity:1">100%</div>
+  </div>
+
+  <div class="demo-row">
+    <div class="demo-label">设计稿</div>
+    <div class="frame frame-bg" style="opacity:.03">3%</div>
+    <div class="frame frame-bg" style="opacity:.35">35%</div>
+    <div class="frame frame-bg" style="opacity:.78">78%</div>
+    <div class="frame frame-bg" style="opacity:.97">97%</div>
+    <div class="frame frame-bg" style="opacity:1">100%</div>
+  </div>
+
+  <div class="note">
+    <b>60ms 那一格</b>最能说明问题：平台默认才 3%——几乎是黑的，用户感觉「点了没反应」；
+    设计稿已经 35%——看得出东西在出来了。这就是「跟手」与「愣一下」的差别。
+  </div>
+</div>
+
+<h2>四、现状盘点（实测扫描全工程 93 处 tween）</h2>
+<div class="card">
+  <table>
+    <thead>
+      <tr><th>文件</th><th>缺 easing</th><th>类型</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>ui/chat/ChatScreen.kt</code></td><td class="num">49</td><td>交互</td><td>消息淡入、面板展开、按钮切换等</td></tr>
+      <tr><td><code>ui/chat/ChatScrollbar.kt</code></td><td class="num">5</td><td>交互</td><td>滚动条、回到底部按钮</td></tr>
+      <tr><td><code>ui/chat/GoalBanner.kt</code></td><td class="num">4</td><td>交互</td><td>目标横幅展开/收起</td></tr>
+      <tr><td><code>ui/chat/ReasoningRow.kt</code></td><td class="num">4</td><td>交互</td><td>思考过程展开/收起</td></tr>
+      <tr><td><code>ui/common/PressFeedback.kt</code></td><td class="num">2</td><td>交互</td><td>按下缩放、按下变色</td></tr>
+      <tr><td><code>ui/chat/SegmentDonut.kt</code></td><td class="num">1</td><td>交互</td><td>图例选中态压暗</td></tr>
+      <tr><td><code>ui/common/GeneratingGlyph.kt</code></td><td class="num">3</td><td>无限循环</td><td>呼吸/旋转，<b>不该改</b>（无限循环要匀速）</td></tr>
+      <tr><td><code>ui/theme/Motion.kt</code></td><td class="num">1</td><td>误报</td><td>这处在 KDoc 注释里（<code>tween(200)</code> 举例），不是真代码</td></tr>
+    </tbody>
+  </table>
+  <div class="note">
+    真正需要改的是 <b>65 处交互动画</b>（69 减去 3 处无限循环和 1 处误报）。
+    另有 <b>5 处</b> <code>AnimatedVisibility</code> 完全没写 enter/exit，连时长都走平台默认（≈300ms），
+    既不在 140/240/360 刻度上，曲线也不对。
+  </div>
+</div>
+
+<h2>五、诚实评估：值不值得做</h2>
+<div class="two">
+  <div class="card">
+    <div style="font-size:13.5px;font-weight:650;color:var(--running);margin-bottom:9px">会改善什么</div>
+    <div style="font-size:12.5px;color:var(--onSurfaceVariant);line-height:1.75">
+      · 消息淡入、面板展开<b style="color:var(--onBackground)">起步更利落</b>，不再有「愣一下」<br>
+      · 全 App 动画节奏<b style="color:var(--onBackground)">真正统一</b>到一套刻度<br>
+      · 设计稿的对齐从「写了但没用」变成真的落地<br>
+      · 顺带修 5 处连时长都不对的 AV
+    </div>
+  </div>
+  <div class="card">
+    <div style="font-size:13.5px;font-weight:650;color:var(--error);margin-bottom:9px">风险与代价</div>
+    <div style="font-size:12.5px;color:var(--onSurfaceVariant);line-height:1.75">
+      · 65 处分散在多个屏，<b style="color:var(--onBackground)">纯手工核对</b>，量大<br>
+      · <b style="color:var(--onBackground)">没有测试能守</b>「曲线对不对」——视觉属性，Robolectric 量不出<br>
+      · 不是「一眼看出 bug」的改动，收益偏主观<br>
+      · 需要全量回归保 1596 条不掉
+    </div>
+  </div>
+</div>
+
+<div class="note" style="margin-top:18px">
+  <b>一句话</b>：不改不会有任何功能故障；改了是「整体手感从『还行』到『利落』」。
+  这是一次纯打磨，不是修 bug。
+</div>
+
+<div class="foot">
+  数据来源：全工程 93 处 <code>tween(</code> 静态扫描，其中 69 处缺 <code>easing</code> 参数；
+  扣掉 3 处无限循环与 1 处 KDoc 注释里的误报，真实待改为 <b>65 处</b>。
+  曲线取样用三次贝塞尔牛顿迭代求解 x(s)=t 后取 y(s)；
+  设计稿基准出处 <code>docs/R028-效果图.html:985</code>「缓动统一 cubic-bezier(.2,0,0,1)」。
+</div>
+
+</body>
+</html>

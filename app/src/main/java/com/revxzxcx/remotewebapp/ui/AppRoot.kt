@@ -30,6 +30,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.revxzxcx.remotewebapp.ImeInsets
 import com.revxzxcx.remotewebapp.core.AppContainer
 import com.revxzxcx.remotewebapp.core.AppState
+import com.revxzxcx.remotewebapp.core.credentials.DeviceCredential
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.ui.chat.ChatScreen
 import com.revxzxcx.remotewebapp.ui.chat.ChatViewModel
@@ -41,6 +42,7 @@ import com.revxzxcx.remotewebapp.ui.files.FileTarget
 import com.revxzxcx.remotewebapp.ui.files.FileViewerScreen
 import com.revxzxcx.remotewebapp.ui.files.FileViewerViewModel
 import com.revxzxcx.remotewebapp.ui.home.HomeScreen
+import com.revxzxcx.remotewebapp.ui.home.HostRemoveDialog
 import com.revxzxcx.remotewebapp.ui.home.HomeViewModel
 import com.revxzxcx.remotewebapp.ui.pair.PairScreen
 import com.revxzxcx.remotewebapp.ui.pair.PairViewModel
@@ -143,6 +145,12 @@ private fun ScreenTransition(route: String, content: @Composable () -> Unit) {
 @Composable
 fun AppRoot(container: AppContainer) {
     val state by container.state.collectAsState()
+
+    // R054：订阅凭证簿。`activeHost` 是普通 getter（读 `_book.value.active`），单靠它
+    // 不会让 Compose 重组——切换主机时界面会停在旧主机的列表上。这里把簿收成状态，
+    // 簿一变（切换 / 改名 / 改址 / 删除）整棵 UI 跟着重算；下面所有 ViewModel 的 key
+    // 都带 `deviceId`，所以换主机等于换一整组 ViewModel，与「换连接必须换 VM」一致。
+    val book by container.book.collectAsState()
     val scope = rememberCoroutineScope()
 
     /** 当前打开的会话；null 表示停在工作区页。 */
@@ -191,6 +199,14 @@ fun AppRoot(container: AppContainer) {
     var openSettings by rememberSaveable { mutableStateOf(false) }
 
     /**
+     * 是否停在「添加远程」页（R054）。
+     *
+     * 它从首页的加号、设备栏的「添加远程 Web」、溢出菜单三处发起，
+     * 都只是把这个布尔值置真；它与会话无关，因此不并入 `openSession` 那条树。
+     */
+    var addHostOpen by rememberSaveable { mutableStateOf(false) }
+
+    /**
      * 「退出配对」的统一出口（R018 P1-1）。
      *
      * 早前 `AppRoot` 把 `onUnpair = { scope.launch { container.unpair() } }` 直连给
@@ -206,6 +222,31 @@ fun AppRoot(container: AppContainer) {
      * 「请求退出配对并重新配对」，与「重连」(`onRetry`) 不是一回事。
      */
     var pendingUnpair by rememberSaveable { mutableStateOf(false) }
+
+    /**
+     * 请求首页展开设备栏（设置页「我的远程」→ 回首页看那几台）。
+     *
+     * 为什么要一个跨屏的布尔量：设备栏的展开状态属于 `HomeScreen` 的局部 `rememberSaveable`，
+     * AppRoot 拿不到句柄。而「从设置页跳过去」必须让它在挂载那一刻就是展开的，否则用户
+     * 看到的是普通首页，还得再点一次标题。
+     */
+    var requestDeviceBar by rememberSaveable { mutableStateOf(false) }
+
+    /**
+     * 待确认「重新配对」的主机（R054 修正）。
+     *
+     * 与 [pendingRemoveHost] 的区别只在**确认后的去向**：移除后停在首页（那是设备栏
+     * 里的「从列表移除」），重新配对后要落到配对页。两者共用 [HostRemoveDialog]，
+     * 因为对用户而言都是「这台不要了，桌面端不受影响」。
+     *
+     * 为什么不能沿用 [pendingUnpair]：那个走 `container.unpair()`，会 `clear()` 掉
+     * 整个凭证文件——多主机下等于把另外几台也一起删了。而「重新配对」的入口
+     * （错误横幅、ConnectionBanner、连接面板）全部只针对**当前这一台**。
+     */
+    var pendingRepairHost by remember { mutableStateOf<DeviceCredential?>(null) }
+
+    /** 待确认「从列表移除」的主机；非空时渲染确认框（与设备栏 ⋯ 菜单同一个框）。 */
+    var pendingRemoveHost by remember { mutableStateOf<DeviceCredential?>(null) }
 
     LaunchedEffect(Unit) {
         // 幂等：重复调用只是重读一次凭证。
@@ -253,9 +294,12 @@ fun AppRoot(container: AppContainer) {
                 ScreenTransition(route = "pair") { PairScreen(viewModel = vm) }
             }
 
-            is AppState.Paired -> {
+            AppState.Paired -> {
                 val connection = container.connection
-                if (connection == null) {
+                // R054：当前是哪台主机由 activeHost 给出（不再塞进 AppState）。
+                // 它变化时必须让所有带 deviceId 的 ViewModel key 一起变，等于整组重建。
+                val activeHost = book.active
+                if (connection == null || activeHost == null) {
                     // 理论上不会发生（Paired 与 connection 同时设置）；防御性回到配对页。
                     LaunchedEffect(Unit) { container.unpair() }
                 } else {
@@ -268,7 +312,7 @@ fun AppRoot(container: AppContainer) {
                     // 绿点永远不会点亮。放到 Paired 这一层后它与聊天页共享同一个实例
                     // （Activity 的 ViewModelStore），进出会话都不重建。
                     val homeVm: HomeViewModel = viewModel(
-                        key = "home-${current.credential.deviceId}",
+                        key = "home-${activeHost.deviceId}",
                         factory = HomeViewModel.factory(
                             connection = connection,
                             cache = container.cache,
@@ -282,6 +326,45 @@ fun AppRoot(container: AppContainer) {
                         homeVm.onSessionOpened(session?.sessionId)
                     }
                     when {
+                        // R054：「添加远程」。放在最前面是因为它是从**任意一屏**（首页 /
+                        // 设置页）发起的临时路由，不应被下面那三个常驻页面掩盖。
+                        addHostOpen -> {
+                            val vm: PairViewModel = viewModel(
+                                // ⚠️ key 必须是**稳定**的，不能带 `activeHost.deviceId`。
+                                // 「添加远程」成功时 `container.addHost()` 会写 `_book`，
+                                // 于是 `activeHost` 变成刚加的那台、key 随之改变 → Compose
+                                // 销毁持有 `addedHost` 的那个 VM 并新建一个空的，成功卡
+                                // （「已加入列表 / 留在当前主机 / 现在切过去」）永远渲染不出来。
+                                // 真机症状：点了登记毫无反馈，用户以为没成功又点一次，每次
+                                // 都真的写进凭证簿，实测攒出 11 台同地址主机。
+                                // 与 DebugViewModel 不同，PairViewModel 只捕捉 `container`
+                                // （不碰 connection / cache），不存在「换主机后指向旧对象」
+                                // 的问题，所以这里不需要按 deviceId 隔离。
+                                key = "pair-add",
+                                factory = PairViewModel.factory(
+                                    container = container,
+                                    deviceLabel = Build.MODEL.orEmpty(),
+                                    addMode = true,
+                                ),
+                            )
+                            BackHandler(enabled = true) { addHostOpen = false }
+                            ScreenTransition(route = "pair-add") {
+                                PairScreen(
+                                    viewModel = vm,
+                                    addMode = true,
+                                    onCancel = { addHostOpen = false },
+                                    // 「留在当前主机」：新主机已在列表里，直接退出。
+                                    onAdded = { addHostOpen = false },
+                                    // 「现在切过去」：先退出这个路由再切。顺序不能反：
+                                    // 切换会把整个 home 分支连 VM 一起重建，而这个路由属于旧分支。
+                                    onSwitchToAdded = { added ->
+                                        addHostOpen = false
+                                        container.runInBackground { container.switchHost(added.hostId) }
+                                    },
+                                )
+                            }
+                        }
+
                         openDebug -> {
                             // key 带 deviceId（R018 P2-2）：DebugViewModel 构造时捕获
                             // connection / cache / ownerId，换设备后这些全指向旧对象。
@@ -289,7 +372,7 @@ fun AppRoot(container: AppContainer) {
                             // 连接的地址、设备 id、帧计数与缓存行数——调试页的唯一目的
                             // 就是「界面说错话时能立刻找到为什么」，这里反而给出误导数据。
                             val vm: DebugViewModel = viewModel(
-                                key = "debug-${current.credential.deviceId}",
+                                key = "debug-${activeHost.deviceId}",
                                 factory = DebugViewModel.factory(
                                     connection = connection,
                                     cache = container.cache,
@@ -311,6 +394,17 @@ fun AppRoot(container: AppContainer) {
                                     onBack = { openSettings = false },
                                     onUnpair = { pendingUnpair = true },
                                     onOpenDebug = { openDebug = true },
+                                    book = book,
+                                    // 回首页并展开设备栏。不能只关设置页：设置页里看不到设备栏，
+                                    // 用户点「我的远程」就是为了看那几台机器。
+                                    onManageHosts = {
+                                        openSettings = false
+                                        requestDeviceBar = true
+                                    },
+                                    // 「断开当前远程」只删这一台，走与设备栏同一个确认框。
+                                    onRemoveActiveHost = {
+                                        book.active?.let { pendingRemoveHost = it }
+                                    },
                                 )
                             }                        }
 
@@ -318,7 +412,15 @@ fun AppRoot(container: AppContainer) {
                             ScreenTransition(route = "home") {
                                 HomeScreen(
                                     viewModel = homeVm,
-                                    onUnpair = { pendingUnpair = true },
+                                    // 「断开当前远程」溢出菜单：只删这台、留在首页可再切别台。
+                                    onUnpair = {
+                                        book.active?.let { pendingRemoveHost = it }
+                                    },
+                                    // 「重新配对」入口（错误横幅 / ConnectionBanner / 连接面板）：
+                                    // 同样只删这台，但删完要落到配对页（R054）。
+                                    onRepairRequest = {
+                                        book.active?.let { pendingRepairHost = it }
+                                    },
                                     onOpenSession = { summary, _ ->
                                         openSession = summary
                                         openFile = null
@@ -326,6 +428,28 @@ fun AppRoot(container: AppContainer) {
                                     },
                                     onOpenDebug = { openDebug = true },
                                     onOpenSettings = { openSettings = true },
+                                    // R054 多主机。四个写操作全走 `runInBackground`：切主机会把整个
+                                    // home 分支重建（VM key 带 deviceId），用界面 scope 会让写到一半被取消。
+                                    book = book,
+                                    // 设置页「我的远程」跳过来时立刻展开（消费一次即清）。
+                                    expandDeviceBarOnStart = requestDeviceBar,
+                                    onDeviceBarExpanded = { requestDeviceBar = false },
+                                    onSwitchHost = { hostId ->
+                                        container.runInBackground { container.switchHost(hostId) }
+                                    },
+                                    onRenameHost = { host, label ->
+                                        container.runInBackground { container.renameHost(host.hostId, label) }
+                                    },
+                                    onEditHostEndpoint = { host, baseUrl ->
+                                        container.runInBackground {
+                                            container.updateEndpoint(host.hostId, baseUrl)
+                                        }
+                                    },
+                                    onRemoveHost = { host ->
+                                        container.runInBackground { container.removeHost(host.hostId) }
+                                    },
+                                    onAddRemote = { addHostOpen = true },
+                                    onProbeHost = { host -> container.testHost(host) },
                                 )
                             }
                         }
@@ -341,7 +465,7 @@ fun AppRoot(container: AppContainer) {
                             // 销毁才放。key 同样带 deviceId（理由同聊天分支：换设备必须换 VM）。
                             val owner = rememberScopedViewModelStoreOwner()
                             val vm: FileViewerViewModel = viewModel(
-                                key = "file-${current.credential.deviceId}-${session.sessionId}",
+                                key = "file-${activeHost.deviceId}-${session.sessionId}",
                                 factory = FileViewerViewModel.factory(
                                     connection = connection,
                                     sessionId = session.sessionId,
@@ -368,7 +492,7 @@ fun AppRoot(container: AppContainer) {
                             // 换设备必然换 VM，与 owner 是否被回收无关。
                             val owner = rememberScopedViewModelStoreOwner()
                             val vm: ChatViewModel = viewModel(
-                                key = "chat-${current.credential.deviceId}-${session.sessionId}",
+                                key = "chat-${activeHost.deviceId}-${session.sessionId}",
                                 factory = ChatViewModel.factory(
                                     connection = connection,
                                     sessionId = session.sessionId,
@@ -391,7 +515,12 @@ fun AppRoot(container: AppContainer) {
                                         resetSidebar()
                                     },
                                     onOpenFile = { target -> openFile = target },
-                                    onUnpair = { pendingUnpair = true },
+                                    // ChatScreen 的 onUnpair 只喂给 ConnectionBanner 的
+                                    // onRepairRequest（见 chat/ChatScreen.kt 的接线），
+                                    // 语义就是「这台失效了，重新配对」，因此走 repair 那条。
+                                    onRepairRequest = {
+                                        book.active?.let { pendingRepairHost = it }
+                                    },
                                     sidebarOpen = sidebarOpen,
                                     onSidebarOpenChange = { sidebarOpen = it },
                                     sidebarTab = sidebarTab,
@@ -406,12 +535,59 @@ fun AppRoot(container: AppContainer) {
             }
         }
 
-        // 退出配对的二次确认框：渲染在 AppRoot 层，三屏共用（R018 P1-1）。
-        // 放在 `when` 外面而不是 HomeScreen / SettingsScreen 内部：那两处自己渲染时，
-        // Home 错误横幅与 ConnectionBanner 的「重新配对」按钮传的是**不带确认**的
-        // onUnpair，于是同一个破坏性操作有五处入口、只有两处有防护。
+        // 三个破坏性动作的确认框都渲染在 AppRoot 层，而不是各自屏内（R018 P1-1 / R054）。
+        //
+        // 放在 `when` 外面是因为它们对应的是**跨屏**的意图：同一次「这台不要了」
+        // 可能从首页错误横幅、ConnectionBanner、聊天页横幅、溢出菜单、设置页发起，
+        // 散在各屏自己渲染就会出现「有的入口有确认、有的没有」。
+        //
+        // R054 起分成**两种**框，因为后果差一个数量级：
+        // - [HostRemoveDialog]：删列表里的一条，桌面端不受影响，别的机器照跑；
+        // - [ConfirmUnpairDialog]：`unpair()` 清空整本凭证，所有远程一起没。
+        // 用同一个框会让用户以为自己在做后者（或以为前者很轻）。
+        //
+        // 「移除当前这台」的确认框（R054）。与下面的「退出配对」分开渲染：
+        // 一个是删一条列表项、桌面端不受影响；另一个是清空整本凭证。用同一个框会让
+        // 用户以为自己在做后者。
+        pendingRemoveHost?.let { host ->
+            HostRemoveDialog(
+                host = host,
+                total = book.hosts.size,
+                onDismiss = { pendingRemoveHost = null },
+                onConfirm = {
+                    pendingRemoveHost = null
+                    scope.launch {
+                        val remains = container.removeHost(host.hostId)
+                        if (!remains) openSettings = false
+                    }
+                },
+            )
+        }
+
+        // 「重新配对」的确认框（R054 修正）。复用 HostRemoveDialog 而不是
+        // ConfirmUnpairDialog：文案要说的是「只删这台」，说「退出配对」会让用户
+        // 以为整本凭证都要没了（那是设置页「移除全部远程」的事）。
+        pendingRepairHost?.let { host ->
+            HostRemoveDialog(
+                host = host,
+                total = book.hosts.size,
+                onDismiss = { pendingRepairHost = null },
+                onConfirm = {
+                    pendingRepairHost = null
+                    scope.launch {
+                        val remains = container.removeHost(host.hostId)
+                        // 无论是否还有别台，都送用户去配对页：他点的是「重新配对」。
+                        // remains==false 时 removeHost 已把状态置成 Unpaired，
+                        // 配对页会自然接管；remains==true 时是「这台不要了、去加新的」。
+                        addHostOpen = remains
+                    }
+                },
+            )
+        }
+
         if (pendingUnpair) {
             ConfirmUnpairDialog(
+                hostCount = book.hosts.size,
                 onConfirm = {
                     pendingUnpair = false
                     scope.launch { container.unpair() }

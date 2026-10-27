@@ -165,6 +165,27 @@ class DshCacheTest {
             check(); return messages.count { it.ownerId == ownerId }
         }
 
+        // R054：删除**指定**分区（别的分区留着）。与上面的 deleteOther* 方向相反。
+        override suspend fun deleteOwnerWorkspaces(ownerId: String) {
+            check(); workspaces.removeAll { it.ownerId == ownerId }
+        }
+
+        override suspend fun deleteOwnerSessions(ownerId: String) {
+            check(); sessions.removeAll { it.ownerId == ownerId }
+        }
+
+        override suspend fun deleteOwnerMessages(ownerId: String) {
+            check(); messages.removeAll { it.ownerId == ownerId }
+        }
+
+        override suspend fun deleteOwnerDrafts(ownerId: String) {
+            check(); drafts.keys.removeAll { it.startsWith("$ownerId/") }
+        }
+
+        override suspend fun deleteOwnerMeta(ownerId: String) {
+            check(); meta.keys.removeAll { it.startsWith("$ownerId/") }
+        }
+
         override suspend fun deleteOtherWorkspaces(ownerId: String) {
             check(); workspaces.removeAll { it.ownerId != ownerId }
         }
@@ -464,18 +485,29 @@ class DshCacheTest {
     }
 
     @Test
-    fun `换设备时清掉别的分区`() = runBlocking {
+    fun `清掉指定分区且不动别的主机`() = runBlocking {
+        // R054 语义变更：旧 `pruneOtherOwners` 是「除了这台其他都删」，只在
+        // 「一台手机连一台桌面端」时成立；多主机后它会让切到 B 顺手清掉 A 的缓存，
+        // 切回来要重拉 session 列表（单次实测 1.78 MB）。
+        // 现在按 ownerId 精确认领：只清用户真正移除的那一台。
         val dao = FakeDao()
         val cache = DshCache.create(dao)
-        cache.writeWorkspaces("old", WorkspaceSnapshot(items = listOf(Workspace(workspaceId = "x"))))
-        cache.writeSessions("old", listOf(SessionSummary(sessionId = "s-old")))
-        cache.appendEvents("old", "s-old", listOf(envelope(1, "旧")))
+        cache.writeWorkspaces("gone", WorkspaceSnapshot(items = listOf(Workspace(workspaceId = "x"))))
+        cache.writeSessions("gone", listOf(SessionSummary(sessionId = "s-gone")))
+        cache.appendEvents("gone", "s-gone", listOf(envelope(1, "旧")))
+        cache.writeWorkspaces("kept", WorkspaceSnapshot(items = listOf(Workspace(workspaceId = "y"))))
+        cache.writeSessions("kept", listOf(SessionSummary(sessionId = "s-kept")))
+        cache.appendEvents("kept", "s-kept", listOf(envelope(1, "留")))
 
-        cache.pruneOtherOwners("new")
+        cache.pruneOwner("gone")
 
-        assertEquals(0, dao.workspaces.count { it.ownerId == "old" })
-        assertEquals(0, dao.sessions.count { it.ownerId == "old" })
-        assertEquals(0, dao.messages.count { it.ownerId == "old" })
+        assertEquals("被移除那台的工作区要清", 0, dao.workspaces.count { it.ownerId == "gone" })
+        assertEquals("被移除那台的会话要清", 0, dao.sessions.count { it.ownerId == "gone" })
+        assertEquals("被移除那台的消息要清", 0, dao.messages.count { it.ownerId == "gone" })
+        // 关键断言：另一台主机的缓存一行都不能少。
+        assertEquals(1, dao.workspaces.count { it.ownerId == "kept" })
+        assertEquals(1, dao.sessions.count { it.ownerId == "kept" })
+        assertEquals(1, dao.messages.count { it.ownerId == "kept" })
     }
 
     // ------------------------------------------------------------------ 故障兜底
@@ -506,7 +538,7 @@ class DshCacheTest {
         cache.writeSessions("own", listOf(SessionSummary(sessionId = "s")))
         cache.appendEvents("own", "s", listOf(envelope(1, "一")))
         cache.clearChat("own", "s")
-        cache.pruneOtherOwners("own")
+        cache.pruneOwner("own")
 
         // 走到这里就说明四次写都没抛；再确认库确实是空的（没有半写状态被读成有效缓存）。
         assertTrue(dao.workspaces.isEmpty())
@@ -634,16 +666,17 @@ class DshCacheTest {
     }
 
     @Test
-    fun `换设备时其它分区的草稿一起清掉`() = runBlocking {
+    fun `移除主机时只清它自己的草稿`() = runBlocking {
+        // 同上级用例：草稿也要按 ownerId 精确认领，别的主机的草稿一行不能少。
         val dao = FakeDao()
         val cache = DshCache.create(dao)
-        cache.writeDraft("own-old", "s-1", "上一台桌面端的草稿")
-        cache.writeDraft("own-new", "s-1", "这一台的草稿")
+        cache.writeDraft("own-gone", "s-1", "要移除那台的草稿")
+        cache.writeDraft("own-kept", "s-1", "留着那台的草稿")
 
-        cache.pruneOtherOwners("own-new")
+        cache.pruneOwner("own-gone")
 
-        assertTrue("别的分区的草稿必须被删", dao.drafts.keys.none { it.startsWith("own-old/") })
-        assertEquals("这一台的草稿必须留着", "这一台的草稿", cache.readDraft("own-new", "s-1"))
+        assertTrue("被移除那台的草稿要删", dao.drafts.keys.none { it.startsWith("own-gone/") })
+        assertEquals("别的主机的草稿必须留着", "留着那台的草稿", cache.readDraft("own-kept", "s-1"))
     }
 
     @Test

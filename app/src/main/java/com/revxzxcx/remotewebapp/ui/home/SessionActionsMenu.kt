@@ -47,10 +47,10 @@ import com.revxzxcx.remotewebapp.ui.chat.ChevronDownIcon
 import com.revxzxcx.remotewebapp.ui.theme.bubbleShape
 
 /** 菜单圆角：原型 `.menu{border-radius:14px}`。 */
-private val MenuShape = RoundedCornerShape(14.dp)
+internal val MenuShape = RoundedCornerShape(14.dp)
 
 /** 菜单项圆角：原型 `.mitem{border-radius:8px}`。 */
-private val MenuRowShape = RoundedCornerShape(8.dp)
+internal val MenuRowShape = RoundedCornerShape(8.dp)
 
 /**
  * 会话行的长按菜单：移入归档 / 移出归档 + 置顶 / 取消置顶。
@@ -199,7 +199,7 @@ internal fun SessionActionsMenu(
  * `assertIsNotEnabled`，不能用 `assertHasClickAction`）。
  */
 @Composable
-private fun MenuRow(
+internal fun MenuRow(
     icon: ImageVector,
     label: String,
     enabled: Boolean,

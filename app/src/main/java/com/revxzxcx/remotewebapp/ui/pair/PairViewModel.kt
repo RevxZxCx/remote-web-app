@@ -62,6 +62,14 @@ data class PairUiState(
     val lastBaseUrl: String? = null,
     /** 设备型号，作为凭证 label。 */
     val deviceLabel: String = "",
+    /**
+     * 「添加远程」模式下配对成功后的新主机（R054）。
+     *
+     * 为什么要把它放进状态而不是直接跳转：首次配对时成功就意味着
+     * `AppState` 变成 `Paired`，界面自己会切走；而「添加远程」时连接根本没动，
+     * 界面不会自己切，需要一个信号告诉调用方「加完了，可以退出配对页」。
+     */
+    val addedHost: DeviceCredential? = null,
 )
 
 /**
@@ -73,6 +81,13 @@ data class PairUiState(
 class PairViewModel(
     private val container: AppContainer,
     private val deviceLabel: String,
+    /**
+     * 是否处于「添加远程」模式（R054）。
+     *
+     * `false` = 首次配对：成功后新主机成为当前（调 `onPaired`）。
+     * `true` = 添加一台：成功后**不抢当前主机**，只写进凭证簿（调 `addHost`）。
+     */
+    private val addMode: Boolean = false,
 ) : ViewModel() {
 
     /**
@@ -235,6 +250,20 @@ class PairViewModel(
     }
 
     /**
+     * 消费掉「已加入列表」这个一次性事件。
+     *
+     * [addedHost] 描述的是**刚刚发生的一件事**，不是页面的常态：喂给 UI 之后就该熄灭。
+     * 早先 ViewModel 的 key 带 `activeHost.deviceId`，加完一台就整体重建、状态天然归零，
+     * 这个问题被掩盖了；key 改成稳定的 `"pair-add"` 之后实例会活下来，若不显式消费，
+     * 下次再进「添加远程」页面时上一轮的「已加入列表 / PGBM10」还挂在那儿，
+     * 看起来像这一轮刚加成功的一样。
+     */
+    fun clearAddedHost() {
+        if (_state.value.addedHost == null) return
+        _state.value = _state.value.copy(addedHost = null)
+    }
+
+    /**
      * 地址被改动时清掉上一次探测结论（R034 P2）。
      *
      * 不清的话会出现「绿灯贴着一个没探过的地址」：地址 A 探测成功 → 用户把输入框改成 B
@@ -250,14 +279,29 @@ class PairViewModel(
     }
 
     private suspend fun onSuccess(credential: DeviceCredential) {
+        if (addMode) {
+            // 先写入凭证簿（不切主机），再告诉 UI 可以退出配对页。
+            val added = container.addHost(credential)
+            _state.value = _state.value.copy(
+                busy = false,
+                error = null,
+                probe = null,
+                addedHost = added,
+            )
+            return
+        }
         _state.value = _state.value.copy(busy = false, error = null, probe = null)
         container.onPaired(credential)
     }
 
     companion object {
-        fun factory(container: AppContainer, deviceLabel: String): ViewModelProvider.Factory =
+        fun factory(
+            container: AppContainer,
+            deviceLabel: String,
+            addMode: Boolean = false,
+        ): ViewModelProvider.Factory =
             viewModelFactory {
-                initializer { PairViewModel(container, deviceLabel) }
+                initializer { PairViewModel(container, deviceLabel, addMode) }
             }
     }
 }
