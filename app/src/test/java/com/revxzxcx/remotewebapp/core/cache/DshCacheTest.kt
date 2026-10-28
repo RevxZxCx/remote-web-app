@@ -10,6 +10,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -184,6 +185,33 @@ class DshCacheTest {
 
         override suspend fun deleteOwnerMeta(ownerId: String) {
             check(); meta.keys.removeAll { it.startsWith("$ownerId/") }
+        }
+
+        // M57：分区淘汰用。并集语义与真实 DAO 的 UNION 查询保持一致——
+        // 只查 meta 会让「meta 被删但数据行还在」的分区变成看不见的幽灵。
+        override suspend fun allOwnerIds(): List<String> {
+            check()
+            return buildSet {
+                addAll(workspaces.map { it.ownerId })
+                addAll(sessions.map { it.ownerId })
+                addAll(messages.map { it.ownerId })
+                addAll(drafts.values.map { it.ownerId })
+                addAll(meta.keys.map { it.substringBefore('/') })
+            }.toList()
+        }
+
+        override suspend fun lastUsedAt(ownerId: String, lastUsedKey: String): Long? {
+            check()
+            // 必须与真实 DAO 的 SQL 同语义（M57 复审 P3）：LAST_USED_AT 存在时它就是权威答案，
+            // 只在缺失时才回退到数据表 MAX。早先这里写的是 `candidates.maxOrNull()`，
+            // 与真实查询不一致，于是「优先取 LAST_USED_AT」这条根本没被测试验证过——
+            // 假 DAO 比真 DAO "更宽松"，测试就会绿得毫无意义。
+            meta["$ownerId/$lastUsedKey"]?.toLongOrNull()?.let { return it }
+            return buildList {
+                sessions.filter { it.ownerId == ownerId }.maxOfOrNull { it.updatedAt }?.let { add(it) }
+                workspaces.filter { it.ownerId == ownerId }.maxOfOrNull { it.createdAt }?.let { add(it) }
+                drafts.values.filter { it.ownerId == ownerId }.maxOfOrNull { it.updatedAt }?.let { add(it) }
+            }.maxOrNull()
         }
 
         override suspend fun deleteOtherWorkspaces(ownerId: String) {
@@ -775,4 +803,269 @@ class DshCacheTest {
         lastPromptAt = null,
         lastModel = null,
     )
+
+    // ---------------------------------------------------- 分区淘汰（M57）
+
+    /** 往一个分区里放一条消息，让它「有数据」。 */
+    private suspend fun seedOwner(cache: DshCache, dao: FakeDao, owner: String, at: Long) {
+        dao.messages += CachedMessage(
+            ownerId = owner,
+            sessionId = "s1",
+            seq = 1,
+            time = at,
+            envelopeJson = "{}",
+        )
+        cache.touchOwner(owner)
+        // touchOwner 写的是「现在」，测试要的是可控时间，覆盖掉。
+        dao.meta["$owner/${CacheKeys.LAST_USED_AT}"] = at.toString()
+    }
+
+    @Test
+    fun `分区数不超上限时不淘汰任何东西`() = runBlocking {
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        seedOwner(cache, dao, "a", 100)
+        seedOwner(cache, dao, "b", 200)
+
+        val evicted = cache.evictOwners(protect = emptySet(), maxOwners = 4)
+
+        assertTrue(evicted.isEmpty())
+        assertEquals(setOf("a", "b"), dao.allOwnerIds().toSet())
+    }
+
+    @Test
+    fun `超出上限时淘汰最久没用的分区`() = runBlocking {
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        seedOwner(cache, dao, "old", 100)
+        seedOwner(cache, dao, "mid", 200)
+        seedOwner(cache, dao, "new", 300)
+
+        // 上限 2，三个分区分区里最久没用的 "old" 该被删。
+        val evicted = cache.evictOwners(protect = emptySet(), maxOwners = 2)
+
+        assertEquals(listOf("old"), evicted)
+        assertEquals(setOf("mid", "new"), dao.allOwnerIds().toSet())
+    }
+
+    @Test
+    fun `protect 里的分区即使最久没用也不被淘汰`() = runBlocking {
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        seedOwner(cache, dao, "current", 100) // 最旧，但在 protect 里
+        seedOwner(cache, dao, "b", 200)
+        seedOwner(cache, dao, "c", 300)
+
+        val evicted = cache.evictOwners(protect = setOf("current"), maxOwners = 2)
+
+        // 总数 3、上限 2 → 删 1 个；current 受保护，所以删的必须是 b（比 c 旧）。
+        assertEquals(listOf("b"), evicted)
+        assertEquals(setOf("current", "c"), dao.allOwnerIds().toSet())
+    }
+
+    @Test
+    fun `分区整片删除 不留只删一半的残骸`() = runBlocking {
+        // 只删 messages 留下 sessions 行，列表里会出现一批点进去永远空的会话，
+        // 比彻底没缓存更难理解。这里验证 workspace/session/message 一起没。
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        seedOwner(cache, dao, "a", 100)
+        dao.workspaces += CachedWorkspace(
+            ownerId = "a", workspaceId = "w", path = "/w", title = "W",
+            sessionIdsJson = "[]", createdAt = 1, updatedAt = 1, orderIndex = 0,
+        )
+        dao.sessions += CachedSession(
+            ownerId = "a", sessionId = "s1", title = "S", updatedAt = 1,
+            agentAvailable = true, running = false, blank = false,
+            parentSessionId = null, origin = null, cwd = null,
+            lastPromptAt = null, lastModel = null,
+        )
+        seedOwner(cache, dao, "b", 200)
+
+        cache.evictOwners(protect = emptySet(), maxOwners = 1)
+
+        assertTrue("分区 a 的工作区应被清空", dao.workspaces.none { it.ownerId == "a" })
+        assertTrue("分区 a 的会话应被清空", dao.sessions.none { it.ownerId == "a" })
+        assertTrue("分区 a 的消息应被清空", dao.messages.none { it.ownerId == "a" })
+    }
+
+    @Test
+    fun `时间未知的分区排在最前 优先被淘汰`() = runBlocking {
+        // 没有任何落盘时间的分区大概率是崩溃残留，比「确知很旧」更该让位。
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        // "ghost" 只有 meta 行、没有数据行 → lastUsedAt 拿不到数据表的最大值。
+        dao.meta["ghost/whatever"] = "x"
+        seedOwner(cache, dao, "known", 100)
+
+        val evicted = cache.evictOwners(protect = emptySet(), maxOwners = 1)
+
+        assertEquals(listOf("ghost"), evicted)
+    }
+
+    @Test
+    fun `pruneOrphans 只删凭证簿里已不存在的分区`() = runBlocking {
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        seedOwner(cache, dao, "alive", 100)
+        seedOwner(cache, dao, "orphan", 200)
+
+        val removed = cache.pruneOrphans(knownOwners = setOf("alive"))
+
+        assertEquals(listOf("orphan"), removed)
+        assertEquals(setOf("alive"), dao.allOwnerIds().toSet())
+    }
+
+    @Test
+    fun `pruneOrphans 在没有孤儿时什么都不做`() = runBlocking {
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        seedOwner(cache, dao, "a", 100)
+
+        val removed = cache.pruneOrphans(knownOwners = setOf("a", "b"))
+
+        assertTrue(removed.isEmpty())
+        assertEquals(setOf("a"), dao.allOwnerIds().toSet())
+    }
+
+    @Test
+    fun `touchOwner 会刷新最近使用时间`() = runBlocking {
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+
+        cache.touchOwner("a")
+        val first = dao.meta["a/${CacheKeys.LAST_USED_AT}"]!!.toLong()
+
+        // 越过一毫秒再写一次，才能证明是「刷新」而不是「写进去过一次」。
+        // 原断言只检查 > 0L，把时钟换成一个常量、甚至写成 "1" 也照样通过——
+        // 那种测试验证的是键存在，与「刷新」无关（M57 复审 P3）。
+        Thread.sleep(2)
+        cache.touchOwner("a")
+        val second = dao.meta["a/${CacheKeys.LAST_USED_AT}"]!!.toLong()
+
+        assertTrue("第二次写入($second)应不小于第一次($first)", second >= first)
+        assertTrue("第二次写入($second)应严格大于第一次($first)", second > first)
+    }
+
+    /**
+     * P1 回归：走**生产路径唯一入口** `maintainOnActivate`，超限必须真的淘汰。
+     *
+     * 这条测试存在的意义（两次踩坑换来的）：
+     * 1. 原来的 9 条单测都直接调 `evictOwners`、跳过 `pruneOrphans`，于是「protect 传了
+     *    整个凭证簿 → 候选集恒为空 → 上限永不生效」这个 P1 完全没被覆盖；
+     * 2. 补了顺序之后我把它写在测试里手工调用，**结果把 AppContainer 改回错误写法单测
+     *    依然全绿**——因为编排逻辑当时住在没有测试覆盖的 AppContainer 里。
+     * 现在编排收进 `maintainOnActivate`，这条测试直接驱动它，改错就必红。
+     */
+    @Test
+    fun `maintainOnActivate 在超限时真的淘汰 且不动当前激活的分区`() = runBlocking {
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        // 6 台主机各有一份缓存，上限 4。
+        val names = listOf("h1", "h2", "h3", "h4", "h5", "h6")
+        names.forEachIndexed { i, n -> seedOwner(cache, dao, n, 100L + i) }
+        // 让 h1、h2 成为最久未用。
+        names.forEachIndexed { i, n -> dao.meta["$n/${CacheKeys.LAST_USED_AT}"] = "${1000L + i}" }
+
+        cache.maintainOnActivate(
+            activeOwner = "h6",
+            knownOwners = names.toSet(),
+            maxOwners = 4,
+        )
+
+        assertEquals("6 个分区上限 4，必须淘汰 2 个", 4, dao.allOwnerIds().size)
+        assertTrue("当前激活的 h6 绝不能被淘汰", "h6" in dao.allOwnerIds())
+        assertFalse("最久未用的 h1 应被淘汰", "h1" in dao.allOwnerIds())
+        assertFalse("次久未用的 h2 应被淘汰", "h2" in dao.allOwnerIds())
+        assertTrue("较新的 h4、h5 应保留", "h4" in dao.allOwnerIds() && "h5" in dao.allOwnerIds())
+    }
+
+    /**
+     * 孤儿必须先清、再限量：孤儿若占着名额，会把还有主人的分区挤掉。
+     *
+     * 构造：库里 4 个分区，其中 "ghost" 不在凭证簿里，上限 3。
+     * 正确顺序 → 清掉 ghost 后正好 3 个，**不该再淘汰任何有主人的分区**。
+     */
+    @Test
+    fun `maintainOnActivate 先清孤儿 避免孤儿占名额挤掉有效分区`() = runBlocking {
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        seedOwner(cache, dao, "old", 100)
+        seedOwner(cache, dao, "ghost", 999) // 孤儿，且时间最新（最不易被 LRU 挑中）
+        seedOwner(cache, dao, "mid", 200)
+        seedOwner(cache, dao, "active", 300)
+
+        cache.maintainOnActivate(
+            activeOwner = "active",
+            knownOwners = setOf("old", "mid", "active"),
+            maxOwners = 3,
+        )
+
+        assertFalse("孤儿 ghost 必须被清掉", "ghost" in dao.allOwnerIds())
+        assertTrue(
+            "清掉孤儿后正好 3 个，有主人的分区一个都不该被淘汰: ${dao.allOwnerIds()}",
+            dao.allOwnerIds().toSet() == setOf("old", "mid", "active"),
+        )
+    }
+
+    /**
+     * P1 的对照：如果 protect 传整个凭证簿（旧写法），淘汰恒为空。
+     * 这条测试钉住「为什么不能那样传」，防止有人"好心"把保护集扩大回去。
+     */
+    @Test
+    fun `protect 传整个凭证簿时淘汰为空 说明上限失效`() = runBlocking {
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        val names = listOf("h1", "h2", "h3", "h4", "h5", "h6")
+        names.forEachIndexed { i, n -> seedOwner(cache, dao, n, 100L + i) }
+
+        cache.pruneOrphans(knownOwners = names.toSet())
+        val evicted = cache.evictOwners(protect = names.toSet(), maxOwners = 4)
+
+        assertTrue("全被 protect 挡住，淘不到任何东西", evicted.isEmpty())
+        assertEquals("上限 4 形同虚设：6 个全留着", 6, dao.allOwnerIds().size)
+    }
+
+    @Test
+    fun `lastUsedAt 优先取 LAST_USED_AT 而不与数据表取最大值`() = runBlocking {
+        // P3 回归：sessions.updatedAt 是服务端时间，可能超前本机时钟。
+        // 若与 LAST_USED_AT 取并集，一个刚被刷新过的分区仍会被那个未来时间判为"最新"。
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        seedOwner(cache, dao, "a", 100)
+        // 服务端时钟大幅超前本机
+        dao.sessions += CachedSession(
+            ownerId = "a",
+            sessionId = "future",
+            title = "t",
+            updatedAt = 9_999_999_999L,
+            agentAvailable = false,
+            running = false,
+            blank = false,
+            parentSessionId = null,
+            origin = null,
+            cwd = null,
+            lastPromptAt = null,
+            lastModel = null,
+        )
+        dao.meta["a/${CacheKeys.LAST_USED_AT}"] = "5000"
+
+        assertEquals(
+            "LAST_USED_AT 存在时它就是权威答案，不该被数据表的未来时间盖过",
+            5000L,
+            dao.lastUsedAt("a", CacheKeys.LAST_USED_AT),
+        )
+    }
+
+    @Test
+    fun `保存失败时淘汰与清理返回空列表而不是抛异常`() = runBlocking {
+        // guard 的契约：缓存故障绝不穿透到 UI。淘汰失败最坏是「这次没淘汰」。
+        val dao = FakeDao()
+        val cache = DshCache.create(dao)
+        dao.failWith = IllegalStateException("磁盘满")
+
+        assertTrue(cache.evictOwners(protect = emptySet(), maxOwners = 0).isEmpty())
+        assertTrue(cache.pruneOrphans(knownOwners = emptySet()).isEmpty())
+    }
+
 }

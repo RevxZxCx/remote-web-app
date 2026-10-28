@@ -105,7 +105,7 @@ import androidx.compose.ui.unit.sp
 import com.revxzxcx.remotewebapp.core.credentials.CredentialBook
 import com.revxzxcx.remotewebapp.core.credentials.DeviceCredential
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
-import com.revxzxcx.remotewebapp.core.pairing.PairStatus
+import com.revxzxcx.remotewebapp.core.connection.HostProbe
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.session.SessionStatus
 import com.revxzxcx.remotewebapp.core.session.statusOf
@@ -157,14 +157,17 @@ fun HomeScreen(
     onRenameHost: (DeviceCredential, String) -> Unit = { _, _ -> },
     onEditHostEndpoint: (DeviceCredential, String) -> Unit = { _, _ -> },
     /**
-     * 测一下这台主机连得上不连得上（R054）。
+     * 测一下这台主机现在能不能用（R054 起，M57 改为真实鉴权探测）。
      *
      * 为什么是**挂起回调**而不是普通回调：结果要回到这一屏的 snackbar。
      * 若把结果往上推给 [com.revxzxcx.remotewebapp.ui.AppRoot]，得再开一个跨屏状态只为了
      * 一句话；而测试连接本来就是「点一下、看一眼」的就地反馈。
+     *
+     * M57：返回类型从 `PairStatus?` 换成 [HostProbe]——旧类型只能表达「地址通/不通」，
+     * 无法表达「地址通但凭证已失效」，那正是要修的那条误导。
      * 传 `null` 表示这个入口不可用（渲染测试里不会真发请求）。
      */
-    onProbeHost: (suspend (DeviceCredential) -> PairStatus?)? = null,
+    onProbeHost: (suspend (DeviceCredential) -> HostProbe)? = null,
     onRemoveHost: (DeviceCredential) -> Unit = {},
     /**
      * 「重新配对」（R054 修正）。
@@ -645,14 +648,10 @@ fun HomeScreen(
                                 // 没必要再弹一个看不到的提示。
                                 if (onProbeHost == null) return@DeviceBar
                                 scope.launch {
-                                    val status = onProbeHost(host)
-                                    snackbar.showSnackbar(
-                                        if (status != null) {
-                                            "${host.displayName} 连得上"
-                                        } else {
-                                            "${host.displayName} 连不上，请检查地址与网络"
-                                        },
-                                    )
+                                    val result = onProbeHost(host)
+                                    // 文案由 HostProbe.message() 统一给：三种状态的措辞
+                                    // 必须互相可比，且「凭证失效」要指向下一步动作。
+                                    snackbar.showSnackbar(result.message(host.displayName))
                                 }
                             },
                             onRemove = onRemoveHost,

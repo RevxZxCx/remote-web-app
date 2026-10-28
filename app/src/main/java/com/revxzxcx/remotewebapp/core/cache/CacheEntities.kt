@@ -135,4 +135,14 @@ object CacheKeys {
     const val PINNED_SESSIONS: String = "pinnedSessionIds"
     const val SESSIONS_CACHED_AT: String = "sessionsCachedAt"
     const val WORKSPACES_CACHED_AT: String = "workspacesCachedAt"
+
+    /**
+     * 该分区最近一次被激活的时间（毫秒）。
+     *
+     * M57 新增：多主机之后每个分区各占一份缓存，必须能回答「哪片最久没用」才能做 LRU
+     * 淘汰。[SESSIONS_CACHED_AT] 不能代替它——那只在**成功拉到** `session/list` 时刷新，
+     * 用户切过去看一眼就走（列表命中缓存、没发请求）时它不会动，于是最常看的那几台
+     * 会被当成「很久没用」而先被淘汰，恰好把缓存淘汰成了最坏结果。
+     */
+    const val LAST_USED_AT: String = "lastUsedAt"
 }

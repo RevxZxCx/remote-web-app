@@ -5,18 +5,18 @@ import com.revxzxcx.remotewebapp.core.cache.CacheMappers
 import com.revxzxcx.remotewebapp.core.cache.DshCache
 import com.revxzxcx.remotewebapp.core.cache.DshDatabase
 import com.revxzxcx.remotewebapp.core.connection.DshConnection
+import com.revxzxcx.remotewebapp.core.connection.HostProbe
+import com.revxzxcx.remotewebapp.core.connection.HostProbeClient
 import com.revxzxcx.remotewebapp.core.credentials.CredentialBook
 import com.revxzxcx.remotewebapp.core.credentials.isSameEndpoint
 import com.revxzxcx.remotewebapp.core.credentials.CredentialStore
 import com.revxzxcx.remotewebapp.core.credentials.DeviceCredential
 import com.revxzxcx.remotewebapp.core.credentials.KeystoreCredentialStore
 import com.revxzxcx.remotewebapp.core.net.HttpClients
-import com.revxzxcx.remotewebapp.core.net.HostPolicy
-import com.revxzxcx.remotewebapp.core.pairing.PairLinkParser
-import com.revxzxcx.remotewebapp.core.pairing.PairStatus
 import com.revxzxcx.remotewebapp.core.pairing.PairingApi
 import com.revxzxcx.remotewebapp.core.pairing.PairingCoordinator
 import com.revxzxcx.remotewebapp.core.prefs.ThemePreferences
+import com.revxzxcx.remotewebapp.core.protocol.DshJson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -104,6 +104,14 @@ class AppContainer(context: Context) {
     fun probeHttp(): okhttp3.OkHttpClient = unaryHttp
 
     val pairing: PairingCoordinator = PairingCoordinator(credentialStore, PairingApi(unaryHttp))
+
+    /**
+     * 设备栏「测试连接」的真实鉴权探测（M57）。
+     *
+     * 与 unary 共用同一个 HTTP 客户端：探测是一次普通 unary 请求，超时策略应当一致；
+     * 共用连接池也让「刚连过的地址」探测更快。
+     */
+    private val hostProbe: HostProbeClient = HostProbeClient(unaryHttp, DshJson)
 
     /**
      * 主题偏好（M5-9）。与容器同寿，构造时同步读一次 SharedPreferences（一个字符串，
@@ -295,20 +303,23 @@ class AppContainer(context: Context) {
     }
 
     /**
-     * 测一下某台主机现在连得上不连得上（R054 设备栏的「测试连接」）。
+     * 测一下某台主机现在能不能用（R054 设备栏的「测试连接」，M57 起做真实鉴权探测）。
      *
-     * 为什么用 `PairingApi.status` 而不是发一条真正的 typert 请求：
-     * `GET <base>/api/pair/status` 是**无需凭证的公开探针**（配对页「探测地址」用的就是它），
-     * 因此它能回答「这个地址连不连得上」而不受——也不会去动——
-     * 当前连接。对非激活的那些主机，这是唯一能用的手段：它们没有 `DshConnection`。
+     * ## R054 的旧实现为什么不够
      *
-     * @return 可达时的状态；不可达（含地址格式错、被 HostPolicy 拦截、网络异常）返回 `null`。
+     * 它打的是 `GET <base>/api/pair/status`——**无需凭证的公开探针**。对「地址通不通」
+     * 这个问题它是对的，但它无法回答「这台桌面端还认不认我的凭证」：配对被撤销后它照样
+     * 200，于是设备栏报「连得上」，用户切过去才收到 `unpaired (HTTP 403)`。
+     *
+     * ## 现在怎么测
+     *
+     * 用 [HostProbeClient] 发一次 `session/modelCatalog`：无参数、只读、必须带设备头。
+     * 它不构造 [DshConnection]（那条路会连带持有一条长驻 WebSocket），探测完即挂断。
+     *
+     * 返回四态见 [HostProbe]：可达且鉴权通过 / 鉴权被拒 / 未通或响应不对 / 本地就被拒。
      */
-    suspend fun testHost(host: DeviceCredential): PairStatus? {
-        val normalized = PairLinkParser.normalizeBaseUrl(host.baseUrl) ?: return null
-        if (HostPolicy.rejectionReason(normalized) != null) return null
-        return runCatching { PairingApi(unaryHttp).status(normalized) }.getOrNull()
-    }
+    suspend fun testHost(host: DeviceCredential): HostProbe =
+        hostProbe.probe(host.baseUrl, host.deviceId)
 
     /** 退出配对：关连接、清整本凭证簿、回到配对页。 */
     suspend fun unpair() = bookLock.withLock {
@@ -363,5 +374,37 @@ class AppContainer(context: Context) {
         // 一直等到请求自己的 signal 超时，用户看到的就是毫无反应（RemoteEventsClient KDoc）。
         connection?.remoteEvents?.start()
         _state.value = AppState.Paired
+
+        // 每次激活主机都刷新「这个分区刚用过」并顺手做一次缓存维护（M57）。
+        // 放在 `_state.value = Paired` 之后：这两件事都不该挡住首屏，而且维护失败
+        // （`guard` 兜住）也绝不能影响连接本身——缓存只是优化，坏了就当没有。
+        val owner = CacheMappers.ownerIdOf(credential)
+        appScope.launch {
+            // 三步（记最近使用 / 清孤儿 / 按 LRU 限量）的**顺序**与 **protect 的算法**
+            // 都收在 `DshCache.maintainOnActivate` 里。刻意不在这里展开：这段编排曾写在
+            // 本地，结果 protect 传错成整个凭证簿、上限静默失效，而这个文件没有测试覆盖，
+            // 把错误写法改回去单测依然全绿（M57 复审 P1）。挪进缓存层之后，同样的错误
+            // 会立刻让 DshCacheTest 变红。
+            val known = credentialStore.loadBook().hosts.mapNotNull { host ->
+                runCatching { CacheMappers.ownerIdOf(host) }.getOrNull()
+            }
+            cacheLazy.maintainOnActivate(
+                activeOwner = owner,
+                knownOwners = known.toSet(),
+                maxOwners = MAX_CACHED_OWNERS,
+            )
+        }
+    }
+
+    companion object {
+        /**
+         * 最多保留多少个主机缓存分区（M57）。
+         *
+         * 4 是个有意的保守值：每个分区的 `messages` 表按「打开过的会话」累积，重度用户
+         * 单分区可达数 MB。上限太大等于没有上限（低端机 SQLite 文件膨胀到几百 MB 后，
+         * 连 `SELECT` 都会变慢）；太小则多主机用户频繁换主机时反复重拉 1.78 MB 的
+         * `session/list`。4 台覆盖「公司 + 家里 + 笔记本 + 备用」这类常见组合。
+         */
+        private const val MAX_CACHED_OWNERS: Int = 4
     }
 }

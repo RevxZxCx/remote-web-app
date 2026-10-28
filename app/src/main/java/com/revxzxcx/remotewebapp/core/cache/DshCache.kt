@@ -303,6 +303,125 @@ class DshCache private constructor(
     }
 
     /**
+     * 记下「这个分区刚被用过」（M57）。
+     *
+     * 在主机**被激活时**调用，而不是在成功拉取时：LRU 要回答的是「用户最近在看哪台」，
+     * 不是「哪台最近成功同步过」。离线打开一台主机时它同样是「刚用过」。
+     */
+    suspend fun touchOwner(ownerId: String) = guard("touchOwner") {
+        dao.putMeta(
+            CacheMappers.meta(
+                ownerId,
+                CacheKeys.LAST_USED_AT,
+                System.currentTimeMillis().toString(),
+            ),
+        )
+    }
+
+    /**
+     * 分区数超限时按 LRU 淘汰，返回被删掉的分区键。
+     *
+     * @param protect 无论如何都不能删的分区，**只该传当前激活的那一台**。
+     *
+     *   这里曾经传「凭证簿里的全部主机」，结果是淘汰分支**恒为空**：调用方总是紧接着
+     *   [pruneOrphans] 执行，而它已经把「不在簿里」的分区删光了，于是库里剩下的必然
+     *   全在簿里、也全在 protect 里，候选集永远为空——上限 4 形同虚设，用户有 6 台
+     *   主机就永远留 6 份。「簿有多大就留多少缓存」等于没有上限，LRU 也就没有意义了。
+     *
+     *   代价说清楚：被淘汰分区对应的主机**仍在凭证簿里**，用户切过去会重新拉一次
+     *   `session/list`（单次实测 1.78 MB）。这正是「有上限」的定义——想留住全部，
+     *   就该调大 [maxOwners]，而不是让 protect 偷偷绕过它。
+     * @param maxOwners 保留的分区上限（含 [protect]）。
+     *
+     * ## 为什么按分区整体删
+     *
+     * 缓存的最小可用单位就是「一个分区的全部行」：只删消息留下 `sessions` 行，列表会
+     * 显示出一批点进去永远是空的会话，比彻底没有更难理解。整片删掉之后那台主机回到
+     * 「从没缓存过」的干净状态，行为和刚配对一样。
+     */
+    suspend fun evictOwners(protect: Set<String>, maxOwners: Int): List<String> =
+        guard("evictOwners") {
+            val all = dao.allOwnerIds()
+            if (all.size <= maxOwners) return@guard emptyList()
+
+            // 按「最近使用」升序，最久没用的排最前——也就是最先该被淘汰的。
+            // 时间取不到的排在更前：未知比「确知很旧」更该让位（它大概率是崩溃残留）。
+            val ranked = all
+                .filterNot { it in protect }
+                .map { owner -> owner to dao.lastUsedAt(owner, CacheKeys.LAST_USED_AT) }
+                .sortedWith(compareBy(nullsFirst()) { it.second })
+
+            // 要删掉的条数：总分区数减上限。protect 里的不参与删除，但计入总数——
+            // 否则「当前 3 台主机都在簿里、上限 4」时会因为候选只剩别人而算错。
+            val excess = all.size - maxOwners
+            val victims = ranked.take(excess.coerceAtLeast(0)).map { it.first }
+            victims.forEach { dao.deleteOwner(it) }
+            victims
+        } ?: emptyList()
+
+    /**
+     * 清掉**孤儿分区**：库里存在、但凭证簿里已经没有任何主机对应的分区（M57）。
+     *
+     * ## 为什么会有孤儿
+     *
+     * 分区键是 `SHA-256(baseUrl + deviceId)` 的指纹。三件事会让一个指纹失去主人：
+     *
+     * 1. **同地址重新配对**（最常见）：桌面端每次 `pair/accept` 都发新 `deviceId`，
+     *    `CredentialBook.withUpsert` 判「同 endpoint」的条件是 `baseUrl` 和 `deviceId`
+     *    都相同——`deviceId` 变了就落到新增分支，旧记录连同旧指纹一起被顶掉。
+     *    旧指纹的数据还在库里，不清理就永远查不到、也永远不会被删。
+     * 2. **手工改地址**：指纹含 `baseUrl`，改一次就换一片。
+     * 3. **崩溃残留**：`removeHost` 的清理跑在 `appScope.launch` 里，进程被杀就漏了。
+     *
+     * ## 为什么可以和 LRU 并存
+     *
+     * 两者职责不同：本法处理的是「**明确不该存在**」的分区（没有主人），LRU 处理的是
+     * 「有效但太多」的分区。先清孤儿再按 LRU 限量，避免孤儿占着名额把有效分区挤掉。
+     *
+     * @param knownOwners 凭证簿里现存的全部指纹；不在其中的一律视为孤儿。
+     * @return 被删掉的分区键。
+     */
+    suspend fun pruneOrphans(knownOwners: Set<String>): List<String> = guard("pruneOrphans") {
+        val orphans = dao.allOwnerIds().filterNot { it in knownOwners }
+        orphans.forEach { dao.deleteOwner(it) }
+        orphans
+    } ?: emptyList()
+
+    /**
+     * 一次完整的「激活主机后的缓存维护」：记最近使用 → 清孤儿 → 按 LRU 限量（M57）。
+     *
+     * ## 为什么这几步必须住在一起
+     *
+     * 三步之间有严格的顺序依赖，而且**顺序错了不会报错，只会静默失效**：
+     *
+     * - `pruneOrphans` 必须在 `evictOwners` **之前**：先限量的话，孤儿会占着名额把还有
+     *   主人的分区挤掉，用户切回那台主机时发现缓存莫名没了。
+     * - `evictOwners` 的 `protect` 必须**只有 [activeOwner]**，不能是 [knownOwners]：
+     *   清完孤儿后，库里剩下的分区必然全在 [knownOwners] 里；若 protect 传它，
+     *   候选集恒为空，上限永远不触发（M57 复审 P1 就是这么来的——写在 `AppContainer`
+     *   里，而那里没有测试覆盖，把 protect 改回旧写法单测**依然全绿**）。
+     *
+     * 所以这段编排收进缓存层，让「顺序」和「protect 怎么算」有唯一的正确实现，
+     * 也才可能被 [DshCacheTest] 按真实顺序测到。调用方只管把簿里的指纹传进来。
+     *
+     * 单步的 [touchOwner] / [pruneOrphans] / [evictOwners] 仍各自公开：它们是独立原语，
+     * 别处单测直接验证边界；但**生产路径只该走这一个入口**。
+     *
+     * @param activeOwner 当前激活主机的指纹，无论何时都不淘汰它。
+     * @param knownOwners 凭证簿里现存的全部指纹；不在这里面的一律视为孤儿。
+     * @param maxOwners 保留的分区上限（含 [activeOwner]）。
+     */
+    suspend fun maintainOnActivate(
+        activeOwner: String,
+        knownOwners: Set<String>,
+        maxOwners: Int,
+    ) {
+        touchOwner(activeOwner)
+        pruneOrphans(knownOwners)
+        evictOwners(protect = setOf(activeOwner), maxOwners = maxOwners)
+    }
+
+    /**
      * 缓存不可用时的兜底：把 Room 抛出的异常折成「没有缓存」。
      *
      * 同时承担第二个职责：**把所有磁盘访问放到 `Dispatchers.IO`**。DAO 的

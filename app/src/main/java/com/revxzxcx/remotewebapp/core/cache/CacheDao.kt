@@ -216,4 +216,53 @@ interface CacheDao {
         deleteOwnerDrafts(ownerId)
         deleteOwnerMeta(ownerId)
     }
+
+    // ------------------------------------------------------- 分区淘汰（M57）
+
+    /**
+     * 库里现存的全部分区键。
+     *
+     * 取五张表的并集而不是只查 `meta`：`meta` 行可能被删而数据行还在（异常中断、旧版
+     * 迁移），只查 `meta` 会让那种分区变成**永远看不见、也永远删不掉**的幽灵。
+     */
+    @Query(
+        """
+        SELECT ownerId FROM workspaces
+        UNION SELECT ownerId FROM sessions
+        UNION SELECT ownerId FROM messages
+        UNION SELECT ownerId FROM drafts
+        UNION SELECT ownerId FROM meta
+        """,
+    )
+    suspend fun allOwnerIds(): List<String>
+
+    /**
+     * 某分区最近一次被使用的时间（毫秒）；没有任何可用记录时返回 `null`。
+     *
+     * 优先读 [CacheKeys.LAST_USED_AT]（M57 新增，每次激活主机都会刷新）；
+     * 老数据没有这个键，于是退回到各表 `MAX` 落盘时间兜底——否则升级后所有已存在分区
+     * 都是「未知时间」，LRU 会把它们当成并列，淘汰顺序变成随机。
+     *
+     * **有 `LAST_USED_AT` 时就不再与数据表取并集**（M57 复审 P3）：两张表的时间来源不同，
+     * `sessions.updatedAt` 来自**服务端会话时间**，`LAST_USED_AT` 来自**本机时钟**。
+     * 取并集最大值会让两种时钟混在一起比较：
+     * - 桌面端时钟超前手机时，一个刚被 `touchOwner` 刷新的分区仍会被那个「未来时间」判为最新；
+     * - 手机时钟回拨后，新写入的较小值会被旧数据表的值压过。
+     * 两种偏离都让 LRU 排序不再反映真实激活顺序。`LAST_USED_AT` 存在时它才是权威答案——
+     * 取并集等于把这个新键存在的意义削掉一半。
+     */
+    @Query(
+        """
+        SELECT COALESCE(
+            (SELECT CAST(value AS INTEGER) FROM meta
+                WHERE ownerId = :ownerId AND key = :lastUsedKey),
+            (SELECT MAX(t) FROM (
+                SELECT MAX(updatedAt) AS t FROM sessions WHERE ownerId = :ownerId
+                UNION ALL SELECT MAX(createdAt) FROM workspaces WHERE ownerId = :ownerId
+                UNION ALL SELECT MAX(updatedAt) FROM drafts WHERE ownerId = :ownerId
+            ))
+        )
+        """,
+    )
+    suspend fun lastUsedAt(ownerId: String, lastUsedKey: String): Long?
 }
