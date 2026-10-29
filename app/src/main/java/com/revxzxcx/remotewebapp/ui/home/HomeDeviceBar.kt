@@ -115,7 +115,15 @@ internal fun DeviceBar(
 
         Surface(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(0.dp),
+            // B001（用户 m03969 第 1 条）：这里原本是 `RoundedCornerShape(0.dp)`，
+            // 通条直角。原型 s1 的 `.devbar` 确实也是通条，但真机上它紧贴顶栏下方、
+            // 悬在内容之上，四个直角与全 App 其它容器（会话行 16dp、抽屉 20dp、
+            // 菜单 14dp、按钮 pill）格格不入——用户原话「和实际的设计风格有割裂感」。
+            //
+            // 采用方案 B：**只圆下两角**。上两角必须留直角，因为这一条是顶栏被展开
+            // 出来的那部分，上沿与 TopAppBar 直接相接；一旦圆上去，两角会露出顶栏
+            // 底下的背景，看着像裂了一道缝。
+            shape = DeviceBarShape,
             // 浅色下靠投影分层会糊成灰边（原型 s6 的说明），所以只用描边 + 表面色。
             color = MaterialTheme.colorScheme.surface,
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
@@ -278,6 +286,26 @@ internal fun DeviceBar(
         }
     }
 }
+
+/**
+ * 设备栏的下拉容器形状：**只圆下两角**，上两角保持直角。
+ *
+ * 为什么不是四面圆角：设备栏是顶栏被展开出来的那部分，上沿与 `TopAppBar` 直接相接。
+ * 圆上去之后两角会露出顶栏底下的背景，在深色主题下看是两块黑缺口。
+ *
+ * 为什么不是直角：这一条悬在内容区之上，四个直角与全 App 其它容器
+ * （会话行 16dp / 抽屉 20dp / 菜单 14dp / 按钮 pill）风格不一致，用户原话是
+ * 「和实际的设计风格有割裂感」（B001，m03969 第 1 条）。
+ *
+ * 数值取 16dp 与首页会话行的 `rowShape` 对齐——两者在屏幕上上下相邻，
+ * 用同一档圆角看起来才是同一套语言。
+ */
+internal val DeviceBarCornerRadius = 16.dp
+
+internal val DeviceBarShape = RoundedCornerShape(
+    bottomStart = DeviceBarCornerRadius,
+    bottomEnd = DeviceBarCornerRadius,
+)
 
 /**
  * 设备栏里的一行。
