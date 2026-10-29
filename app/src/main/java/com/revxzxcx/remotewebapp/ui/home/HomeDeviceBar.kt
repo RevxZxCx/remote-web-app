@@ -480,6 +480,76 @@ private fun HostEndpointDialog(
 }
 
 /**
+ * 同一个确认框的两种用途（M57 真机验收发现的缺陷）。
+ *
+ * 背景：[HostRemoveDialog] 被「从列表移除」和「重新配对」两个入口复用。复用本身是对的
+ * ——两者对用户而言都是「这台不要了，桌面端不受影响」，形态也应该一致。但第二处在
+ * M57 之前直接传了同一份文案，于是点「重新配对」弹出的是**「从列表移除？」**，图标还是
+ * 红色垃圾桶、按钮写「确认移除」。用户点的是「修好它」，看到的却是「删掉它」，而且
+ * 确认之后会被送去配对页——行为和标题对不上。
+ *
+ * 所以把**文案**参数化、形态不动。三种用途的差别只在说了什么，不在后果轻重，
+ * 因此仍然共用 [HostRemoveDialog] 而不是各写一个 AlertDialog。
+ */
+internal enum class HostRemovePurpose {
+    /** 设备栏 `⋯` / 溢出菜单 / 设置页：把这台从本机列表里移除。 */
+    Remove,
+
+    /** 错误横幅、ConnectionBanner：把这台删掉并回配对页重新配。 */
+    Repair,
+    ;
+
+    /** 这枚图标画在标题左边。 */
+    val icon: androidx.compose.ui.graphics.vector.ImageVector
+        get() = when (this) {
+            Remove -> androidx.compose.material.icons.Icons.Default.Delete
+            Repair -> androidx.compose.material.icons.Icons.Default.Refresh
+        }
+
+    /** 标题。 */
+    val title: String
+        get() = when (this) {
+            Remove -> "从列表移除？"
+            Repair -> "重新配对这台？"
+        }
+
+    /** 确认按钮文字。 */
+    val confirm: String
+        get() = when (this) {
+            Remove -> "确认移除"
+            Repair -> "删掉重配"
+        }
+
+    /**
+     * 正文。说清代价与可逆性——两种用途都要交代「桌面端不受影响」与「本机缓存会被清掉」，
+     * 因为这两件事在两种用途下都成立。
+     */
+    /** 结合当前列表长度，把文案一次性定下来，供 [HostRemoveDialog] 直接取用。 */
+    fun resolve(total: Int): HostRemoveCopy = HostRemoveCopy(
+        icon = icon,
+        title = title,
+        body = body(total),
+        confirm = confirm,
+    )
+
+    fun body(total: Int): String = when (this) {
+        Remove -> "桌面端不受影响，这台在本机缓存的会话与草稿会被清掉。重新配对就能加回来" +
+            if (total <= 1) "；它是最后一台，移除后会回到配对页。" else "。"
+        Repair -> "会先把它从本机列表里删掉，再送你回配对页。桌面端不受影响，重新配一次" +
+            "就能加回来；本机缓存的会话与草稿会被清掉" +
+            if (total <= 1) "。它是最后一台，删掉后列表会清空。" else "；其余 ${total - 1} 台保留。"
+    }
+}
+
+/** [HostRemovePurpose] 结合列表长度展开后的最终文案。 */
+internal data class HostRemoveCopy(
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val title: String,
+    val body: String,
+    val confirm: String,
+)
+
+/**
  * 「从列表移除」的二次确认。
  *
  * 用**琥珀色**（tertiary）而不是红色（原型 s2 的说明）：这台只是从手机列表里移除，
@@ -495,7 +565,9 @@ internal fun HostRemoveDialog(
     total: Int,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
+    purpose: HostRemovePurpose = HostRemovePurpose.Remove,
 ) {
+    val copy = purpose.resolve(total)
     AlertDialog(
         onDismissRequest = onDismiss,
         shape = RoundedCornerShape(28.dp),
@@ -506,13 +578,13 @@ internal fun HostRemoveDialog(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Icon(
-                    imageVector = Icons.Default.Delete,
+                    imageVector = copy.icon,
                     contentDescription = null,
                     modifier = Modifier.size(18.dp),
                     tint = MaterialTheme.colorScheme.tertiary,
                 )
                 Text(
-                    text = "从列表移除？",
+                    text = copy.title,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -543,8 +615,7 @@ internal fun HostRemoveDialog(
                     }
                 }
                 Text(
-                    text = "桌面端不受影响，这台在本机缓存的会话与草稿会被清掉。重新配对就能加回来" +
-                        if (total <= 1) "；它是最后一台，移除后会回到配对页。" else "。",
+                    text = copy.body,
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 10.dp),
@@ -553,7 +624,7 @@ internal fun HostRemoveDialog(
         },
         confirmButton = {
             TextButton(onClick = onConfirm) {
-                Text("确认移除", color = MaterialTheme.colorScheme.tertiary)
+                Text(copy.confirm, color = MaterialTheme.colorScheme.tertiary)
             }
         },
         dismissButton = {

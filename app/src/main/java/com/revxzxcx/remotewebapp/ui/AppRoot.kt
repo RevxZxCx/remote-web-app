@@ -43,6 +43,7 @@ import com.revxzxcx.remotewebapp.ui.files.FileViewerScreen
 import com.revxzxcx.remotewebapp.ui.files.FileViewerViewModel
 import com.revxzxcx.remotewebapp.ui.home.HomeScreen
 import com.revxzxcx.remotewebapp.ui.home.HostRemoveDialog
+import com.revxzxcx.remotewebapp.ui.home.HostRemovePurpose
 import com.revxzxcx.remotewebapp.ui.home.HomeViewModel
 import com.revxzxcx.remotewebapp.ui.pair.PairScreen
 import com.revxzxcx.remotewebapp.ui.pair.PairViewModel
@@ -571,6 +572,7 @@ fun AppRoot(container: AppContainer) {
             HostRemoveDialog(
                 host = host,
                 total = book.hosts.size,
+                purpose = HostRemovePurpose.Repair,
                 onDismiss = { pendingRepairHost = null },
                 onConfirm = {
                     pendingRepairHost = null

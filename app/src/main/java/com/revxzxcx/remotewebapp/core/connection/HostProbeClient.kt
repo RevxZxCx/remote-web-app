@@ -146,10 +146,22 @@ class HostProbeClient(
                  * `http-401` / `http-403`：HTTP 层回了拒绝，但**没有**可解析的错误信封，
                  * 于是 `decodeHttpFailure` 只能按状态码造码。
                  *
-                 * 这种情况必须算「鉴权失败」而不是「响应异常」：设备头不对时，harness 围栏
-                 * 会直接回纯文本 403，而 TypertClient 的注释（见 `decodeHttpFailure` 上方的
-                 * KDoc）明确说过「只认纯文本会让缺 device header 的请求得到 http-403 而不是
-                 * unpaired」——两者是同一件事的两个表现，对用户都意味着该重新配对。
+                 * 这一支必须算「鉴权失败」而不是「响应异常」，但理由要说准——这里原先写的
+                 * 「设备头不对时会直接回纯文本 403」是**实测不成立**的：
+                 *
+                 * - 设备头缺失 / 为空 / 伪造 / 非 hex / 凭证已撤销，桌面端一律回
+                 *   `403` + `{"error":{"code":"unpaired",…}}` 的 **JSON 信封**，
+                 *   走的是上面的 `e.isUnpaired` 分支，**根本到不了这里**；
+                 * - 纯文本 `401`/`403` 只在**路径不对**时出现（例如前缀写成 `/api/pair`，
+                 *   围栏先回 `401 unauthorized`），那是「地址填错」而不是「设备头不对」。
+                 *
+                 * 所以这一支真正兜住的是「地址打到了某个会回裸 401/403 的地方」——可能填错
+                 * 了路径，也可能是中间设备（反向代理 / WAF）拦了。仍算鉴权问题：用户侧唯一
+                 * 可行动作就是回去核对地址或重新配对，报成「桌面端响应异常」只会把人引去
+                 * 查桌面端版本。
+                 *
+                 * 实测矩阵与反例见 `app/src/test/…/core/integration/LiveHostProbeTest.kt`
+                 * （有一条用例专门钉住「设备头错误走 unpaired 信封而不是纯文本」）。
                  */
                 e.code == "http-401" || e.code == "http-403" || e.code == "forbidden" ->
                     HostProbe.Unauthorized(e.code)

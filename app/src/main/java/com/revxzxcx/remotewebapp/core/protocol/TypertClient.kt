@@ -284,6 +284,23 @@ internal fun JsonElement?.asLooseObject(): JsonObject =
  * 只认纯文本会让**缺 device header 的普通路由请求得到 `http-403`**，而不是 `unpaired`，
  * 于是 [TypertException.isUnpaired] 为 false，退避重试永远不会停、UI 也不会引导重新配对
  * （R005 数据层审查 P2）。
+ *
+ * ## 实测订正（M57 复审）
+ *
+ * 上面第 2 条说的「缺 device header 走纯文本」，**在当前的桌面端上不成立**：
+ * 对 `127.0.0.1:19387` 与公网隧道 `https://zcsb.ltd` 分别实测，设备头缺失 / 为空 /
+ * 伪造 / 非 hex / 凭证已撤销，六种情形一律回
+ * `403` + `{"error":{"code":"unpaired",…}}` —— 是 JSON 信封，由上面那段
+ * `envelope?.result?.error?.let { … }` 提前返回，**不会**落到纯文本分支。
+ * 普通路由（`/remote/api/changes/summary`）表现相同。
+ *
+ * 纯文本分支仍然是必需的，只是它兜的是另一类事实：路径不对时的围栏裸响应
+ * （例如把前缀错写成 `/api/pair`，得到 `401 unauthorized` 纯文本），以及正常路由自己的
+ * 纯文本错误（404 `Change summary unavailable.`）。这条历史结论（R005 P2）没有被推翻——
+ * 当时若不兼容纯文本，那类响应就会被误判成 `http-403`；只是它**不能**再被当成
+ * 「设备头错误会走这里」的依据。
+ *
+ * 钉住这件事的反例在 `app/src/test/…/core/integration/LiveHostProbeTest.kt`。
  */
 internal fun decodeHttpFailure(json: Json, status: Int, body: String): TypertException {
     val trimmed = body.trim()
