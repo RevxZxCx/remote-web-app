@@ -2,6 +2,7 @@ package com.revxzxcx.remotewebapp.core.credentials
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -91,13 +92,59 @@ class CredentialBookTest {
     }
 
     @Test
-    fun `同地址换 deviceId 会新增一条`() {
-        // 桌面端重新配对后旧 deviceId 已失效，这是另一条记录，不是更新。
+    fun `同地址换 deviceId 是更新那一行 不是新增一条`() {
+        // B005：这条断言原来是反过来的（断言 2 行），理由是「旧 deviceId 已失效，是另一条记录」。
+        // 那个理由是错的：桌面端每次 `pair/accept` 都发新 deviceId，于是「重新配对同一台」
+        // 每次都新增一行，旧行还留在列表里（追加分支是 hosts + merged，不删旧的）。
+        // 真机上因此攒出过 11 行一模一样的 PGBM10 / 127.0.0.1:19387。
         counter = 0
         val first = CredentialBook.EMPTY.withUpsert(cred(deviceId = "old"), newHostId = seq())
         val second = first.withUpsert(cred(deviceId = "new"), newHostId = seq())
+        assertEquals(1, second.hosts.size)
+        assertEquals("id-1", second.hosts.single().hostId)
+        // 旧 deviceId 必须被刷新成新的，否则那一行的鉴权会一直失败。
+        assertEquals("new", second.hosts.single().deviceId)
+    }
+
+    @Test
+    fun `尾部斜杠不同不产生第二行`() {
+        // 用户可能先粘贴 `http://h:1`，后来又粘 `http://h:1/`；`normalizeBaseUrl` 一般会去掉
+        // 尾斜杠，但手工登记走的是另一条路径，这里必须自己兜住（B005）。
+        val first = CredentialBook.EMPTY.withUpsert(cred(baseUrl = "http://h:1", deviceId = "a"), newHostId = seq())
+        val second = first.withUpsert(cred(baseUrl = "http://h:1/", deviceId = "b"), newHostId = seq())
+        assertEquals(1, second.hosts.size)
+        assertEquals("http://h:1", second.hosts.single().baseUrl)
+        assertEquals("b", second.hosts.single().deviceId)
+    }
+
+    @Test
+    fun `不同地址同一 deviceId 仍然是两条`() {
+        // 反过来也要守住：判据放宽到「只比 deviceId」就会把两台不同的机器合成一条。
+        val first = CredentialBook.EMPTY.withUpsert(cred(baseUrl = "http://h:1", deviceId = "x"), newHostId = seq())
+        val second = first.withUpsert(cred(baseUrl = "http://h:2", deviceId = "x"), newHostId = seq())
         assertEquals(2, second.hosts.size)
-        assertEquals(listOf("id-1", "id-2"), second.hosts.map { it.hostId })
+    }
+
+    @Test
+    fun `重新配对选中原来那台 激活不会跳到末尾`() {
+        // 就地替换保位置：用户在设备栏里认的是「第几行」，重新配对不该让那行跳到最后。
+        counter = 0
+        val book = CredentialBook.EMPTY
+            .withUpsert(cred(baseUrl = "http://h:1", deviceId = "a"), newHostId = seq())
+            .withUpsert(cred(baseUrl = "http://h:2", deviceId = "b"), newHostId = seq())
+            .withUpsert(cred(baseUrl = "http://h:3", deviceId = "c"), newHostId = seq())
+        assertEquals(listOf("http://h:1", "http://h:2", "http://h:3"), book.hosts.map { it.baseUrl })
+        val again = book.withUpsert(cred(baseUrl = "http://h:1", deviceId = "a2"), newHostId = seq())
+        assertEquals(listOf("http://h:1", "http://h:2", "http://h:3"), again.hosts.map { it.baseUrl })
+        assertEquals("a2", again.hosts.first().deviceId)
+    }
+
+    @Test
+    fun `hostWithBaseUrl 忽略尾部斜杠`() {
+        val book = CredentialBook.EMPTY.withUpsert(cred(baseUrl = "http://h:1"), newHostId = seq())
+        assertNotNull(book.hostWithBaseUrl("http://h:1"))
+        assertNotNull(book.hostWithBaseUrl("http://h:1/"))
+        assertNull(book.hostWithBaseUrl("http://h:2"))
     }
 
     @Test

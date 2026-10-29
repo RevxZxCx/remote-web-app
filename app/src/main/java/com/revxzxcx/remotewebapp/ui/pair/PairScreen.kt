@@ -41,8 +41,10 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -99,6 +101,57 @@ import com.revxzxcx.remotewebapp.ui.common.rememberAnimationsEnabled
 import com.revxzxcx.remotewebapp.ui.theme.LocalStatusRunning
 import com.revxzxcx.remotewebapp.ui.theme.groupShape
 import com.revxzxcx.remotewebapp.ui.theme.pillShape
+
+/**
+ * 「已加入列表」那张成功卡的配色。
+ *
+ * 抽成数据类而不是散在 composable 里，是因为**配色对不对没法靠肉眼守住**：
+ * 真机上踩过一次——重复添加那张卡改成深色底 `tertiaryContainer` 之后，正文还留着
+ * `onSurface`（深色字），于是 `PGBM10` 与 `127.0.0.1:19387` 深字压深底、几乎读不出来。
+ * 现在测试可以直接对这四个色做 WCAG 对比度计算（详见 `AddedHostCardPaletteTest`）。
+ */
+internal data class AddedHostCardPalette(
+    /** 卡片底色。 */
+    val container: androidx.compose.ui.graphics.Color,
+    /** 「已加入列表」/「这台已经在列表里」标题与它的图标。 */
+    val title: androidx.compose.ui.graphics.Color,
+    /** 设备名（PGBM10）与端点（127.0.0.1:19387）。 */
+    val body: androidx.compose.ui.graphics.Color,
+    /** 底部那句说明。 */
+    val note: androidx.compose.ui.graphics.Color,
+    /** 卡片上那两枚按钮的文字色。 */
+    val action: androidx.compose.ui.graphics.Color,
+)
+
+/**
+ * 成功卡配色。
+ *
+ * [repeated] 为 true 时走 `tertiaryContainer`（"这台已经在列表里"，琥珀语义 = 提醒而非成功）；
+ * 此时**四个色必须全部换成 `onTertiaryContainer`**，一个不换就会出现深字压深底。
+ *
+ * 非重复时沿用改造前的搭配（`surfaceVariant` + `onSurface` + `onSurfaceVariant`）。
+ */
+internal fun addedHostCardPalette(
+    repeated: Boolean,
+    scheme: androidx.compose.material3.ColorScheme,
+): AddedHostCardPalette = if (repeated) {
+    AddedHostCardPalette(
+        container = scheme.tertiaryContainer,
+        title = scheme.onTertiaryContainer,
+        body = scheme.onTertiaryContainer,
+        note = scheme.onTertiaryContainer,
+        // 按钮文字也必须换：primary 蓝压在深棕底上只有 2.38:1，真机上看不清。
+        action = scheme.onTertiaryContainer,
+    )
+} else {
+    AddedHostCardPalette(
+        container = scheme.surfaceVariant,
+        title = scheme.onSurface,
+        body = scheme.onSurface,
+        note = scheme.onSurfaceVariant,
+        action = scheme.primary,
+    )
+}
 
 /**
  * 配对页（原型 `docs/R033-效果图.html` 的 s2）。
@@ -227,8 +280,14 @@ fun PairScreen(
             // 的那台，之后回家才用）。直接切过去会把他正在做的事打断，而且新主机
             // 刚配对、很可能还没数据，落地就是空列表。
             state.addedHost?.let { added ->
+                // B005：同一个地址已经在列表里时，这一张卡不能再报「已加入列表」——
+                // 那会让用户以为又多了一台，于是不停地再点一次「开始配对」。
+                // 真机上就是这么堆出 11 行一模一样的 PGBM10 / 127.0.0.1:19387 的。
+                val repeated = state.addedHostWasListed
+                // 配色抽在 addedHostCardPalette 里：四个色一起换，不会漏掉正文那一行。
+                val palette = addedHostCardPalette(repeated, MaterialTheme.colorScheme)
                 Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    color = palette.container,
                     shape = RoundedCornerShape(12.dp),
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                     modifier = Modifier.fillMaxWidth(),
@@ -236,34 +295,41 @@ fun PairScreen(
                     Column(modifier = Modifier.padding(12.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                imageVector = Icons.Default.Check,
+                                imageVector = if (repeated) Icons.Default.Refresh else Icons.Default.Check,
                                 contentDescription = null,
                                 modifier = Modifier.size(16.dp),
-                                tint = LocalStatusRunning.current,
+                                tint = if (repeated) palette.title else LocalStatusRunning.current,
                             )
                             Spacer(Modifier.width(7.dp))
                             Text(
-                                text = "已加入列表",
+                                text = if (repeated) "这台已经在列表里" else "已加入列表",
                                 style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.onSurface,
+                                color = palette.title,
                             )
                         }
+                        // 这两行曾经在「重复添加」时仍是 onSurface / onSurfaceVariant，
+                        // 深字压深底，真机上根本读不出来（已实测）。现在跟着 palette 走。
                         Text(
                             text = added.displayName,
                             fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurface,
+                            color = palette.body,
                             modifier = Modifier.padding(top = 6.dp),
                         )
                         Text(
                             text = added.endpointLabel,
                             fontSize = 10.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = palette.body,
                             modifier = Modifier.padding(top = 1.dp),
                         )
                         Text(
-                            text = "当前仍在原来那台，随时可以在设备栏里切过去。",
+                            text = if (repeated) {
+                                "刚才那次配对已经换成新的凭证，列表里没有多出一行。" +
+                                    "当前仍在原来那台，随时可以在设备栏里切过去。"
+                            } else {
+                                "当前仍在原来那台，随时可以在设备栏里切过去。"
+                            },
                             fontSize = 10.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = palette.note,
                             modifier = Modifier.padding(top = 8.dp),
                         )
                         Row(
@@ -272,8 +338,14 @@ fun PairScreen(
                                 .padding(top = 8.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            TextButton(onClick = { onAdded(added) }) { Text("留在当前主机") }
-                            TextButton(onClick = { onSwitchToAdded(added) }) { Text("现在切过去") }
+                            TextButton(
+                                onClick = { onAdded(added) },
+                                colors = ButtonDefaults.textButtonColors(contentColor = palette.action),
+                            ) { Text("留在当前主机") }
+                            TextButton(
+                                onClick = { onSwitchToAdded(added) },
+                                colors = ButtonDefaults.textButtonColors(contentColor = palette.action),
+                            ) { Text("现在切过去") }
                         }
                     }
                 }

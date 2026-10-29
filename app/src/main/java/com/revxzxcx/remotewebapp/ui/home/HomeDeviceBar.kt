@@ -9,6 +9,11 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -114,7 +119,9 @@ internal fun DeviceBar(
         var removing by remember { mutableStateOf<DeviceCredential?>(null) }
 
         Surface(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .drawDeviceBarEdges(),
             // B001（用户 m03969 第 1 条）：这里原本是 `RoundedCornerShape(0.dp)`，
             // 通条直角。原型 s1 的 `.devbar` 确实也是通条，但真机上它紧贴顶栏下方、
             // 悬在内容之上，四个直角与全 App 其它容器（会话行 16dp、抽屉 20dp、
@@ -126,7 +133,9 @@ internal fun DeviceBar(
             shape = DeviceBarShape,
             // 浅色下靠投影分层会糊成灰边（原型 s6 的说明），所以只用描边 + 表面色。
             color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            // B007（用户 m05374 第 1 条）：描边**不能**用 BorderStroke——它画整圈四边，
+            // 上沿会在顶栏下留一条 1dp 亮线，把「从顶栏连续展开」的观感切断。
+            // 改由下面的 Modifier.drawOutlineEdges 只画两侧与下沿。
             shadowElevation = 0.dp,
         ) {
             Column(modifier = Modifier.padding(vertical = 6.dp)) {
@@ -166,59 +175,69 @@ internal fun DeviceBar(
                         active = isActive,
                         failed = isActive && activeFailed,
                         onSwitch = { onSwitch(host.hostId) },
-                        onMenu = { menuHostId = host.hostId },
+                        // B006：按钮与菜单必须同在**这一行**的 Box 里。早先菜单是这一行的兄弟
+                        // 节点、挂在设备栏那个 Column 下，Popup 的锚点落在整栏布局流上，
+                        // 于是点任何一行的「⋯」都从卡片底部弹出来（用户 m05374 第 3 条）。
+                        menuButton = {
+                            Box {
+                                AppIconButtonSmall(
+                                    onClick = { menuHostId = host.hostId },
+                                    contentDescription = "管理 ${host.displayName}",
+                                ) {
+                                    MoreIcon()
+                                }
+                                DropdownMenu(
+                                    expanded = menuHostId == host.hostId,
+                                    onDismissRequest = { menuHostId = null },
+                                    shape = MenuShape,
+                                    containerColor = MaterialTheme.colorScheme.surface,
+                                    tonalElevation = 0.dp,
+                                    shadowElevation = 12.dp,
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                                    modifier = Modifier.widthIn(min = 200.dp, max = 260.dp),
+                                ) {
+                                    Column(modifier = Modifier.padding(5.dp)) {
+                                        MenuRow(
+                                            icon = Icons.Default.Edit,
+                                            label = "重命名",
+                                            enabled = true,
+                                        ) {
+                                            menuHostId = null
+                                            renaming = host
+                                        }
+                                        MenuRow(
+                                            icon = Icons.Default.LocationOn,
+                                            label = "编辑地址",
+                                            enabled = true,
+                                        ) {
+                                            menuHostId = null
+                                            editing = host
+                                        }
+                                        MenuRow(
+                                            icon = Icons.Default.Refresh,
+                                            label = "测试连接",
+                                            enabled = true,
+                                        ) {
+                                            menuHostId = null
+                                            onTestConnection(host)
+                                        }
+                                        HorizontalDivider(
+                                            color = MaterialTheme.colorScheme.outlineVariant,
+                                            modifier = Modifier.padding(vertical = 4.dp, horizontal = 4.dp),
+                                        )
+                                        MenuRow(
+                                            icon = Icons.Default.Delete,
+                                            label = "从列表移除",
+                                            enabled = true,
+                                        ) {
+                                            menuHostId = null
+                                            removing = host
+                                        }
+                                    }
+                                }
+                            }
+                        },
                     )
-                    // 菜单锚在这一行下方：把它写在行内 Box 里会跟着滚动裁剪，
-                    // 而设备栏本身不是可滚容器，这里用独立 DropdownMenu 更稳。
-                    DropdownMenu(
-                        expanded = menuHostId == host.hostId,
-                        onDismissRequest = { menuHostId = null },
-                        shape = MenuShape,
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        tonalElevation = 0.dp,
-                        shadowElevation = 12.dp,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                        modifier = Modifier.widthIn(min = 200.dp, max = 260.dp),
-                    ) {
-                        Column(modifier = Modifier.padding(5.dp)) {
-                            MenuRow(
-                                icon = Icons.Default.Edit,
-                                label = "重命名",
-                                enabled = true,
-                            ) {
-                                menuHostId = null
-                                renaming = host
-                            }
-                            MenuRow(
-                                icon = Icons.Default.LocationOn,
-                                label = "编辑地址",
-                                enabled = true,
-                            ) {
-                                menuHostId = null
-                                editing = host
-                            }
-                            MenuRow(
-                                icon = Icons.Default.Refresh,
-                                label = "测试连接",
-                                enabled = true,
-                            ) {
-                                menuHostId = null
-                                onTestConnection(host)
-                            }
-                            HorizontalDivider(
-                                color = MaterialTheme.colorScheme.outlineVariant,
-                                modifier = Modifier.padding(vertical = 4.dp, horizontal = 4.dp),
-                            )
-                            MenuRow(
-                                icon = Icons.Default.Delete,
-                                label = "从列表移除",
-                                enabled = true,
-                            ) {
-                                menuHostId = null
-                                removing = host
-                            }
-                        }
-                    }
                 }
 
                 // 「＋ 添加远程 Web」——与顶栏右侧的 + 等价的两个入口。
@@ -302,10 +321,184 @@ internal fun DeviceBar(
  */
 internal val DeviceBarCornerRadius = 16.dp
 
+/** 设备栏描边宽度（B007：只画两侧与下沿）。 */
+internal val DeviceBarEdgeWidth = 1.dp
+
 internal val DeviceBarShape = RoundedCornerShape(
     bottomStart = DeviceBarCornerRadius,
     bottomEnd = DeviceBarCornerRadius,
 )
+
+/**
+ * 设备栏描边的**几何计划**：只含左右两侧 + 下沿，上沿不封口（B007）。
+ *
+ * 为什么不用 `BorderStroke`：它只能画整圈四边。设备栏上沿紧贴 `TopAppBar`，
+ * 那条 1dp 线会让「从顶栏连续展开」看起来像两块拼起来的板子——用户原话
+ * 「卡片上边界还会显示一条线，这样和我希望的从上边展开还差一些」（m05374 第 1 条）。
+ *
+ * 为什么抽成纯数据而不是直接给 `Path`：`androidx.compose.ui.graphics.Path` 在
+ * Android 上转发给 `android.graphics.Path`，Robolectric 里 `PathMeasure.length()`
+ * 恒返回 0，长度断言全是假红。所以几何用坐标描述出来，`Path` 由
+ * [OutlineEdgePlan.buildPath] 生成，测试只断纯数据。
+ *
+ * 四段坐标的顺序即绘制顺序：左竖 → 左下弧 → 下横 → 右下弧 → 右竖。
+ * **首尾都在 y = 0 但不连着**，这就是上沿的开口。
+ */
+internal data class OutlineEdgePlan(
+    /** 左竖线：从 (left, 0) 到 (left, bottom - radius)。 */
+    val left: Float,
+    /** 右竖线：从 (right, 0) 到 (right, bottom - radius)。 */
+    val right: Float,
+    /** 下沿所在 y（已按半宽内缩）。 */
+    val bottom: Float,
+    /** 实际生效的下两角半径（夹取后）。 */
+    val radius: Float,
+) {
+    /** 未夹取时的角半径是否已被夹小——夹取说明传入半径超过了一半高度。 */
+    fun wasClamped(requested: Float): Boolean = radius < requested
+
+    /** 只有左右两侧 + 下沿的长度；上沿若补上会多出 [right] - [left]。 */
+    val edgeLength: Float
+        get() = if (radius > 0f) {
+            (bottom - radius) * 2f + (right - left - radius * 2f) + 2f * (Math.PI.toFloat() / 2f * radius)
+        } else {
+            bottom * 2f + (right - left)
+        }
+
+    /** 补上上沿之后会多出的长度——用来证明「上沿真的没画」。 */
+    val topEdgeLength: Float
+        get() = right - left
+
+    /**
+     * 描边的绘制命令序列。**这是几何的唯一真相**，[buildPath] 只负责把它喂给 `Path`。
+     *
+     * 为什么单独暴露命令而不是直接返回 `Path`：`android.graphics.Path` 在 Robolectric
+     * 里没有真实实现（`PathMeasure.length()` 恒为 0），改 `buildPath()` 里画什么
+     * 在测试里完全看不出来——B007 的变异 M1「把上沿连起来」、M2「去掉左侧竖线」
+     * 就是这么活下来的。命令是纯数据，可以逐条断言。
+     *
+     * 顺序：MoveTo(左上) → 左竖 → 左下弧 → 下横 → 右下弧 → LineTo(右上)。
+     * 首尾都在 y = 0 但**不连线**，这就是上沿的开口。
+     */
+    val commands: List<EdgeCommand>
+        get() {
+            val out = mutableListOf<EdgeCommand>(EdgeCommand.MoveTo(left, 0f))
+            if (radius > 0f) {
+                out += EdgeCommand.LineTo(left, bottom - radius)
+                out += EdgeCommand.ArcTo(
+                    left = left,
+                    top = bottom - radius,
+                    right = left + radius,
+                    bottom = bottom,
+                    startAngleDegrees = 180f,
+                    sweepAngleDegrees = 90f,
+                )
+                out += EdgeCommand.LineTo(right - radius, bottom)
+                out += EdgeCommand.ArcTo(
+                    left = right - radius,
+                    top = bottom - radius,
+                    right = right,
+                    bottom = bottom,
+                    startAngleDegrees = 270f,
+                    sweepAngleDegrees = 90f,
+                )
+            } else {
+                out += EdgeCommand.LineTo(left, bottom)
+                out += EdgeCommand.LineTo(right, bottom)
+            }
+            out += EdgeCommand.LineTo(right, 0f)
+            return out
+        }
+
+    fun buildPath(): Path = Path().apply {
+        commands.forEach { command ->
+            when (command) {
+                is EdgeCommand.MoveTo -> moveTo(command.x, command.y)
+                is EdgeCommand.LineTo -> lineTo(command.x, command.y)
+                is EdgeCommand.ArcTo -> arcTo(
+                    rect = Rect(
+                        left = command.left,
+                        top = command.top,
+                        right = command.right,
+                        bottom = command.bottom,
+                    ),
+                    startAngleDegrees = command.startAngleDegrees,
+                    sweepAngleDegrees = command.sweepAngleDegrees,
+                    forceMoveTo = false,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 一条描边绘制命令。纯数据，不依赖 `Path`，因此可以在 JVM 单测里逐条断言。
+ */
+internal sealed interface EdgeCommand {
+    /** 起笔（抬笔移动到某点，不画线）。 */
+    data class MoveTo(val x: Float, val y: Float) : EdgeCommand
+
+    /** 画直线到某点。 */
+    data class LineTo(val x: Float, val y: Float) : EdgeCommand
+
+    /** 画圆弧（矩形为椭圆的包围盒）。 */
+    data class ArcTo(
+        val left: Float,
+        val top: Float,
+        val right: Float,
+        val bottom: Float,
+        val startAngleDegrees: Float,
+        val sweepAngleDegrees: Float,
+    ) : EdgeCommand
+}
+
+/**
+ * 算出 [OutlineEdgePlan]。纯算术，不碰任何 Android 类。
+ *
+ * 路径按半宽内缩，避免 1dp 描边有一半画到节点外面被裁掉。
+ */
+internal fun deviceBarEdgePlan(
+    width: Float,
+    height: Float,
+    radius: Float,
+    strokeWidth: Float,
+): OutlineEdgePlan {
+    val inset = strokeWidth / 2f
+    val left = inset
+    val right = (width - inset).coerceAtLeast(left)
+    val bottom = (height - inset).coerceAtLeast(0f)
+    val maxRadius = minOf(right - left, bottom) / 2f
+    return OutlineEdgePlan(
+        left = left,
+        right = right,
+        bottom = bottom,
+        radius = radius.coerceIn(0f, maxRadius.coerceAtLeast(0f)),
+    )
+}
+
+/**
+ * 把 [deviceBarEdgePlan] 画到当前节点上，颜色取 `outlineVariant`。
+ *
+ * 用 `drawWithContent` 而不是 `drawBehind`：[Surface] 的背景是它**自己**画的，
+ * 而 `modifier` 挂在 Surface 节点链的最前端——`drawBehind` 会先画、随后被背景
+ * 整片盖掉（第一版就是这么失效的）。`drawWithContent` 先画完内容再描边，
+ * 1dp 发丝线叠在最上层正是想要的。
+ */
+@Composable
+private fun Modifier.drawDeviceBarEdges(): Modifier {
+    val color = MaterialTheme.colorScheme.outlineVariant
+    val density = LocalDensity.current
+    return drawWithContent {
+        drawContent()
+        val strokeWidth = with(density) { DeviceBarEdgeWidth.toPx() }
+        val radius = with(density) { DeviceBarCornerRadius.toPx() }
+        drawPath(
+            path = deviceBarEdgePlan(size.width, size.height, radius, strokeWidth).buildPath(),
+            color = color,
+            style = Stroke(width = strokeWidth),
+        )
+    }
+}
 
 /**
  * 设备栏里的一行。
@@ -319,7 +512,16 @@ private fun DeviceRow(
     active: Boolean,
     failed: Boolean,
     onSwitch: () -> Unit,
-    onMenu: () -> Unit,
+    /**
+     * 渲染「⋯」按钮，并把菜单作为**它的兄弟节点**塞进同一个 [Box]（B006）。
+     *
+     * 为什么让调用方来画这个按钮：`DropdownMenu` 用的是 `Popup`，位置由它自己的父布局
+     * 节点决定。早先菜单是 [DeviceRow] 之后的兄弟节点、直接挂在设备栏那个 `Column` 里，
+     * 于是锚点落在整栏布局流上——点哪一行的「⋯」都从卡片底部弹出来（用户 m05374 第 3 条）。
+     * 菜单必须与按钮共享父节点才能贴着按钮弹，而按钮在行内、菜单不该进行的点击区，
+     * 所以由这里画出 `Box { 按钮; 菜单 }`，把「位置」这件事一次定死。
+     */
+    menuButton: @Composable () -> Unit,
 ) {
     val dotColor = when {
         failed -> MaterialTheme.colorScheme.error
@@ -381,9 +583,8 @@ private fun DeviceRow(
                 modifier = Modifier.padding(top = 1.dp),
             )
         }
-        AppIconButtonSmall(onClick = onMenu, contentDescription = "管理 ${host.displayName}") {
-            MoreIcon()
-        }
+        // 「⋯」按钮 + 它自己的菜单，由调用方塞进这个槽；两者必须是同一个 Box 的兄弟（B006）。
+        menuButton()
     }
 }
 

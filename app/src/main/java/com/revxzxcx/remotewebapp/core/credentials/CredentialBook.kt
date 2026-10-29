@@ -45,12 +45,31 @@ data class CredentialBook(
     fun hostOf(hostId: String): DeviceCredential? = hosts.firstOrNull { it.hostId == hostId }
 
     /**
+     * 按**地址**找一条已登记的主机（B005）。
+     *
+     * 为什么判据是地址而不是 `baseUrl + deviceId`：用户是按「哪台机器」认设备的，
+     * 而桌面端每次 `pair/accept` 都发一个**新的 `deviceId`**。用 deviceId 参与判等，
+     * 同一台桌面端每重新配对一次就会在列表里多出一行——真机上实测攒到过 11 行
+     * 一模一样的 `PGBM10 / 127.0.0.1:19387`（日志里甚至出现过 `hosts=16`）。
+     */
+    fun hostWithBaseUrl(baseUrl: String): DeviceCredential? {
+        val normalized = baseUrl.trimEnd('/')
+        return hosts.firstOrNull { it.baseUrl.trimEnd('/') == normalized }
+    }
+
+    /**
      * 加入或更新一条，并（默认）设为当前激活。
      *
-     * **同一台机器重新配对时沿用原 `hostId`**：判据是 `baseUrl` 与 `deviceId` 都相同。
-     * 不这样做的话，用户在同一台桌面端上重新扫码就会得到两条一模一样的记录——
-     * 桌面端每次 `pair/accept` 都会发新 `deviceId`，所以实际上更常见的是「同地址、新 id」，
-     * 那时会新增一条，这是对的（旧那条的 `deviceId` 已经失效了）。
+     * **同一台机器重新配对时沿用原 `hostId`**：判据是 `baseUrl` 相同（B005 起不再要求
+     * `deviceId` 也相同）。
+     *
+     * 早先的判据是「`baseUrl` 与 `deviceId` 都相同」，KDoc 当时写的是「同地址换 id 会
+     * 新增一条，这是对的（旧那条已失效）」。**那个结论是错的**：桌面端每次配对都发新
+     * `deviceId`，于是「重新配对同一台」永远落到新增分支，旧记录也不会被顶掉——
+     * 它们全留着，因为追加分支是 `hosts + merged`。用户看到的就是列表里堆满同一台机器。
+     *
+     * 现在同一个地址只保留一条：重新配对把那一行的 `deviceId` 刷新成新的。
+     * 「地址变了的同一台机器」走 [withEndpoint]，不是这里。
      *
      * @param newHostId 生成新 id 的方式；默认随机 UUID，测试可注入固定序列。
      */
@@ -59,14 +78,13 @@ data class CredentialBook(
         makeActive: Boolean = true,
         newHostId: () -> String = { UUID.randomUUID().toString() },
     ): CredentialBook {
-        val sameEndpoint = hosts.firstOrNull {
-            it.baseUrl == credential.baseUrl && it.deviceId == credential.deviceId
-        }
+        val incoming = credential.copy(baseUrl = credential.baseUrl.trimEnd('/'))
+        val sameEndpoint = hostWithBaseUrl(incoming.baseUrl)
         val merged = when {
             // 调用方已经给了 hostId：以它为准（编辑场景）。
-            credential.hostId.isNotBlank() -> credential
-            sameEndpoint != null -> credential.copy(hostId = sameEndpoint.hostId)
-            else -> credential.copy(hostId = newHostId())
+            incoming.hostId.isNotBlank() -> incoming
+            sameEndpoint != null -> incoming.copy(hostId = sameEndpoint.hostId)
+            else -> incoming.copy(hostId = newHostId())
         }
         // 保证「同一 hostId 只有一条」。命中时**就地替换**而不是先 filterNot 再追加：
         // 后者会把这条挪到列表末尾，用户刚改完名字的那台突然跳到最后一行，

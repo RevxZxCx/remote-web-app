@@ -147,11 +147,14 @@ private fun ScreenTransition(route: String, content: @Composable () -> Unit) {
 fun AppRoot(container: AppContainer) {
     val state by container.state.collectAsState()
 
-    // R054：订阅凭证簿。`activeHost` 是普通 getter（读 `_book.value.active`），单靠它
-    // 不会让 Compose 重组——切换主机时界面会停在旧主机的列表上。这里把簿收成状态，
-    // 簿一变（切换 / 改名 / 改址 / 删除）整棵 UI 跟着重算；下面所有 ViewModel 的 key
-    // 都带 `deviceId`，所以换主机等于换一整组 ViewModel，与「换连接必须换 VM」一致。
-    val book by container.book.collectAsState()
+    // R054 / B004：订阅**一份**快照（凭证簿 + 它对应那条连接 + 连接代次）。
+    //
+    // 早先这里收的是 `container.book`，连接则另外从 `container.connection` 读，两者分属
+    // 不同字段：切换主机时簿先发布、连接后安装，中间隔着预热缓存库的真挂起点，于是重组时
+    // 能读到「新簿 + 旧连接」，而 `Paired → Paired` 不发射、没有后续事件纠正，页面就永远
+    // 停在上一台的工作区（B004）。收成一份之后，UI 结构上读不到半新半旧的组合。
+    val link by container.link.collectAsState()
+    val book = link.book
     val scope = rememberCoroutineScope()
 
     /** 当前打开的会话；null 表示停在工作区页。 */
@@ -296,10 +299,13 @@ fun AppRoot(container: AppContainer) {
             }
 
             AppState.Paired -> {
-                val connection = container.connection
-                // R054：当前是哪台主机由 activeHost 给出（不再塞进 AppState）。
-                // 它变化时必须让所有带 deviceId 的 ViewModel key 一起变，等于整组重建。
-                val activeHost = book.active
+                // B004：连接与「当前是哪台主机」取自**同一份快照**，且 key 用
+                // `link.scopeToken`（含连接代次）——只带 deviceId 的话，「同一台设备换地址」
+                // 不会换 VM，VM 继续握着旧 baseUrl 的连接，症状与切换设备一模一样。
+                val connection = link.connection
+                val activeHost = link.activeHost
+                val scopeToken = link.scopeToken
+                val ownerId = link.ownerId
                 if (connection == null || activeHost == null) {
                     // 理论上不会发生（Paired 与 connection 同时设置）；防御性回到配对页。
                     LaunchedEffect(Unit) { container.unpair() }
@@ -313,11 +319,11 @@ fun AppRoot(container: AppContainer) {
                     // 绿点永远不会点亮。放到 Paired 这一层后它与聊天页共享同一个实例
                     // （Activity 的 ViewModelStore），进出会话都不重建。
                     val homeVm: HomeViewModel = viewModel(
-                        key = "home-${activeHost.deviceId}",
+                        key = "home-$scopeToken",
                         factory = HomeViewModel.factory(
                             connection = connection,
                             cache = container.cache,
-                            ownerId = container.ownerId,
+                            ownerId = ownerId,
                         ),
                     )
 
@@ -373,11 +379,11 @@ fun AppRoot(container: AppContainer) {
                             // 连接的地址、设备 id、帧计数与缓存行数——调试页的唯一目的
                             // 就是「界面说错话时能立刻找到为什么」，这里反而给出误导数据。
                             val vm: DebugViewModel = viewModel(
-                                key = "debug-${activeHost.deviceId}",
+                                key = "debug-$scopeToken",
                                 factory = DebugViewModel.factory(
                                     connection = connection,
                                     cache = container.cache,
-                                    ownerId = container.ownerId,
+                                    ownerId = ownerId,
                                 ),
                             )
                             BackHandler(enabled = true) { openDebug = false }
@@ -466,7 +472,7 @@ fun AppRoot(container: AppContainer) {
                             // 销毁才放。key 同样带 deviceId（理由同聊天分支：换设备必须换 VM）。
                             val owner = rememberScopedViewModelStoreOwner()
                             val vm: FileViewerViewModel = viewModel(
-                                key = "file-${activeHost.deviceId}-${session.sessionId}",
+                                key = "file-$scopeToken-${session.sessionId}",
                                 factory = FileViewerViewModel.factory(
                                     connection = connection,
                                     sessionId = session.sessionId,
@@ -493,12 +499,12 @@ fun AppRoot(container: AppContainer) {
                             // 换设备必然换 VM，与 owner 是否被回收无关。
                             val owner = rememberScopedViewModelStoreOwner()
                             val vm: ChatViewModel = viewModel(
-                                key = "chat-${activeHost.deviceId}-${session.sessionId}",
+                                key = "chat-$scopeToken-${session.sessionId}",
                                 factory = ChatViewModel.factory(
                                     connection = connection,
                                     sessionId = session.sessionId,
                                     cache = container.cache,
-                                    ownerId = container.ownerId,
+                                    ownerId = ownerId,
                                 ),
                                 viewModelStoreOwner = owner,
                             )

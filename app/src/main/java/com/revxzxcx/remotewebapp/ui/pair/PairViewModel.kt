@@ -70,6 +70,14 @@ data class PairUiState(
      * 界面不会自己切，需要一个信号告诉调用方「加完了，可以退出配对页」。
      */
     val addedHost: DeviceCredential? = null,
+    /**
+     * [addedHost] 是不是「同一个地址之前就已经登记过」的那台（B005）。
+     *
+     * 为真时配对页不能再说「已加入列表」——那会让用户以为多了一台。真机上的现场是：
+     * 用户反复点「开始配对」，每次都「成功」，列表里堆出 11 行一模一样的
+     * `PGBM10 / 127.0.0.1:19387`，而界面上一次提示都没有。
+     */
+    val addedHostWasListed: Boolean = false,
 )
 
 /**
@@ -260,7 +268,7 @@ class PairViewModel(
      */
     fun clearAddedHost() {
         if (_state.value.addedHost == null) return
-        _state.value = _state.value.copy(addedHost = null)
+        _state.value = _state.value.copy(addedHost = null, addedHostWasListed = false)
     }
 
     /**
@@ -281,12 +289,14 @@ class PairViewModel(
     private suspend fun onSuccess(credential: DeviceCredential) {
         if (addMode) {
             // 先写入凭证簿（不切主机），再告诉 UI 可以退出配对页。
-            val added = container.addHost(credential)
+            // `addHostChecked` 在锁内、落盘前判「这个地址是不是本来就有一行」。
+            val added = container.addHostChecked(credential)
             _state.value = _state.value.copy(
                 busy = false,
                 error = null,
                 probe = null,
-                addedHost = added,
+                addedHost = added.credential,
+                addedHostWasListed = added.alreadyListed,
             )
             return
         }

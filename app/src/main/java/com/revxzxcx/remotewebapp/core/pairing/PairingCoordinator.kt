@@ -47,7 +47,21 @@ class PairingCoordinator(
         return pairWithLink(link, fallbackBaseUrl, label)
     }
 
-    /** 用解析好的链接配对。 */
+    /**
+     * 用解析好的链接配对。
+     *
+     * ## 本方法**不落盘**（B005）
+     *
+     * 早先本方法末尾有一行 `store.save(credential)`，而 `save()` 内的 `withUpsert`
+     * 默认 `makeActive = true`。结果是：**配对阶段就把 active 换成了新那台，而连接根本没动**。
+     * 调用方随后无论走 `onPaired`（首次配对，本来就该激活）还是走 `addHost`
+     * （添加远程，明确要求不激活），读到的簿都已经是「新主机已激活」的形状——
+     * `addHost` 的 `makeActive = false` 因此形同虚设；而 `installConnection` 尚未来得及
+     * 重建连接，UI 就在这一瞬间看到了「簿是新的、连接是旧的」（与 B004 同源的半新半旧）。
+     *
+     * 现在写入凭证簿的唯一入口是 `AppContainer.onPaired` / `AppContainer.addHost`，
+     * 由它们决定要不要激活、要不要判重复；本方法只负责「把链接换成一条可用的凭证」。
+     */
     suspend fun pairWithLink(
         link: PairLink,
         fallbackBaseUrl: String? = null,
@@ -84,7 +98,6 @@ class PairingCoordinator(
             pairedAt = System.currentTimeMillis(),
             label = label,
         )
-        store.save(credential)
         return credential
     }
 
@@ -113,7 +126,6 @@ class PairingCoordinator(
                 pairedAt = System.currentTimeMillis(),
                 label = label,
             )
-            store.save(credential)
             credential
         }
 }

@@ -13,7 +13,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 import com.revxzxcx.remotewebapp.core.prefs.ThemeMode
 
-private val DarkColors = darkColorScheme(
+internal val DarkColors = darkColorScheme(
     primary = Color(0xFF5AA2FF),
     onPrimary = Color(0xFF08131F),
     primaryContainer = Color(0xFF1B3E63),
@@ -75,7 +75,7 @@ internal val LocalStatusError = staticCompositionLocalOf { Color(0xFFFF6B6B) }
  */
 internal val LocalStatusAttention = staticCompositionLocalOf { Color(0xFFF5B942) }
 
-private val LightColors = lightColorScheme(
+internal val LightColors = lightColorScheme(
     primary = Color(0xFF1F6FEB),
     onPrimary = Color(0xFFFFFFFF),
     primaryContainer = Color(0xFFD8E6FF),
