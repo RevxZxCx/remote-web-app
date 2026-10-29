@@ -286,7 +286,7 @@ class PairScreenRenderTest {
         // 这里守的是首次进入的那一支：必须能点到授权，且不显示取景框。
         compose.setContent {
             MaterialTheme {
-                ScanCard(enabled = true, scanEpoch = 0, onRescan = {}, onScanned = {})
+                ScanCard(enabled = true, channel = ScanChannel(), onScanned = {})
             }
         }
 

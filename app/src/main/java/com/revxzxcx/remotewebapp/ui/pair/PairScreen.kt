@@ -58,10 +58,9 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -148,9 +147,12 @@ fun PairScreen(
     // 全空」；`LinkCard` 里那份链接文本更糟——它连转屏都不用，**切一次入口 tab** 就
     // 被销毁重建（`when (entry)` 换了分支），刚粘贴的链接直接丢。
     var entry by rememberSaveable { mutableStateOf(PairEntry.Scan) }
-    // 扫一次就消耗掉整个扫码通道（`decodeSingle` + `consumed` 闩）。配对失败后把这个
-    // 计数 +1，`ScanCard` 会 `key(scanEpoch)` 重建控件并复位闩。
-    var scanEpoch by rememberSaveable { mutableIntStateOf(0) }
+    // 扫码通道（B002）：`decodeSingle` 只回调一次，扫到之后控件会自己 `stopDecoding()`。
+    // 这里把「闸门」与「控件」分开：重新扫只复位闸门并让同一个控件重新 `decodeSingle()`，
+    // 不再用 `key(epoch)` 拆掉重建（重建会与旧控件抢摄像头，是 B002 的成因）。
+    // 必须提到页面这一层：`when (entry)` 切一次 tab 就会让 `ScanCard` 整个重建，
+    // 状态留在卡片里会丢。
+    val scanChannel = remember { ScanChannel() }
     var linkText by rememberSaveable { mutableStateOf("") }
     // 手工登记的两个字段必须同时可见（登记要 (地址, 设备 id) 一对），所以状态提到这里，
     // 两张卡只是它的两个视觉分组。
@@ -280,8 +282,7 @@ fun PairScreen(
             when (entry) {
                 PairEntry.Scan -> ScanCard(
                     enabled = !state.busy,
-                    scanEpoch = scanEpoch,
-                    onRescan = { scanEpoch++ },
+                    channel = scanChannel,
                     onScanned = viewModel::pairWithText,
                 )
 
@@ -522,10 +523,15 @@ internal fun PairEntryPicker(
  * 唯一一个非正方形的大色块（R033 ③）。R036 起底色用近黑 `#05080D` 而不是纯黑——纯黑
  * 在深色主题里会和页面的 `#0B1420` 形成一块硬边，近黑能让取景框融进页面。
  *
- * ⚠️ 扫码是**一次性**的：`decodeSingle` 只回调一次，加上 `consumed` 闩之后，配对失败
- * （token 过期 / 桌面端不可达）时继续扫不会有任何反应，而相机预览还在动——从界面
- * 完全看不出已经失效。所以 `scanEpoch` 一变就 `key(scanEpoch)` 重建整个 `AndroidView`
- * 并复位 `consumed`，并在失效后给一个显式的「重新扫描」入口。
+ * ⚠️ 扫码是**一次性**的：`decodeSingle` 只回调一次，加上 [ScanChannel] 的闸门之后，配对
+ * 失败（token 过期 / 桌面端不可达）时继续扫不会有任何反应，而相机预览还在动——从界面
+ * 完全看不出已经失效。所以失效后给一个显式的「重新扫描」入口，点它就复位闸门。
+ *
+ * ⚠️ 复位闸门时**只对同一个控件重新 `decodeSingle()`，绝不重建 `AndroidView`**（B002）：
+ * 重建会与旧控件的相机关闭抢同一个摄像头，新控件在 `isPreviewActive()` 还是 false 时
+ * `startDecoderThread()` 直接 return 且无人重试，于是「扫过一次、配对失败之后扫码框再也
+ * 不识别二维码，只有退出本页重进才好」。改造前（M58 及更早）正是靠 `key(scanEpoch)` 重建，
+ * 才踩中这条。
  *
  * 可见性是 `internal`：没有权限时的分支（授权入口 / 二次拒绝后跳系统设置）只能靠渲染
  * 层测试守——真机上「拒绝一次」之后的状态要复现得先清数据，而这条分支的出入口就只有
@@ -534,8 +540,7 @@ internal fun PairEntryPicker(
 @Composable
 internal fun ScanCard(
     enabled: Boolean,
-    scanEpoch: Int,
-    onRescan: () -> Unit,
+    channel: ScanChannel,
     onScanned: (String) -> Unit,
 ) {
     val context = LocalContext.current
@@ -556,28 +561,71 @@ internal fun ScanCard(
     }
 
     // ⚠️ 回调必须是**稳定**的：`BarcodeView.decodeSingle(callback)` 只在 `AndroidView`
-    // 的 `factory` 里调用一次，之后再换 callback 也不会重新注册。若这里写
-    // `remember(enabled) { … }`，配对开始（`enabled` false）后控件手里还是那个捕获了
-    // `enabled = true` 的旧对象，于是「正在配对…」期间再扫一下就又发一次配对请求
-    // （拿已被消费的 token 再 accept 一次）。所以用 `rememberUpdatedState` 让同一个
-    // callback 每次读最新值。
-    val latestEnabled by androidx.compose.runtime.rememberUpdatedState(enabled)
-    val latestOnScanned by androidx.compose.runtime.rememberUpdatedState(onScanned)
-    // 扫到一次就停：decodeSingle 保证底层只回调一次；这里再按「已消费」自己兜一层。
-    var consumed by remember { mutableStateOf(false) }
-    // 换一次 epoch 就允许再扫一次（配合下面 `key(scanEpoch)` 重建控件）。
-    LaunchedEffect(scanEpoch) { consumed = false }
-    val callback = remember {
+    // 的 `factory` 里注册一次，之后再换 callback 也不会重新注册（除非显式重新武装）。
+    // 若这里写 `remember(enabled) { … }`，配对开始（`enabled` false）后控件手里还是
+    // 那个捕获了 `enabled = true` 的旧对象，于是「正在配对…」期间再扫一下就又发一次
+    // 配对请求（拿已被消费的 token 再 accept 一次）。所以用 `rememberUpdatedState`
+    // 让同一个 callback 每次读最新值，同时用 `remember(channel)` 保证实例恒定。
+    val latestEnabled by rememberUpdatedState(enabled)
+    val latestOnScanned by rememberUpdatedState(onScanned)
+    val callback = remember(channel) {
         object : BarcodeCallback {
             override fun barcodeResult(result: BarcodeResult?) {
-                val text = result?.text
-                if (consumed || !latestEnabled || text.isNullOrBlank()) return
-                consumed = true
+                val text = channel.onResult(result?.text, latestEnabled) ?: return
                 latestOnScanned(text)
             }
         }
     }
     var scanner by remember { mutableStateOf<BarcodeView?>(null) }
+
+    // 「重新武装」的唯一落点：对**正在用的那个**控件重新 `decodeSingle()`。
+    // 这里刻意不新建控件——新控件在 `isPreviewActive()` 还是 false 时
+    // `startDecoderThread()` 直接 return 且无人重试，而旧控件还占着摄像头，
+    // 结果就是扫码框永久失效（B002）。
+    //
+    // ⚠️ 只 `decodeSingle()` 还不够：若控件此刻没有预览（例如刚被 `pause()` 过），
+    // `startDecoderThread()` 仍会直接 return。所以先确认预览在跑，不在就 `resume()`；
+    // `resume()` 起预览后 zxing 自己的 `previewStarted()` 会再调一次
+    // `startDecoderThread()`，两条路都能把解码线拉起来。
+    //
+    // ⚠️ 只有在**真的能用**的时候才动相机：`resume()` 会打开摄像头。用户在配对进行中
+    // 把 App 切到后台、配对随后失败时，`enabled` 会在后台变回 true 并触发补武装；若无
+    // 条件 `resume()`，等于在用户看不见的时候又把摄像头打开，抵消 R035「退到后台必须
+    // 暂停相机」。这里返回 false 让 `ScanChannel` 保留欠账，回前台由 `onActive()` 补做。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    // 页面此刻是否在前台。
+    //
+    // ⚠️ 必须自己用 `mutableStateOf` 记：`lifecycle.currentState` **不是** State，
+    // 读它不会建立订阅，从后台回到前台时这里会一直停在建组合那一刻的旧快照上。
+    // 那样 `rearmScan()` 会在后台误判为「可用」而打开摄像头，回前台又可能误判为
+    // 「不可用」把欠账继续挂着。
+    var resumed by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    val rearmer = remember(channel) {
+        object : ScanRearmer {
+            override fun rearmScan(): Boolean {
+                // `hasPermission` / `resumed` 都在这里读最新值：本对象是 `remember(channel)`
+                // 的，只会建一次，直接捕获会拿到建对象那一刻的快照。
+                if (!hasPermission || !resumed) return false
+                val view = scanner ?: return false
+                view.decodeSingle(callback)
+                if (!view.isPreviewActive) view.resume()
+                return true
+            }
+        }
+    }
+
+    // 控件生命周期与 `channel` 绑定：挂上就补做欠账，释放就解绑（只解绑自己那次）。
+    DisposableEffect(channel, rearmer) {
+        channel.attach(rearmer)
+        onDispose { channel.detach(rearmer) }
+    }
+
+    // 配对进行状态变化时把欠着的武装补上：`enabled` 变回 true 说明这一轮配对结束了。
+    // 扫到码的那一刻 `enabled` 还是 true，随后 VM 置 busy，回调里的
+    // `channel.onResult(…, false)` 分支可能来不及走到，所以这里也补一道。
+    LaunchedEffect(enabled) { channel.onEnabled(enabled) }
 
     // BarcodeView 自身没有 pauseAndWait()（那是 DecoratedBarcodeView 的包装），
     // 它的父类 CameraPreview 有，所以这里按 CameraPreview 的类型调用。
@@ -598,12 +646,12 @@ internal fun ScanCard(
     // 并不会销毁组合——`CameraPreview` 的字节码里只有 `onAttachedToWindow()` 一个生命周期
     // override，没有 `onDetachedFromWindow`，也不监听 `ON_STOP`。于是相机与解码线程会在
     // 后台一直跑（耗电、发热，部分机型摄像头指示灯常亮）。这里挂 `ON_RESUME`/`ON_PAUSE`。
-    val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, scanner, hasPermission) {
         val view = scanner
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> {
+                    resumed = true
                     // 从系统设置授权之后回到本页要能自己发现（见下面的权限复检）。
                     hasPermission = ContextCompat.checkSelfPermission(
                         context,
@@ -612,10 +660,16 @@ internal fun ScanCard(
                     if (hasPermission && view != null) {
                         deniedOnce = false
                         view.resume()
+                        // 回前台：把「在后台时攒下的重新武装」补上。后台不做，
+                        // 是因为那时 resume() 会在用户看不见时打开摄像头。
+                        channel.onActive()
                     }
                 }
 
-                Lifecycle.Event.ON_PAUSE -> view?.pause()
+                Lifecycle.Event.ON_PAUSE -> {
+                    resumed = false
+                    view?.pause()
+                }
                 else -> Unit
             }
         }
@@ -663,21 +717,24 @@ internal fun ScanCard(
                     ),
             ) {
                 ViewfinderGrid()
-                key(scanEpoch) {
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { ctx ->
-                            BarcodeView(ctx).also { view ->
-                                view.decodeSingle(callback)
-                                scanner = view
-                            }
-                        },
-                        onRelease = { view ->
-                            view.pauseAndWait()
-                            if (scanner === view) scanner = null
-                        },
-                    )
-                }
+                // ⚠️ 这里**没有** `key(scanEpoch)`：控件只建一次，重新扫描靠对同一个控件
+                // 重新 `decodeSingle()`（B002）。一旦加回 key 式重建，就会回到「配对失败
+                // 后扫码框再也不识别二维码」的老毛病。
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        BarcodeView(ctx).also { view ->
+                            view.decodeSingle(callback)
+                            scanner = view
+                            // 新控件已经武装，把可能的欠账销掉（见 ScanChannel.onControlArmed）。
+                            channel.onControlArmed()
+                        }
+                    },
+                    onRelease = { view ->
+                        view.pauseAndWait()
+                        if (scanner === view) scanner = null
+                    },
+                )
                 ViewfinderBrackets()
                 ScanLine()
                 // 提示压在取景框底部：原型 `.hintc` 是一条 60px 高的渐隐遮罩 + 居中 11px 文案。
@@ -702,11 +759,11 @@ internal fun ScanCard(
                     )
                 }
             }
-            if (consumed && enabled) {
-                // `consumed && enabled` 的唯一含义是「扫到过，且现在已经不在配对中」
-                // ——即这次配对失败回来了（成功会直接导航离开）。此刻 `decodeSingle`
-                // 已经用掉、再扫不会有任何反应，必须显式给一条回去的路。
-                TextButton(onClick = onRescan) { Text("重新扫描") }
+            if (channel.isConsumed && enabled) {
+                // `isConsumed && enabled` 的唯一含义是「扫到过，且现在已经不在配对中」
+                // ——即这次配对失败回来了（成功会直接导航离开）。此刻控件的
+                // `decodeSingle` 已经用掉、再扫不会有任何反应，必须显式给一条回去的路。
+                TextButton(onClick = { channel.rescan() }) { Text("重新扫描") }
             }
             StepList(
                 steps = listOf(
