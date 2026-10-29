@@ -1,9 +1,19 @@
 package com.revxzxcx.remotewebapp.ui.common
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
@@ -11,12 +21,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 /**
  * 顶栏 / 行内图标按钮（R017）。
@@ -67,11 +81,43 @@ fun OverflowMenuAnchor(
     }
 }
 
+/** 菜单容器圆角：原型 `docs/R054-多主机效果图.html:145` 的 `.menu{border-radius:var(--r-md)}` = 14px。 */
+internal val OverflowMenuCornerRadius = 14.dp
+
+internal val OverflowMenuShape = RoundedCornerShape(OverflowMenuCornerRadius)
+
+/** 菜单项圆角：原型 `:148` 的 `.mi{border-radius:var(--r-sm)}` = 10px。 */
+internal val OverflowMenuRowCornerRadius = 10.dp
+
+internal val OverflowMenuRowShape = RoundedCornerShape(OverflowMenuRowCornerRadius)
+
+/**
+ * 菜单最小宽度：照原型 `:146` 的 `.menu{width:212px}`。
+ *
+ * 为什么按原型的定宽而不是「按内容自适应」：菜单里同时有「刷新列表」（4 字）和
+ * 「连接与缓存诊断」（7 字），自适应会让每次弹出的宽度都不一样——
+ * 同一个按钮点两次得到两个尺寸，是比窄一点更明显的毛病。
+ * 原型也是一次画死 212px。
+ */
+private val OverflowMenuMinWidth = 212.dp
+
+/** 菜单最大宽度：极端字号/长文案时换行而不是把菜单撑到整个屏幕宽。 */
+private val OverflowMenuMaxWidth = 268.dp
+
 /**
  * 溢出菜单本体。
  *
  * 与直接写 `DropdownMenuItem` 的差别：① 每条都要图标（R017「全 App 图标化」）；
  * ② 分隔线是一等公民（破坏性动作必须和常用项隔开）；③ 破坏性项走 error 色。
+ *
+ * **样式必须在这里给全**（B003）：`DropdownMenu` 的默认值走 M3 的 `MenuDefaults`，
+ * 是 4dp 圆角 + 主题色容器 + 无描边，放到本工程的深色卡片体系里就是「一块直角浮层」。
+ * 原型 `docs/R054-多主机效果图.html` 明确定义了 `.menu` 的圆角/描边/阴影/内边距，
+ * 这里是它唯一的落点——所有屏幕的溢出菜单都经过本函数。
+ *
+ * 参数与 `SessionActionsMenu` 的 `DropdownMenu` 调用刻意保持一致
+ * （`tonalElevation = 0.dp` + 1dp `outline` 描边 + 12dp 阴影），
+ * 让「长按会话行」与「顶栏溢出」两处菜单看起来是同一套东西。
  */
 @Composable
 fun AppOverflowMenu(
@@ -79,10 +125,35 @@ fun AppOverflowMenu(
     onDismiss: () -> Unit,
     content: @Composable () -> Unit,
 ) {
-    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) { content() }
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
+        modifier = Modifier.widthIn(min = OverflowMenuMinWidth, max = OverflowMenuMaxWidth),
+        shape = OverflowMenuShape,
+        containerColor = MaterialTheme.colorScheme.surface,
+        tonalElevation = 0.dp,
+        shadowElevation = 12.dp,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+    ) {
+        // 原型 `.menu{padding:5px}`：内边距给在 Column 上而不是 DropdownMenu 上，
+        // 这样每条的圆角水波纹离容器边缘有一圈留白，和 `.mi` 的 9px 水平内缩配合。
+        Column(modifier = Modifier.padding(5.dp)) { content() }
+    }
 }
 
-/** 溢出菜单的一条。 */
+/**
+ * 溢出菜单的一条。规格照原型 `:148-149`：
+ * `.mi{gap:9px; padding:8px 9px; border-radius:10px; font-size:12px}` +
+ * `.mi .i{width:16px; font-size:13px}`。
+ *
+ * **不用 `DropdownMenuItem`**（B003）：它把高度、内边距、水波纹形状都写死在
+ * `MenuDefaults` 里，也不接受 `shape` 参数——想让它变成 10dp 圆角的行只能自己画。
+ * 这里用 [Row] + `clip` + `clickable` 复刻，与 `SessionActionsMenu.MenuRow` 同一套做法，
+ * 两处菜单的行高/圆角/字号因此天然一致。
+ *
+ * 12sp 而不是 `bodyMedium`（14sp）：菜单是一条条命令，和会话行标题不该同权重；
+ * 原型也是 12px。
+ */
 @Composable
 fun OverflowItem(
     text: String,
@@ -91,20 +162,30 @@ fun OverflowItem(
     onClick: () -> Unit,
 ) {
     val color = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-    DropdownMenuItem(
-        text = { Text(text, style = MaterialTheme.typography.bodyMedium, color = color) },
-        leadingIcon = leadingIcon?.let { icon ->
-            {
-                val tint = if (destructive) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                }
-                CompositionLocalProvider(LocalContentColor provides tint) { icon() }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 1.dp)
+            .height(38.dp)
+            .clip(OverflowMenuRowShape)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        if (leadingIcon != null) {
+            val tint = if (destructive) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
             }
-        },
-        onClick = onClick,
-    )
+            // `.mi .i{width:16px; flex:0 0 16px}`：图标列定宽，保证多行文字左边缘对齐。
+            Box(modifier = Modifier.size(16.dp), contentAlignment = Alignment.Center) {
+                CompositionLocalProvider(LocalContentColor provides tint) { leadingIcon() }
+            }
+        }
+        Text(text = text, fontSize = 12.sp, color = color)
+    }
 }
 
 /**
@@ -135,8 +216,10 @@ object IconSizes {
 @Composable
 fun OverflowMenuDivider() {
     HorizontalDivider(
-        modifier = Modifier.padding(vertical = 4.dp),
-        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
+        // 原型 `:156` `.msep{height:1px;background:var(--outlineVariant);margin:4px 6px}`。
+        // 左右也留 6dp：分隔线如果顶到容器边，5dp 的内边距就被「画穿」了，看起来像卡片裂缝。
+        modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+        color = MaterialTheme.colorScheme.outlineVariant,
     )
 }
 
@@ -159,7 +242,9 @@ fun OverflowMenuDivider() {
 fun OverflowMenuSectionHeader(text: String) {
     Text(
         text = text,
-        modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 7.dp, bottom = 5.dp),
+        // 原型 `:157` `.mhead{padding:7px 9px 5px}`：左右 9dp 与 `.mi` 的文字起点对齐，
+        // 分组标题才不会比它下面的条目「缩进更深」。
+        modifier = Modifier.padding(start = 9.dp, end = 9.dp, top = 7.dp, bottom = 5.dp),
         fontSize = 9.sp,
         letterSpacing = 0.6.sp,
         fontWeight = FontWeight.SemiBold,
