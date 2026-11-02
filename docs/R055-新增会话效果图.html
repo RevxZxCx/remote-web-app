@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>R055 效果图 · 首页新建会话（右下角加号 + 工作区/模式选择）</title>
+<style>
+:root{
+  --primary:#5AA2FF; --onPrimary:#04121F;
+  --background:#0B1420; --onBackground:#E6EFFA;
+  --surface:#111C2B; --onSurface:#E6EFFA;
+  --surfaceVariant:#1A2942; --onSurfaceVariant:#9BB0C8;
+  --outline:#31485F; --outlineVariant:#22334A;
+  --tertiary:#F2C14E; --running:#4ADE80; --error:#FF8A80;
+  --r-xs:6px; --r-sm:10px; --r-md:14px; --r-lg:20px; --r-xl:28px; --r-pill:999px;
+  --t-fast:140ms; --t-med:240ms; --t-slow:360ms;
+  --ease:cubic-bezier(.2,0,0,1);
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#060B12;color:var(--onBackground);
+  font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:13px;line-height:1.6;padding:28px 24px 80px}
+.wrap{max-width:1640px;margin:0 auto}
+h1{font-size:19px;font-weight:600;letter-spacing:.2px}
+.sub{color:var(--onSurfaceVariant);font-size:12px;margin-top:6px;line-height:1.8}
+.sub code{font-family:var(--mono);font-size:11px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+section{margin-top:40px}
+h2{font-size:14px;font-weight:600;color:var(--primary);display:flex;align-items:center;gap:8px}
+h2 .n{width:20px;height:20px;border-radius:50%;background:rgba(90,162,255,.14);
+  border:1px solid rgba(90,162,255,.4);font-size:11px;display:flex;
+  align-items:center;justify-content:center;color:var(--primary);flex:0 0 20px}
+.note{color:var(--onSurfaceVariant);font-size:11.5px;line-height:1.85;margin-top:8px}
+.note b{color:var(--onSurface);font-weight:600}
+.note code{font-family:var(--mono);font-size:10.5px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+.row{display:flex;gap:26px;align-items:flex-start;flex-wrap:wrap;margin-top:16px}
+
+/* ── 手机外壳 ─────────────────────────────────────────── */
+.phone{width:360px;flex:0 0 360px;background:var(--background);
+  border-radius:22px;border:1px solid var(--outlineVariant);
+  overflow:hidden;box-shadow:0 22px 60px rgba(0,0,0,.6);
+  display:flex;flex-direction:column;height:640px;position:relative}
+.phone.light{--background:#F4F7FB;--onBackground:#182430;--surface:#FFFFFF;
+  --onSurface:#182430;--surfaceVariant:#E9EFF7;--onSurfaceVariant:#45586D;
+  --outline:#C7D5E6;--outlineVariant:#DDE6F1;--primary:#1F6FEB;
+  --tertiary:#C08A12;--running:#15803D;--error:#C62828;
+  color:var(--onBackground);background:var(--background)}
+.cap{font-size:10.5px;color:var(--onSurfaceVariant);margin-top:7px;text-align:center;
+  width:360px;flex:0 0 360px;line-height:1.6}
+.cap b{color:var(--primary);font-weight:600}
+.status{height:26px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 13px;font-size:9.5px;color:var(--onSurfaceVariant);letter-spacing:.3px;flex:0 0 auto}
+
+/* ── 顶栏 ─────────────────────────────────────────────── */
+.topbar{height:50px;display:flex;align-items:center;gap:4px;padding:0 6px 0 4px;
+  border-bottom:1px solid var(--outlineVariant);flex:0 0 auto}
+.tb-btn{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;color:var(--onSurface);font-size:15px;flex:0 0 34px}
+.tb-mid{flex:1;min-width:0;padding:0 4px}
+.tb-t1{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb-t2{font-size:9.5px;color:var(--onSurfaceVariant);margin-top:1px;
+  display:flex;align-items:center;gap:4px}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--outline);flex:0 0 6px}
+.dot.ok{background:var(--running);box-shadow:0 0 0 2px rgba(74,222,128,.16)}
+
+/* ── 首页列表 ─────────────────────────────────────────── */
+.hlist{flex:1;padding:8px 10px;display:flex;flex-direction:column;gap:6px;overflow:hidden;position:relative}
+.ws{border:1px solid var(--outlineVariant);border-radius:var(--r-md);background:var(--surface);
+  padding:9px 11px;display:flex;align-items:center;gap:9px}
+.ws .ic{width:26px;height:26px;border-radius:8px;background:rgba(90,162,255,.16);
+  display:flex;align-items:center;justify-content:center;color:var(--primary);font-size:12px;flex:0 0 26px}
+.ws .t{flex:1;min-width:0}
+.ws .t1{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ws .t2{font-size:9px;color:var(--onSurfaceVariant);margin-top:1px;
+  font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ws .pills{display:flex;gap:4px;flex:0 0 auto}
+.pill{font-size:8.5px;padding:1.5px 6px;border-radius:var(--r-pill);
+  background:var(--surfaceVariant);color:var(--onSurfaceVariant);
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+.pill.run{border:1px solid rgba(74,222,128,.45);color:var(--running)}
+
+/* ── 右下角漂浮加号（R055 的主角） ─────────────────────── */
+.fab{position:absolute;right:16px;bottom:18px;width:56px;height:56px;border-radius:50%;
+  background:var(--primary);color:var(--onPrimary);display:flex;align-items:center;
+  justify-content:center;font-size:27px;font-weight:300;line-height:1;
+  box-shadow:0 10px 26px rgba(90,162,255,.44),0 2px 8px rgba(0,0,0,.5);
+  z-index:6}
+.fab.old{background:var(--surfaceVariant);color:var(--onSurfaceVariant);
+  box-shadow:0 4px 14px rgba(0,0,0,.4);border:1px solid var(--outlineVariant)}
+/* 列表底部留白，保证最后一张卡片不被 FAB 压住 */
+.hlist{padding-bottom:74px}
+
+/* ── 新增会话页（复用对话界面） ────────────────────────── */
+.newbar{height:50px;display:flex;align-items:center;gap:6px;padding:0 8px 0 2px;
+  border-bottom:1px solid var(--outlineVariant);flex:0 0 auto}
+.newbar .t{font-size:13px;font-weight:600;flex:1;min-width:0}
+.pickrow{flex:0 0 auto;display:flex;gap:8px;padding:10px 12px 4px;flex-wrap:wrap}
+/* 用户截图里的两颗胶囊 */
+.pick{height:32px;border-radius:var(--r-pill);background:var(--surface);
+  border:1px solid var(--outlineVariant);display:inline-flex;align-items:center;gap:7px;
+  padding:0 13px 0 11px;font-size:11.5px;color:var(--onSurface);
+  white-space:nowrap;min-width:0;max-width:100%}
+.pick .ic{font-size:12px;color:var(--onSurfaceVariant);flex:0 0 auto}
+.pick .lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.pick .caret{font-size:7px;color:var(--onSurfaceVariant);flex:0 0 auto}
+.pick.on{border-color:rgba(90,162,255,.55);box-shadow:0 0 0 2px rgba(90,162,255,.14)}
+.chatlist{flex:1;padding:10px 12px;display:flex;flex-direction:column;gap:8px;overflow:hidden;
+  justify-content:flex-end}
+.bubble{max-width:268px;border-radius:var(--r-md);padding:8px 12px;font-size:12.5px;line-height:1.7}
+.bubble.user{align-self:flex-end;background:rgba(90,162,255,.16);border:1px solid rgba(90,162,255,.28)}
+.bubble.bot{align-self:flex-start;background:var(--surface);border:1px solid var(--outlineVariant)}
+.bubble .foot{font-size:9px;color:var(--onSurfaceVariant);margin-top:3px;font-family:var(--mono)}
+.emptyhint{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:10px;padding:0 30px;text-align:center}
+.emptyhint .big{font-size:30px;opacity:.5}
+.emptyhint .t1{font-size:12.5px;font-weight:600;color:var(--onSurface)}
+.emptyhint .t2{font-size:10.5px;color:var(--onSurfaceVariant);line-height:1.8}
+
+/* composer（照抄 R028 的收/展两态） */
+.composerwrap{flex:0 0 auto;padding:0 12px 12px;position:relative}
+.composer{background:var(--surface);border:1px solid var(--outlineVariant);border-radius:26px;
+  box-shadow:0 8px 26px rgba(0,0,0,.5);display:flex;flex-direction:column}
+.composer .r1{display:flex;align-items:center;gap:2px;padding:6px;min-height:52px}
+.plus{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;color:var(--onSurfaceVariant);flex:0 0 auto}
+.ph{flex:1 1 auto;font-size:13px;color:var(--onSurfaceVariant);padding:0 4px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sendbtn{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;flex:0 0 auto;background:var(--surfaceVariant);color:var(--onSurfaceVariant)}
+.sendbtn.on{background:var(--primary);color:var(--onPrimary)}
+
+/* ── 下拉菜单（复用 R054 的 .menu 规格） ────────────────── */
+.menu{background:var(--surface);border:1px solid var(--outline);border-radius:var(--r-md);
+  box-shadow:0 18px 44px rgba(0,0,0,.62);padding:5px;width:238px}
+.phone.light .menu{box-shadow:0 18px 44px rgba(24,36,48,.2)}
+.mhead{padding:7px 9px 5px;font-size:9px;letter-spacing:.6px;color:var(--onSurfaceVariant);
+  font-weight:600}
+.mi{display:flex;align-items:center;gap:9px;padding:8px 9px;border-radius:var(--r-sm);
+  font-size:12px;color:var(--onSurface)}
+.mi .i{width:16px;text-align:center;font-size:13px;color:var(--onSurfaceVariant);flex:0 0 16px}
+.mi .m{flex:1;min-width:0}
+.mi .m1{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mi .m2{font-size:9px;color:var(--onSurfaceVariant);font-family:var(--mono);margin-top:1px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mi .ck{font-size:11px;color:var(--primary);flex:0 0 auto}
+.mi.on{background:var(--surfaceVariant)}
+.mi.dgr{color:var(--error)}
+.mi.dgr .i{color:var(--error)}
+.mi.dis{color:var(--onSurfaceVariant);opacity:.55}
+.msep{height:1px;background:var(--outlineVariant);margin:4px 6px}
+.mtip{padding:5px 9px 7px;font-size:9px;color:var(--onSurfaceVariant);line-height:1.6}
+
+/* ── 遮罩 / 对话框 ────────────────────────────────────── */
+.scrim{position:absolute;inset:0;background:rgba(4,8,14,.55);z-index:4}
+.phone.light .scrim{background:rgba(24,36,48,.26)}
+.sheet{background:var(--surface);border:1px solid var(--outline);border-radius:var(--r-xl);
+  box-shadow:0 26px 64px rgba(0,0,0,.7);padding:16px 16px 10px;width:288px}
+.phone.light .sheet{box-shadow:0 26px 64px rgba(24,36,48,.26)}
+.sheet .h{display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600}
+.sheet .h .i{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;font-size:13px;background:rgba(242,193,78,.14);color:var(--tertiary)}
+.sheet .b{font-size:11px;color:var(--onSurfaceVariant);line-height:1.8;margin-top:9px}
+.sheet .b b{color:var(--onSurface);font-weight:600}
+.sheet .why{margin-top:8px;font-size:10px;line-height:1.7;color:var(--tertiary);
+  background:rgba(242,193,78,.08);border-left:2px solid rgba(242,193,78,.5);
+  padding:6px 8px;border-radius:0 var(--r-xs) var(--r-xs) 0}
+.sheet .f{display:flex;justify-content:flex-end;gap:4px;margin-top:12px}
+.btn{font-size:12px;padding:7px 13px;border-radius:var(--r-sm);color:var(--primary)}
+.btn.dgr{color:var(--error)}
+.fieldwrap{margin-top:9px}
+.fieldwrap .lbl{font-size:9.5px;color:var(--onSurfaceVariant);margin-bottom:4px}
+.inp{height:34px;border-radius:var(--r-sm);border:1px solid var(--outline);
+  background:var(--background);display:flex;align-items:center;padding:0 10px;
+  font-size:12px;color:var(--onSurface);font-family:var(--mono)}
+.inp.on{border-color:var(--primary);box-shadow:0 0 0 2px rgba(90,162,255,.16)}
+.inp .cursor{width:1px;height:15px;background:var(--primary);margin-left:1px}
+
+/* ── 状态提示条 ───────────────────────────────────────── */
+.snack{position:absolute;left:12px;right:12px;bottom:14px;background:var(--surfaceVariant);
+  border:1px solid var(--outline);border-radius:var(--r-sm);padding:9px 12px;font-size:11px;
+  color:var(--onSurface);z-index:7;box-shadow:0 8px 22px rgba(0,0,0,.5);display:flex;gap:8px}
+.snack.err{background:rgba(255,138,128,.14);border-color:rgba(255,138,128,.4);color:var(--error)}
+.spin{width:13px;height:13px;border-radius:50%;border:1.6px solid rgba(90,162,255,.28);
+  border-top-color:var(--primary);flex:0 0 13px;margin-top:2px}
+
+/* ── 决策块 ───────────────────────────────────────────── */
+.q{background:var(--surface);border:1px solid var(--outlineVariant);border-radius:var(--r-md);
+  padding:12px 14px;margin-top:10px}
+.q .qt{font-size:12px;font-weight:600;color:var(--primary)}
+.q .qb{font-size:11.5px;color:var(--onSurfaceVariant);line-height:1.8;margin-top:5px}
+.q .qb b{color:var(--onSurface)}
+.opt{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.opt .o{font-size:10.5px;padding:4px 9px;border-radius:var(--r-pill);
+  border:1px solid var(--outline);color:var(--onSurfaceVariant)}
+.opt .o.rec{border-color:rgba(74,222,128,.5);color:var(--running)}
+.badge2{display:inline-block;font-size:9px;padding:1px 6px;border-radius:var(--r-pill);
+  background:rgba(90,162,255,.14);color:var(--primary);border:1px solid rgba(90,162,255,.32)}
+.badge2.warn{background:rgba(242,193,78,.12);color:var(--tertiary);
+  border-color:rgba(242,193,78,.32)}
+.badge2.ok{background:rgba(74,222,128,.12);color:var(--running);
+  border-color:rgba(74,222,128,.32)}
+table.t{width:100%;border-collapse:collapse;margin-top:10px;font-size:11px}
+table.t th,table.t td{border:1px solid var(--outlineVariant);padding:7px 9px;text-align:left;
+  vertical-align:top}
+table.t th{background:var(--surfaceVariant);color:var(--onSurface);font-weight:600;font-size:10.5px}
+table.t td{color:var(--onSurfaceVariant)}
+table.t td b{color:var(--onSurface)}
+table.t code{font-family:var(--mono);font-size:10px;background:var(--surfaceVariant);
+  padding:1px 4px;border-radius:3px;color:var(--primary)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>R055 效果图 · 首页新建会话（右下角漂浮加号 + 工作区/模式选择）</h1>
+<div class="sub">
+  目标：首页右下角一个漂浮的加号圆圈，点开进「新增会话」页；这个页面<b>直接复用对话界面</b>，
+  只是在输入框上方多两颗胶囊——一颗选<b>工作区</b>、一颗选<b>模式</b>。<br>
+  设计令牌与 <code>docs/R054-多主机效果图.html</code> 完全一致（<code>#5AA2FF</code> / <code>#0B1420</code> / <code>#111C2B</code> / 圆角 <code>6·10·14·20·28</code> / <code>cubic-bezier(.2,0,0,1)</code>）。
+  <br><b>接口已实测</b>（详见第 6 节）：<code>session/create</code> 的 <code>workspaceId</code> / <code>cwd</code> / <code>agentPreset</code> 全部可选；模式四档取桌面端 locale 原文。
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">1</span>首页右下角：那个加号圆圈</h2>
+<div class="note">
+  左边是现在的样子（只有列表，没有新建入口）。右边加上 <b>56dp 的实心圆 + 27sp 的细加号</b>，
+  距右 16dp、距下 18dp，配色用 <code>primary</code>（与顶栏 <code>+</code>、发送按钮同色）。
+  <br>阴影是<b>两层</b>：<code>0 10px 26px rgba(90,162,255,.44)</code> 给光晕、<code>0 2px 8px rgba(0,0,0,.5)</code> 给落地感——
+  只有一层的话在深色背景上会「浮不起来」。
+  <br><b>列表要加 74dp 底部内边距</b>，否则最后一张工作区卡片会被圆圈压住（这是最容易漏的一处）。
+</div>
+<div class="row">
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar">
+        <div class="tb-btn">☰</div>
+        <div class="tb-mid">
+          <div class="tb-t1">PGBM10 ⌄</div>
+          <div class="tb-t2"><span class="dot ok"></span>工作区 10 · 会话 40</div>
+        </div>
+        <div class="tb-btn">⋮</div>
+      </div>
+      <div class="hlist">
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">LT84 Driver</div>
+          <div class="t2">F:/LT84_Driver</div></div>
+          <div class="pills"><span class="pill">6 会话</span></div></div>
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">bot</div>
+          <div class="t2">F:/bot</div></div>
+          <div class="pills"><span class="pill run">正在生成</span></div></div>
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">dsh-plugin</div>
+          <div class="t2">C:/Users/26903/.dsh/plugins</div></div>
+          <div class="pills"><span class="pill">17 会话</span></div></div>
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">model-filter</div>
+          <div class="t2">F:/model-filter</div></div>
+          <div class="pills"><span class="pill">3 会话</span></div></div>
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">new work</div>
+          <div class="t2">F:/new work</div></div>
+          <div class="pills"><span class="pill">1 会话</span></div></div>
+      </div>
+    </div>
+    <div class="cap">现在 · 没有新建入口</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar">
+        <div class="tb-btn">☰</div>
+        <div class="tb-mid">
+          <div class="tb-t1">PGBM10 ⌄</div>
+          <div class="tb-t2"><span class="dot ok"></span>工作区 10 · 会话 40</div>
+        </div>
+        <div class="tb-btn">⋮</div>
+      </div>
+      <div class="hlist">
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">LT84 Driver</div>
+          <div class="t2">F:/LT84_Driver</div></div>
+          <div class="pills"><span class="pill">6 会话</span></div></div>
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">bot</div>
+          <div class="t2">F:/bot</div></div>
+          <div class="pills"><span class="pill run">正在生成</span></div></div>
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">dsh-plugin</div>
+          <div class="t2">C:/Users/26903/.dsh/plugins</div></div>
+          <div class="pills"><span class="pill">17 会话</span></div></div>
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">model-filter</div>
+          <div class="t2">F:/model-filter</div></div>
+          <div class="pills"><span class="pill">3 会话</span></div></div>
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">new work</div>
+          <div class="t2">F:/new work</div></div>
+          <div class="pills"><span class="pill">1 会话</span></div></div>
+      </div>
+      <div class="fab">+</div>
+    </div>
+    <div class="cap"><b>加了</b> · 56dp 实心圆，primary 色，两层阴影</div>
+  </div>
+</div>
+<div class="note" style="margin-top:14px">
+  <b>为什么不放在顶栏</b>：顶栏右侧已经有 <code>⋮</code>（R054 刚重构的溢出菜单），再塞一个 <code>+</code> 就三个控件挤在 50dp 里；
+  而且「新建会话」是<b>高频主动作</b>，按 Material 的规矩该用 FAB 放在拇指最容易够到的右下角。
+  <br><b>滚动时</b>：FAB 固定不动（不跟随列表），也不做「上滑隐藏」——那会让用户找不到入口。
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">2</span>点开之后：新增会话页（复用对话界面）</h2>
+<div class="note">
+  这个页面<b>就是对话页</b>，只是会话还是空的、还没建出来。顶部标题写「新增会话」，左上角是返回箭头（放弃创建，退回首页）。
+  <br>输入框上方两颗胶囊就是你要的选择栏：<b>左 → 工作区，右 → 模式</b>。默认值：工作区取<b>当前工作区列表的第一项</b>，
+  模式取<b>标准模式</b>（桌面端也有「新任务默认」这个概念，同一份 locale 里写着 <code>inUse: "新任务默认"</code>）。
+  <br>空会话区域给一段引导文案，说明「发第一条消息才会真正建出会话」——这样用户知道<b>现在还没有产生任何东西</b>。
+</div>
+<div class="row">
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="newbar">
+        <div class="tb-btn">←</div>
+        <div class="t">新增会话</div>
+      </div>
+      <div class="pickrow">
+        <span class="pick"><span class="ic">📁</span><span class="lbl">bot</span><span class="caret">▼</span></span>
+        <span class="pick"><span class="ic">⟳</span><span class="lbl">标准模式</span><span class="caret">▼</span></span>
+      </div>
+      <div class="emptyhint">
+        <div class="big">✎</div>
+        <div class="t1">还没有内容</div>
+        <div class="t2">在下面输入第一条消息，就会在这台桌面端上<br>建出会话并开始工作。</div>
+      </div>
+      <div class="composerwrap">
+        <div class="composer">
+          <div class="r1">
+            <div class="plus">+</div>
+            <div class="ph">问点什么…</div>
+            <div class="sendbtn on">↑</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap">新增会话页 · 空白态</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="newbar">
+        <div class="tb-btn">←</div>
+        <div class="t">新增会话</div>
+      </div>
+      <div class="pickrow">
+        <span class="pick on"><span class="ic">📁</span><span class="lbl">bot</span><span class="caret">▲</span></span>
+        <span class="pick"><span class="ic">⟳</span><span class="lbl">标准模式</span><span class="caret">▼</span></span>
+      </div>
+      <div class="menu" style="margin:0 12px">
+        <div class="mhead">选择工作区</div>
+        <div class="mi on">
+          <span class="i">◫</span>
+          <span class="m"><span class="m1">bot</span><span class="m2">F:\bot</span></span>
+          <span class="ck">✓</span>
+        </div>
+        <div class="mi">
+          <span class="i">◫</span>
+          <span class="m"><span class="m1">dsh-plugin</span><span class="m2">C:\Users\26903\.dsh\plugins</span></span>
+        </div>
+        <div class="mi">
+          <span class="i">◫</span>
+          <span class="m"><span class="m1">LT84 Driver</span><span class="m2">F:\LT84_Driver</span></span>
+        </div>
+        <div class="mi">
+          <span class="i">◫</span>
+          <span class="m"><span class="m1">model-filter</span><span class="m2">F:\model-filter</span></span>
+        </div>
+        <div class="msep"></div>
+        <div class="mi dis">
+          <span class="i">＋</span>
+          <span class="m"><span class="m1">新建工作区…</span></span>
+        </div>
+        <div class="mtip">桌面端未开放目录浏览（<code style="font-family:var(--mono)">directory-picker/unavailable</code>），暂时只能选已有工作区。</div>
+      </div>
+      <div class="chatlist"></div>
+      <div class="composerwrap">
+        <div class="composer">
+          <div class="r1">
+            <div class="plus">+</div>
+            <div class="ph">问点什么…</div>
+            <div class="sendbtn on">↑</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap">点左边胶囊 · 选工作区</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="newbar">
+        <div class="tb-btn">←</div>
+        <div class="t">新增会话</div>
+      </div>
+      <div class="pickrow">
+        <span class="pick"><span class="ic">📁</span><span class="lbl">bot</span><span class="caret">▼</span></span>
+        <span class="pick on"><span class="ic">⟳</span><span class="lbl">标准模式</span><span class="caret">▲</span></span>
+      </div>
+      <div class="menu" style="margin:0 12px">
+        <div class="mhead">选择模式</div>
+        <div class="mi on">
+          <span class="i">◉</span>
+          <span class="m"><span class="m1">标准模式</span><span class="m2">适合大多数任务</span></span>
+          <span class="ck">✓</span>
+        </div>
+        <div class="mi">
+          <span class="i">◉</span>
+          <span class="m"><span class="m1">PTC 模式</span><span class="m2">批量调工具后筛选汇总</span></span>
+        </div>
+        <div class="mi">
+          <span class="i">◉</span>
+          <span class="m"><span class="m1">极简模式</span><span class="m2">终端 + 读图，对比基础表现</span></span>
+        </div>
+        <div class="mi">
+          <span class="i">◉</span>
+          <span class="m"><span class="m1">创造模式</span><span class="m2">让 Agent 写插件、造自己的模式</span></span>
+        </div>
+        <div class="mtip">四档来自桌面端 <code style="font-family:var(--mono)">agentPreset</code>，与桌面端「新任务」下拉完全一致。</div>
+      </div>
+      <div class="chatlist"></div>
+      <div class="composerwrap">
+        <div class="composer">
+          <div class="r1">
+            <div class="plus">+</div>
+            <div class="ph">问点什么…</div>
+            <div class="sendbtn on">↑</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap">点右边胶囊 · 选模式</div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">3</span>创建过程：先建会话，再进对话页</h2>
+<div class="note">
+  发第一条消息时<b>先调 <code>session/create</code></b>（带选中的 <code>workspaceId</code> 与 <code>agentPreset</code>），拿到 <code>sessionId</code>
+  之后才把消息发进去。所以中间必须有一段「正在创建…」的可见反馈——否则用户会以为发送失败又点一次，<b>桌面端就会多出两条空会话</b>。
+  <br>这一条是 B005「重复添加设备无反馈」那次事故的直接教训：<b>没有反馈的成功 = 用户以为的失败</b>。
+</div>
+<div class="row">
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="newbar">
+        <div class="tb-btn">←</div>
+        <div class="t">新增会话</div>
+      </div>
+      <div class="pickrow">
+        <span class="pick"><span class="ic">📁</span><span class="lbl">bot</span><span class="caret">▼</span></span>
+        <span class="pick"><span class="ic">⟳</span><span class="lbl">标准模式</span><span class="caret">▼</span></span>
+      </div>
+      <div class="emptyhint">
+        <div class="big">✎</div>
+        <div class="t1">还没有内容</div>
+        <div class="t2">在下面输入第一条消息，就会在这台桌面端上<br>建出会话并开始工作。</div>
+      </div>
+      <div class="composerwrap">
+        <div class="composer">
+          <div class="r1">
+            <div class="plus">+</div>
+            <div class="ph">这个仓库的测试怎么跑？</div>
+            <div class="sendbtn">↑</div>
+          </div>
+        </div>
+      </div>
+      <div class="snack"><span class="spin"></span><span>正在这台桌面端上创建会话…</span></div>
+    </div>
+    <div class="cap">已输入 · 点发送 → 创建中（阻塞、不可再点）</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="newbar">
+        <div class="tb-btn">←</div>
+        <div class="t">这个仓库的测试怎么跑？</div>
+        <div class="tb-btn">⋮</div>
+      </div>
+      <div class="chatlist">
+        <div class="bubble user">这个仓库的测试怎么跑？<div class="foot">bot · 标准模式</div></div>
+        <div class="bubble bot">先看 <code style="font-family:var(--mono)">app/build.gradle.kts</code> 里的 test 任务，再决定用 <code style="font-family:var(--mono)">:app:testDebugUnitTest</code>。<div class="foot">正在生成…</div></div>
+      </div>
+      <div class="composerwrap">
+        <div class="composer">
+          <div class="r1">
+            <div class="plus">+</div>
+            <div class="ph">补充…</div>
+            <div class="sendbtn on">↑</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap">建好之后 · 自动进对话页（标题换成会话标题）</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="newbar">
+        <div class="tb-btn">←</div>
+        <div class="t">新增会话</div>
+      </div>
+      <div class="pickrow">
+        <span class="pick"><span class="ic">📁</span><span class="lbl">bot</span><span class="caret">▼</span></span>
+        <span class="pick"><span class="ic">⟳</span><span class="lbl">标准模式</span><span class="caret">▼</span></span>
+      </div>
+      <div class="emptyhint">
+        <div class="big">✎</div>
+        <div class="t1">还没有内容</div>
+        <div class="t2">在下面输入第一条消息，就会在这台桌面端上<br>建出会话并开始工作。</div>
+      </div>
+      <div class="composerwrap">
+        <div class="composer">
+          <div class="r1">
+            <div class="plus">+</div>
+            <div class="ph">这个仓库的测试怎么跑？</div>
+            <div class="sendbtn on">↑</div>
+          </div>
+        </div>
+      </div>
+      <div class="snack err">✕ 创建失败：配对已失效（HTTP 403 unpaired）—— <b style="text-decoration:underline">重试</b></div>
+    </div>
+    <div class="cap">失败 · 留在本页、消息不丢、可重试</div>
+  </div>
+</div>
+<div class="note" style="margin-top:14px">
+  <b>失败时三件事都不能少</b>：① 输入的文字<b>不能清空</b>（用户写了几十字，清掉就是灾难）；
+  ② 胶囊选择<b>保留</b>；③ 错误条上直接给「重试」，不用退回首页再点一次 FAB。
+  <br>按现有代码的判据，<code>TypertException.isUnpaired</code> 为真时<b>不要重试</b>（凭证已废，重试还是 403），提示文字要直说「需要重新配对」并给一个跳转。
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">4</span>两个边界情况</h2>
+<div class="note">
+  <b>① 这台桌面端一个工作区都没有</b>：胶囊显示「无工作区」，点开菜单只有一行提示 + 「新建工作区…」（若可用）。
+  这时<b>不该禁止发送</b>——<code>session/create</code> 的 <code>workspaceId</code> 是可选的，不传就会落到桌面端的默认工作区。
+  把这点写清楚，比给一个灰掉的输入框好得多。
+  <br><b>② 工作区列表还没读回来</b>：胶囊显示骨架（`—`）并禁用点击，但输入框照常可用。
+</div>
+<div class="row">
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="newbar">
+        <div class="tb-btn">←</div>
+        <div class="t">新增会话</div>
+      </div>
+      <div class="pickrow">
+        <span class="pick"><span class="ic">📁</span><span class="lbl" style="color:var(--onSurfaceVariant)">无工作区</span><span class="caret">▼</span></span>
+        <span class="pick"><span class="ic">⟳</span><span class="lbl">标准模式</span><span class="caret">▼</span></span>
+      </div>
+      <div class="menu" style="margin:0 12px">
+        <div class="mhead">选择工作区</div>
+        <div class="mi dis"><span class="i">◫</span><span class="m"><span class="m1">这个桌面端还没有工作区</span></span></div>
+        <div class="msep"></div>
+        <div class="mi dis"><span class="i">＋</span><span class="m"><span class="m1">新建工作区…</span></span></div>
+        <div class="mtip">不选也行：会话会建在桌面端的默认工作区里。</div>
+      </div>
+      <div class="chatlist"></div>
+      <div class="composerwrap">
+        <div class="composer">
+          <div class="r1">
+            <div class="plus">+</div>
+            <div class="ph">问点什么…</div>
+            <div class="sendbtn on">↑</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap">零工作区 · 仍可发送</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="newbar">
+        <div class="tb-btn">←</div>
+        <div class="t">新增会话</div>
+      </div>
+      <div class="pickrow">
+        <span class="pick" style="opacity:.6"><span class="ic">📁</span><span class="lbl">—</span></span>
+        <span class="pick"><span class="ic">⟳</span><span class="lbl">标准模式</span><span class="caret">▼</span></span>
+      </div>
+      <div class="emptyhint">
+        <div class="big">✎</div>
+        <div class="t1">还没有内容</div>
+        <div class="t2">工作区列表正在读取…<br>可以先写好第一条消息。</div>
+      </div>
+      <div class="composerwrap">
+        <div class="composer">
+          <div class="r1">
+            <div class="plus">+</div>
+            <div class="ph">问点什么…</div>
+            <div class="sendbtn on">↑</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap">列表未就绪 · 胶囊禁用、输入可用</div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">5</span>亮色主题</h2>
+<div class="note">
+  同一套结构在亮色下的样子。FAB 的阴影要减淡（<code>rgba(31,111,235,.32)</code>），否则在浅底上会糊成一圈脏影。
+</div>
+<div class="row">
+  <div>
+    <div class="phone light">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="topbar">
+        <div class="tb-btn">☰</div>
+        <div class="tb-mid">
+          <div class="tb-t1">PGBM10 ⌄</div>
+          <div class="tb-t2"><span class="dot ok"></span>工作区 10 · 会话 40</div>
+        </div>
+        <div class="tb-btn">⋮</div>
+      </div>
+      <div class="hlist">
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">bot</div>
+          <div class="t2">F:/bot</div></div>
+          <div class="pills"><span class="pill">12 会话</span></div></div>
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">dsh-plugin</div>
+          <div class="t2">C:/Users/26903/.dsh/plugins</div></div>
+          <div class="pills"><span class="pill run">正在生成</span></div></div>
+        <div class="ws"><div class="ic">◫</div><div class="t"><div class="t1">model-filter</div>
+          <div class="t2">F:/model-filter</div></div>
+          <div class="pills"><span class="pill">3 会话</span></div></div>
+      </div>
+      <div class="fab" style="box-shadow:0 8px 20px rgba(31,111,235,.32),0 2px 6px rgba(24,36,48,.18)">+</div>
+    </div>
+    <div class="cap">亮色 · 首页</div>
+  </div>
+
+  <div>
+    <div class="phone light">
+      <div class="status"><span>9:41</span><span>◍ ▮▮▮</span></div>
+      <div class="newbar">
+        <div class="tb-btn">←</div>
+        <div class="t">新增会话</div>
+      </div>
+      <div class="pickrow">
+        <span class="pick"><span class="ic">📁</span><span class="lbl">bot</span><span class="caret">▼</span></span>
+        <span class="pick"><span class="ic">⟳</span><span class="lbl">标准模式</span><span class="caret">▼</span></span>
+      </div>
+      <div class="emptyhint">
+        <div class="big">✎</div>
+        <div class="t1">还没有内容</div>
+        <div class="t2">在下面输入第一条消息，就会在这台桌面端上<br>建出会话并开始工作。</div>
+      </div>
+      <div class="composerwrap">
+        <div class="composer" style="box-shadow:0 8px 26px rgba(24,36,48,.14)">
+          <div class="r1">
+            <div class="plus">+</div>
+            <div class="ph">问点什么…</div>
+            <div class="sendbtn on">↑</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap">亮色 · 新增会话页</div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">6</span>接口实测结果（这一轮已经跑过真机 curl）</h2>
+<div class="note">
+  结论全部来自对本机桌面端 <code>http://127.0.0.1:19387</code> 的真实请求，用合法 device id 打
+  <code>/remote/api/{namespace}/{method}</code>、头 <code>x-dsh-remote-device</code>。
+  <b>用错外壳</b>会直接得 <code>gateway/bad-request: invalid client-request message</code>。
+</div>
+<table class="t">
+<tr><th style="width:170px">端点</th><th style="width:290px">真实 wire 形状</th><th>结论</th></tr>
+<tr>
+  <td><code>session/create</code></td>
+  <td><code>args = {request:{...}}</code></td>
+  <td><b>可用</b>。<code>workspaceId</code> / <code>cwd</code> / <code>title</code> / <code>agentPreset</code> / <code>model</code> <b>全部可选</b>——只给 <code>{request:{}}</code> 也能建成功，返回 <code>{sessionId, agentPreset}</code>。
+  乱给 <code>workspaceId</code> 报 <code>workspace/not-found</code>；<code>cwd:""</code> 报 <code>gateway/internal</code>（<code>mkdir ''</code>），所以<b>空串不能传，要么不传要么传真路径</b>。</td>
+</tr>
+<tr>
+  <td><code>agentPreset</code> 取值</td>
+  <td><code>standard</code> / <code>ptc</code> / <code>minimal</code> / <code>cordis</code></td>
+  <td>服务端报错会把 <code>available</code> 数组整个吐出来，四档<b>实测确认</b>。中文名逐字取自桌面端 locale：
+  <b>标准模式 / PTC 模式 / 极简模式 / 创造模式</b>。<code>compact</code>、<code>detailed</code>、<code>verbose</code> <b>不是</b>预设（那是渲染档位，别混）。</td>
+</tr>
+<tr>
+  <td><code>workspace/create</code></td>
+  <td><code>args = {request:{path, title}}</code></td>
+  <td><b>可用但受限</b>：<code>path</code> 必填且<b>目录必须已存在</b>，否则 <code>workspace/invalid-path</code>（<code>ENOENT realpath</code>）。
+  只给 <code>title</code> 报 <code>gateway/input-invalid</code>。返回 <code>{workspace:{workspaceId,path,...}, created}</code>。</td>
+</tr>
+<tr>
+  <td><code>directoryPicker/list</code></td>
+  <td>参数是裸 <code>path</code>（<b>不是</b> <code>request</code>）</td>
+  <td><b>实测不可用</b>：<code>directory-picker/unavailable — directoryPicker.list needs the browse capability; the composed picker serves "native"</code>。
+  → 「新建工作区」<b>没法让用户在手机上选目录</b>，见第 7 节 Q2。</td>
+</tr>
+<tr>
+  <td><code>workspace/follow</code></td>
+  <td>流，无参数（<code>mode:'stream'</code>）</td>
+  <td>工作区列表的<b>唯一来源</b>，App 里 <code>WorkspaceRepository</code> 已经接好了。<b>注意</b>：<code>session/list</code> 的条目<b>没有</b> <code>workspaceId</code> 字段，别指望从那边反查。</td>
+</tr>
+</table>
+<div class="note">
+  <b>踩过的坑</b>：<code>session/list</code> 的 args 是 <code>{"_request":{}}</code>（下划线），而 <code>session/modelCatalog</code> 恰恰<b>不能</b>带 <code>_request</code>；
+  两者形状相反，抄错会得到 <code>missing "_request"</code> 或 <code>unexpected "_request"</code>。
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">7</span>可行性：要动哪些层</h2>
+<table class="t">
+<tr><th style="width:200px">层</th><th>改动</th><th style="width:90px">风险</th></tr>
+<tr><td>端点常量</td><td><code>DshEndpoints</code> 里 <code>SESSION_CREATE</code> <b>已有常量、没有实现</b>（<code>HomeScreen.kt:1717</code> 的注释写着「wire 形状从未实测，决策 D88」）。
+这一轮已经实测出来，可以补实现。</td><td><span class="badge2 ok">低</span></td></tr>
+<tr><td>新仓库</td><td>新增 <code>SessionCreateRepository</code>（一个 <code>callRaw</code> + 解析 <code>sessionId</code>/<code>agentPreset</code>）。
+判据用现有的 <code>TypertException.isUnpaired</code> 区分「凭证废了」和「网络/服务端错」。</td><td><span class="badge2 ok">低</span></td></tr>
+<tr><td>新增页面</td><td>复用 <code>ChatScreen</code> 的现有 composable（气泡列表 + composer）做 <code>NewSessionScreen</code>；
+两颗胶囊是新的 <code>PickerChip</code> 组件，下拉复用 R054 刚重构的 <code>AppOverflowMenu</code> 样式。</td><td><span class="badge2 warn">中</span>：<code>ChatScreen.kt</code> 已 3600+ 行，硬拆容易回归</td></tr>
+<tr><td>首页</td><td>FAB + 列表底部 74dp 内边距 + 跳转。<b>不改动</b>现有列表逻辑。</td><td><span class="badge2 ok">低</span></td></tr>
+<tr><td>建完之后的衔接</td><td>建好后要能进对话页，且首页列表要<b>立刻</b>出现这条新会话。
+这一步和 B004 同源：靠 <code>workspace/follow</code> 的流推回来，不能靠「重新进页面」。</td><td><span class="badge2 warn">中</span></td></tr>
+</table>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">8</span>要你拍板的三件事</h2>
+
+<div class="q">
+<div class="qt">Q1 · 「新建工作区」要不要做</div>
+<div class="qb">
+  桌面端的目录浏览接口 <code>directoryPicker/list</code> <b>实测不可用</b>（返回 <code>directory-picker/unavailable</code>，因为桌面端装的是 native picker）。
+  但 <code>workspace/create</code> 本身是通的——只要有一个<b>已存在的绝对路径</b>就能建。
+  <br>所以要么让用户手填路径（长、易错、移动端打字痛苦），要么这一轮先不做。
+</div>
+<div class="opt">
+  <span class="o rec">先不做，菜单里显示禁用项 + 说明（推荐 · 你原话「没有接口即可选」）</span>
+  <span class="o">做：弹一个手填路径的输入框（复用编辑地址那个对话框）</span>
+</div>
+</div>
+
+<div class="q">
+<div class="qt">Q2 · 发第一条消息时才建会话，还是进页面就建</div>
+<div class="qb">
+  <b>进页面就建</b>：会话立刻出现在桌面端列表里；但用户按返回就是一条<b>空会话垃圾</b>（桌面端会留着）。
+  <br><b>发送时建</b>：不产生垃圾；代价是首次发送要多等一次往返（实测 <code>session/create</code> 约 100ms，可接受）。
+</div>
+<div class="opt">
+  <span class="o rec">发送时建（推荐 · 不产生空会话）</span>
+  <span class="o">进页面就建（首次发送更快，但返回会留下空会话）</span>
+</div>
+</div>
+
+<div class="q">
+<div class="qt">Q3 · 模式选择要不要记住上次的选择</div>
+<div class="qb">
+  现在桌面端有「新任务默认」的概念。App 这边每开一次新增会话都回到「标准模式」，还是要记住用户上一次选的那档？
+  <br>记住要落一处本地偏好（还要考虑<b>按主机分开记</b>——A 机器上常用极简、B 机器上常用创造是可能的）。
+</div>
+<div class="opt">
+  <span class="o rec">记住，但只按主机记（推荐 · 少一次点击）</span>
+  <span class="o">每次都回到标准模式（最简单，零状态）</span>
+  <span class="o">全局记一个（不分主机）</span>
+</div>
+</div>
+
+<div class="note" style="margin-top:16px">
+  <b>建议的落地顺序</b>：① 先只做 FAB + 跳转到一个「直接 = 对话页」的新页面（不带任何选择栏），把
+  <code>session/create</code> 打通并在真机上验证——这一步就能用；② 再加工作区胶囊（数据从已有的
+  <code>workspace/follow</code> 拿，零新接口）；③ 最后加模式胶囊与「记住上次选择」。
+  <br>这样每一步都是可单独验收的，任一步出问题都不会把「新建会话」整条路堵死。
+</div>
+</section>
+
+</div>
+</body>
+</html>

@@ -16,6 +16,7 @@ import com.revxzxcx.remotewebapp.core.credentials.KeystoreCredentialStore
 import com.revxzxcx.remotewebapp.core.net.HttpClients
 import com.revxzxcx.remotewebapp.core.pairing.PairingApi
 import com.revxzxcx.remotewebapp.core.pairing.PairingCoordinator
+import com.revxzxcx.remotewebapp.core.prefs.PresetPreferences
 import com.revxzxcx.remotewebapp.core.prefs.ThemePreferences
 import com.revxzxcx.remotewebapp.core.protocol.DshJson
 import kotlinx.coroutines.CoroutineScope
@@ -120,6 +121,15 @@ class AppContainer(context: Context) {
      * 比 Room 建库便宜得多，不违反上面的线程承诺）。
      */
     val themePreferences: ThemePreferences = ThemePreferences(appContext)
+
+    /**
+     * 新增会话页「模式」胶囊的上次选择（R055 / Q3）。
+     *
+     * 按主机分开记（key 形如 `preset_<hostId>`）：不同桌面端可用的档位不一定相同，
+     * 「这台常用 PTC、那台常用标准」是真实场景。与 [themePreferences] 同样与容器同寿，
+     * 构造时同步读一次 SharedPreferences。
+     */
+    val presetPreferences: PresetPreferences = PresetPreferences(appContext)
 
     /**
      * 离线缓存（需求 FR-4.3）。

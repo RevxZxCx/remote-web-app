@@ -20,6 +20,7 @@ import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -194,6 +195,13 @@ fun HomeScreen(
     expandDeviceBarOnStart: Boolean = false,
     /** 已经消费掉 [expandDeviceBarOnStart]，调用方可以把它清回 false。 */
     onDeviceBarExpanded: () -> Unit = {},
+    /**
+     * 右下角漂浮加号：进「新增会话」页（R055）。
+     *
+     * 传 `null` 表示这个入口不可用——既有渲染测试因此不必逐个补参数，
+     * 而真机上它永远非空（[com.revxzxcx.remotewebapp.ui.AppRoot] 一定传）。
+     */
+    onNewSession: (() -> Unit)? = null,
 ) {
     val state by viewModel.state.collectAsState()
     val actionBusy by viewModel.actionBusy.collectAsState()
@@ -669,6 +677,17 @@ fun HomeScreen(
                     }
                 },
                 snackbarHost = { SnackbarHost(snackbar) },
+                // R055：右下角漂浮加号。放在 Scaffold 的 floatingActionButton 槽里
+                // 而不是自己在 Box 里摆——Scaffold 已经替我们处理了与 snackbar 的避让
+                // （snackbar 弹出时 FAB 会随之上移，避免被压住）。
+                floatingActionButton = {
+                    if (onNewSession != null) {
+                        // Scaffold 的 FAB 槽自带 16dp；原型要 18dp，补上差的 2dp。
+                        Box(modifier = Modifier.padding(bottom = HomeFabBottomInset)) {
+                            NewSessionFab(onClick = onNewSession)
+                        }
+                    }
+                },
             ) { padding ->
                 Column(
                     modifier = Modifier
@@ -796,7 +815,14 @@ fun HomeScreen(
                             )
                         }
 
-                        else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        // R055：底部留出 FAB 的高度，否则最后一张工作区卡片的右下角会被
+                        // 漂浮加号压住（56dp 直径 + 18dp 距底 = 74dp，再加一点呼吸感）。
+                        // 用 `contentPadding` 而不是在最末插一个 Spacer：列表为空/只有一屏时
+                        // Spacer 也会占位，滚到底依旧是一片空白。
+                        else -> LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = HomeFabClearance),
+                        ) {
                             items(
                                 items = state.groups,
                                 key = { it.workspace.workspaceId },

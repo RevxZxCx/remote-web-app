@@ -31,6 +31,7 @@ import com.revxzxcx.remotewebapp.ImeInsets
 import com.revxzxcx.remotewebapp.core.AppContainer
 import com.revxzxcx.remotewebapp.core.AppState
 import com.revxzxcx.remotewebapp.core.credentials.DeviceCredential
+import com.revxzxcx.remotewebapp.core.session.SessionCreateRepository
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.ui.chat.ChatScreen
 import com.revxzxcx.remotewebapp.ui.chat.ChatViewModel
@@ -45,6 +46,8 @@ import com.revxzxcx.remotewebapp.ui.home.HomeScreen
 import com.revxzxcx.remotewebapp.ui.home.HostRemoveDialog
 import com.revxzxcx.remotewebapp.ui.home.HostRemovePurpose
 import com.revxzxcx.remotewebapp.ui.home.HomeViewModel
+import com.revxzxcx.remotewebapp.ui.home.NewSessionScreen
+import com.revxzxcx.remotewebapp.ui.home.NewSessionViewModel
 import com.revxzxcx.remotewebapp.ui.pair.PairScreen
 import com.revxzxcx.remotewebapp.ui.pair.PairViewModel
 import com.revxzxcx.remotewebapp.ui.settings.SettingsScreen
@@ -211,6 +214,42 @@ fun AppRoot(container: AppContainer) {
     var addHostOpen by rememberSaveable { mutableStateOf(false) }
 
     /**
+     * 是否停在「新增会话」页（R055）。
+     *
+     * 与 [addHostOpen] 同形：只是个布尔值，与「打开了哪个会话」无关，所以不并入
+     * [openSession] 那条树——新建会话时 [openSession] 还是 null，建成功后两者才交接。
+     *
+     * 用 `rememberSaveable`：用户打了一半草稿转屏，不该被弹回首页。
+     */
+    var newSessionOpen by rememberSaveable { mutableStateOf(false) }
+
+    /**
+     * 新建会话成功、正要交给对话页的那条草稿（R055）。
+     *
+     * ## 为什么需要它
+     *
+     * 新增会话页只在**发送第一条消息时**才真的调 `session/create`（原型 Q2 的决定：
+     * 进页面就建会在桌面端留下空会话垃圾）。所以「建完」这一刻必须把用户刚打的那段
+     * 文字原样带进对话页并自动发出去，否则用户点了发送却看到一条空会话——那正是
+     * B005 那次「没有反馈的成功被当成失败」的同一种伤害。
+     *
+     * 用 `rememberSaveable`：这条草稿是一次性交接，但交接可能跨越一次重组/转屏，
+     * 存内存会丢。消费即清空（见下面聊天分支的 `LaunchedEffect`），不会重复发送。
+     */
+    var pendingNewSessionPrompt by rememberSaveable { mutableStateOf<String?>(null) }
+
+    /**
+     * 交接草稿**归属哪条会话**（R055 第 3 轮审查 A4）。
+     *
+     * 早先只存草稿本身，消费处是聊天分支里一个无条件 `LaunchedEffect`。可是
+     * `pendingNewSessionPrompt` 用 `rememberSaveable`，正是为了跨越进程重建——重建后
+     * 只要聊天分支先被别的东西点亮（用户返回首页再点开**另一条**会话），那段话就会被
+     * 发进那条不相关的会话里。绑定 sessionId 后，两处对不上就整份丢弃，宁可不发也不能
+     * 把用户的话发错地方。
+     */
+    var pendingNewSessionSessionId by rememberSaveable { mutableStateOf<String?>(null) }
+
+    /**
      * 「退出配对」的统一出口（R018 P1-1）。
      *
      * 早前 `AppRoot` 把 `onUnpair = { scope.launch { container.unpair() } }` 直连给
@@ -327,12 +366,74 @@ fun AppRoot(container: AppContainer) {
                         ),
                     )
 
+                    // R055：新增会话页要的「工作区列表」直接取首页已有的那一份
+                    // （`workspace/follow` 流推回来的），**零新接口**。`loading` 取
+                    // 「还在等第一帧 baseline」——胶囊据此画骨架并禁用（原型第 4 节 ②）。
+                    val homeState by homeVm.state.collectAsState()
+                    val workspaces = homeState.snapshot.items
+                    val workspacesLoading = homeState.loading
+
                     // 进入会话即「看过了」：账本把这条会话的两枚未读提醒熄灭并同步进列表。
                     // 看文件（`file != null`）也算，那是同一个会话的内容。
                     LaunchedEffect(session?.sessionId) {
                         homeVm.onSessionOpened(session?.sessionId)
                     }
                     when {
+                        // R055：「新增会话」。与「添加远程」同级，也是临时路由。
+                        //
+                        // `session/create` 只在用户点发送时才调（原型 Q2），所以这一屏
+                        // 与对话页长得一样、只是还没有会话：发出去之后才建、建完立刻
+                        // 带着草稿跳进真正的对话页（见聊天分支的交接逻辑）。
+                        newSessionOpen -> {
+                            // key 带 scopeToken：换主机必须换 VM。模式偏好是**按主机**
+                            // 分开记的（Q3），VM 里缓存着 initialPreset，跨主机复用会
+                            // 把 A 台的选择带到 B 台。
+                            val hostKey = link.activeHost?.hostId ?: ""
+                            val createRepo = remember(connection) {
+                                SessionCreateRepository(connection)
+                            }
+                            val vm: NewSessionViewModel = viewModel(
+                                key = "new-session-$scopeToken",
+                                factory = NewSessionViewModel.factory(
+                                    createSession = { workspaceId, preset ->
+                                        createRepo.create(
+                                            workspaceId = workspaceId,
+                                            agentPreset = preset,
+                                        )
+                                    },
+                                    initialPreset = container.presetPreferences
+                                        .presetFor(hostKey),
+                                    rememberPreset = { preset ->
+                                        container.presetPreferences.remember(hostKey, preset)
+                                    },
+                                ),
+                            )
+                            BackHandler(enabled = true) { newSessionOpen = false }
+                            ScreenTransition(route = "new-session") {
+                                NewSessionScreen(
+                                    viewModel = vm,
+                                    workspaces = workspaces,
+                                    workspacesLoading = workspacesLoading,
+                                    onBack = { newSessionOpen = false },
+                                    onCreated = { created, draft ->
+                                        // 顺序：先退这条路由、再把草稿挂到交接位上、
+                                        // 最后设 `openSession`。反过来的话 `when` 会先
+                                        // 命中 `openSession != null` 的聊天分支，而那时
+                                        // `newSessionOpen` 还是真——两个分支同时为真时
+                                        // 排在前面的是 `newSessionOpen`，页面会弹回新建页。
+                                        newSessionOpen = false
+                                        pendingNewSessionPrompt = draft
+                                        pendingNewSessionSessionId = created.sessionId
+                                        openSession = SessionSummary(
+                                            sessionId = created.sessionId,
+                                        )
+                                        openFile = null
+                                        resetSidebar()
+                                    },
+                                )
+                            }
+                        }
+
                         // R054：「添加远程」。放在最前面是因为它是从**任意一屏**（首页 /
                         // 设置页）发起的临时路由，不应被下面那三个常驻页面掩盖。
                         addHostOpen -> {
@@ -456,6 +557,7 @@ fun AppRoot(container: AppContainer) {
                                         container.runInBackground { container.removeHost(host.hostId) }
                                     },
                                     onAddRemote = { addHostOpen = true },
+                                    onNewSession = { newSessionOpen = true },
                                     onProbeHost = { host -> container.testHost(host) },
                                 )
                             }
@@ -508,6 +610,24 @@ fun AppRoot(container: AppContainer) {
                                 ),
                                 viewModelStoreOwner = owner,
                             )
+                            // R055：新建会话的交接。只在**刚建完那一次**有值，读到就
+                            // 立刻清空——`pendingNewSessionPrompt` 是可保存状态，留着不
+                            // 消费的话，用户手动返回首页再点进这条会话会把那句话重发一遍。
+                            //
+                            // 顺序要求：先 `onDraftChange` 再 `send`。`send()` 读的是
+                            // `composedText()`（即 `_draft`），不是参数；反过来的话它看到
+                            // 空草稿会直接 return（`text.isEmpty() && attachments.isEmpty()`）。
+                            LaunchedEffect(pendingNewSessionPrompt, pendingNewSessionSessionId) {
+                                val text = pendingNewSessionPrompt ?: return@LaunchedEffect
+                                val target = pendingNewSessionSessionId
+                                pendingNewSessionPrompt = null
+                                pendingNewSessionSessionId = null
+                                // 归属对不上：这段草稿是另一条会话的（进程重建后用户点开
+                                // 了别的会话）。丢掉而不是发进来——发错地方比不发更糟。
+                                if (target != session.sessionId) return@LaunchedEffect
+                                vm.onDraftChange(text)
+                                vm.send()
+                            }
                             // 系统返回键与标题栏「返回」等效：不然两层下钻后按返回会直接退出 App。
                             BackHandler(enabled = true) {
                                 openSession = null
