@@ -202,6 +202,24 @@ class RemoteStreamMux(
         return sent
     }
 
+    /**
+     * 把当前注册的所有流摘出来，交给调用方关闭它们的 Channel。
+     *
+     * 为什么不写 `streams.values.toList()`（B008 崩溃根因）：`toList()` 对 `Collection`
+     * 有一条**快路径**——`size == 1` 时直接取 `iterator().next()`。`size` 读完之后到
+     * `next()` 之间，若另一个线程（[failCarrier] 里同一段代码，断线时会并发进来）把表
+     * 清空了，迭代器已空 → `NoSuchElementException`，且**只在流数量恰好为 1 时命中**，
+     * 所以是偶发。真机栈：`RemoteStreamMux.close` ← `DshConnection.close` ←
+     * `AppContainer.installConnection` ← `switchHost`（切主机时崩）。
+     *
+     * 改用 `ConcurrentHashMap.forEach`（弱一致遍历，永不抛）逐条 `remove`：
+     * - 摘取是**逐条原子**的，只有 `remove` 真的摘到了才计入，两个线程同时摘同一批
+     *   不会重复关闭同一个 Channel；
+     * - 不再有「先快照、后 `clear()`」之间新注册的流被清掉却没被关闭的窗口——
+     *   那种流会留在表里等下一次摘取，而不是变成一个永远没人关闭的空 Channel。
+     */
+    private fun drainStreams(): List<Channel<MuxEvent>> = drainConcurrent(streams)
+
     /** 关闭整条 mux 与其上所有流。 */
     suspend fun close() {
         val doomed = mutex.withLock {
@@ -214,9 +232,7 @@ class RemoteStreamMux(
             current
         }
         doomed?.close(1000, "disposed")
-        val channels = streams.values.toList()
-        streams.clear()
-        channels.forEach { it.close() }
+        drainStreams().forEach { it.close() }
         // 主动关闭不是故障：把载波退回 Idle，并清掉上次的故障记忆与连续失败计数。
         // 不清 `consecutiveFailures` 的话，下次断线会从前一轮的计数继续往上加
         //（「第 5 次失败」而实际上刚才是第 1 次）。
@@ -690,9 +706,7 @@ class RemoteStreamMux(
         val code = (cause as? TypertException)?.code ?: TypertException.CODE_TRANSPORT
         if (firstReport) recordFailure(code, cause.message ?: cause.javaClass.simpleName)
         live.deferred.completeExceptionally(cause)
-        val channels = streams.values.toList()
-        streams.clear()
-        channels.forEach { it.close(cause) }
+        drainStreams().forEach { it.close(cause) }
     }
 
     private companion object {
