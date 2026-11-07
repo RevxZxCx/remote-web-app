@@ -23,7 +23,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalDensity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -31,6 +35,10 @@ import com.revxzxcx.remotewebapp.ImeInsets
 import com.revxzxcx.remotewebapp.core.AppContainer
 import com.revxzxcx.remotewebapp.core.AppState
 import com.revxzxcx.remotewebapp.core.credentials.DeviceCredential
+import com.revxzxcx.remotewebapp.core.notify.NoticeChannels
+import com.revxzxcx.remotewebapp.core.notify.NoticeIntents
+import com.revxzxcx.remotewebapp.core.notify.NoticeStatus
+import com.revxzxcx.remotewebapp.core.notify.noticeStatusDetail
 import com.revxzxcx.remotewebapp.core.session.SessionCreateRepository
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.ui.chat.ChatScreen
@@ -50,7 +58,9 @@ import com.revxzxcx.remotewebapp.ui.home.NewSessionScreen
 import com.revxzxcx.remotewebapp.ui.home.NewSessionViewModel
 import com.revxzxcx.remotewebapp.ui.pair.PairScreen
 import com.revxzxcx.remotewebapp.ui.pair.PairViewModel
+import com.revxzxcx.remotewebapp.ui.settings.NoticeSettingsScreen
 import com.revxzxcx.remotewebapp.ui.settings.SettingsScreen
+import com.revxzxcx.remotewebapp.ui.settings.openNoticeSystemSettings
 import com.revxzxcx.remotewebapp.ui.theme.Motion
 import kotlinx.coroutines.launch
 
@@ -149,6 +159,11 @@ private fun ScreenTransition(route: String, content: @Composable () -> Unit) {
 @Composable
 fun AppRoot(container: AppContainer) {
     val state by container.state.collectAsState()
+    // 跳到系统设置要一个 Context（见 NoticeSystemSettings.openNoticeSystemSettings）。
+    // 用 Activity 的 Context 而不是 applicationContext：Toast 与 startActivity
+    // 在 application context 上虽然能跑，但主题与任务栈归属都是 Activity 才对。
+    val uiContext = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     // R054 / B004：订阅**一份**快照（凭证簿 + 它对应那条连接 + 连接代次）。
     //
@@ -204,6 +219,26 @@ fun AppRoot(container: AppContainer) {
 
     /** 是否停在设置页（M5-9 主题切换的入口）。 */
     var openSettings by rememberSaveable { mutableStateOf(false) }
+
+    /**
+     * 是否停在「通知与后台保活」二级页（R056）。
+     *
+     * 与 [openSettings] 分开：二级页是从设置页点进去的，返回要**退回设置页**而不是首页。
+     * 合成一个状态就得记「从哪儿来」，那比多一个布尔值麻烦得多。
+     */
+    var openNoticeSettings by rememberSaveable { mutableStateOf(false) }
+
+    /**
+     * 通知四层开关的快照（R056）。
+     *
+     * 只在这一页打开时现查一次，并**在权限弹窗返回、或用户从系统设置切回来时重查**：
+     * 系统不会因为我们改了开关就回调，唯一能知道「用户刚在系统里打开过」的时机，
+     * 就是他回到这个页面的时候。
+     *
+     * 初值用默认（全通）而不是全 false：进入页面到第一次检测之间只有一帧，
+     * 用 false 会让诊断卡闪一下「通知现在不会响」。
+     */
+    var noticeStatus by remember { mutableStateOf(NoticeStatus()) }
 
     /**
      * 是否停在「添加远程」页（R054）。
@@ -373,10 +408,52 @@ fun AppRoot(container: AppContainer) {
                     val workspaces = homeState.snapshot.items
                     val workspacesLoading = homeState.loading
 
+                    // R056：把首页这份会话列表播种进通知的标题表。
+                    //
+                    // 通知文案要写「任务结束 · 某某会话」，而事件流里只带 sessionId；
+                    // 一个个去查 `session/get` 既慢又多一次请求，列表本来就已经有一份
+                    // 标题了。这里只在列表真的变了才播种（`remember` 的参数是列表本身），
+                    // 避免每帧都刷一次标题表。
+                    val notifier = container.notifier
+                    LaunchedEffect(homeState.sessions.items) {
+                        notifier.rememberTitles(
+                            homeState.sessions.items.map { it.sessionId to it.title },
+                        )
+                    }
+
                     // 进入会话即「看过了」：账本把这条会话的两枚未读提醒熄灭并同步进列表。
                     // 看文件（`file != null`）也算，那是同一个会话的内容。
                     LaunchedEffect(session?.sessionId) {
                         homeVm.onSessionOpened(session?.sessionId)
+                        // R056：通知那边也要知道用户正看着哪条会话——看着的那条跑完了
+                        // 不该再弹横幅（用户眼睛就在上面），同时把它的完成通知撤掉。
+                        val notifier = container.notifier
+                        if (session == null) {
+                            notifier.setViewingSession(null)
+                        } else {
+                            notifier.onSessionOpened(session.sessionId)
+                        }
+                    }
+
+                    // R056：点通知进来要落到那条会话。
+                    //
+                    // 放在 `Paired` 分支里而不是 `AppRoot` 顶层：冷启动时通知先到、凭证簿
+                    // 后读完，只有在连接就绪之后才有 `SessionSummary` 可造，也才谈得上跳转。
+                    //
+                    // 键是 `noticeTarget` 这个可空字符串：它是 `StateFlow.collectAsState()`
+                    // 出来的值，变化才会重跑（直接用 flow 当键只会在首次组合时跑一次）。
+                    val noticeTarget by NoticeIntents.pendingSessionId.collectAsState()
+                    LaunchedEffect(noticeTarget) {
+                        val target = noticeTarget ?: return@LaunchedEffect
+                        // 消费即清：否则用户自己返回首页后，下一次重组又把他弹进那条会话。
+                        NoticeIntents.consume()
+                        // 只带 sessionId 的 `SessionSummary` 就够：聊天页会自己拉详情，
+                        // 而标题在拉到详情之前会先显示兜底名（与列表里一致）。
+                        if (session?.sessionId == target) return@LaunchedEffect
+                        openSession = SessionSummary(sessionId = target)
+                        openFile = null
+                        newSessionOpen = false
+                        resetSidebar()
                     }
                     when {
                         // R055：「新增会话」。与「添加远程」同级，也是临时路由。
@@ -493,9 +570,67 @@ fun AppRoot(container: AppContainer) {
                             }
                         }
 
+                        openNoticeSettings -> {
+                            BackHandler(enabled = true) { openNoticeSettings = false }
+                            // 进页面时查一次，并**在每次回到前台时重查**。
+                            //
+                            // 为什么必须是 ON_RESUME 而不是「页面被重新组合」：用户点「去系统设置」
+                            // 跳走后 Activity 只是 onStop，回来时 Composition 并不会重建——
+                            // 页面还停在那儿，`LaunchedEffect(openNoticeSettings)` 的键没变也不会
+                            // 再跑，于是屏幕上仍是「通知现在不会响」，而他刚刚已经打开了通知。
+                            // 这种「明明改好了界面却说没好」比一开始就没提示更伤。
+                            //
+                            // 系统不会因为我们改了通知设置就回调，唯一能知道「用户刚在系统里
+                            // 动过」的时机就是他回到这个页面。
+                            DisposableEffect(lifecycleOwner) {
+                                val observer = LifecycleEventObserver { _, event ->
+                                    if (event == Lifecycle.Event.ON_RESUME) {
+                                        noticeStatus = container.noticeStatus()
+                                    }
+                                }
+                                lifecycleOwner.lifecycle.addObserver(observer)
+                                onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+                            }
+                            LaunchedEffect(openNoticeSettings) {
+                                noticeStatus = container.noticeStatus()
+                            }
+                            ScreenTransition(route = "notice-settings") {
+                                NoticeSettingsScreen(
+                                    status = noticeStatus,
+                                    onBack = { openNoticeSettings = false },
+                                    onToggleDone = { enabled ->
+                                        container.setNoticeChannelEnabled(NoticeChannels.DONE, enabled)
+                                        noticeStatus = container.noticeStatus()
+                                    },
+                                    onToggleAsk = { enabled ->
+                                        container.setNoticeChannelEnabled(NoticeChannels.ASK, enabled)
+                                        noticeStatus = container.noticeStatus()
+                                    },
+                                    onToggleLockScreenDetail = { enabled ->
+                                        container.setLockScreenDetail(enabled)
+                                        noticeStatus = container.noticeStatus()
+                                    },
+                                    // 必须**先**记账再弹框：永久拒绝后系统不再弹框，等结果就永远等不到。
+                                    onPermissionAsked = { container.markNoticePermissionRequested() },
+                                    onPermissionResult = { granted ->
+                                        container.onNoticePermissionResult(granted)
+                                        noticeStatus = container.noticeStatus()
+                                    },
+                                    onOpenSystemSettings = { uiContext.openNoticeSystemSettings() },
+                                )
+                            }
+                        }
+
                         openSettings -> {
                             // 主题是**进程级**偏好，不依赖配对状态，所以设置页不读 connection。
                             BackHandler(enabled = true) { openSettings = false }
+                            // 每次进设置页都重查一次系统状态。`noticeStatus` 的初值是**全通**
+                            // （为了避免首帧闪一下「通知不会响」），若摘要直接读它，就会把「还没
+                            // 授权」这种最常见的情况显示成「一切正常」——用户看到正常就不会点
+                            // 进去了，而四层诊断的全部意义就是让他点进去。
+                            LaunchedEffect(openSettings) {
+                                if (openSettings) noticeStatus = container.noticeStatus()
+                            }
                             ScreenTransition(route = "settings") {
                                 SettingsScreen(
                                     themePreferences = container.themePreferences,
@@ -513,8 +648,14 @@ fun AppRoot(container: AppContainer) {
                                     onRemoveActiveHost = {
                                         book.active?.let { pendingRemoveHost = it }
                                     },
+                                    // 通知摘要现算：设置页不读系统服务，只画结果。
+                                    // ⚠️ 必须读上面 `LaunchedEffect(openSettings)` 刷新过的值。
+                                    // 它初值是「全通」，直接读初值会把未授权显示成一切正常。
+                                    noticeSummary = noticeStatusDetail(noticeStatus),
+                                    onOpenNoticeSettings = { openNoticeSettings = true },
                                 )
-                            }                        }
+                            }
+                        }
 
                         session == null -> {
                             ScreenTransition(route = "home") {

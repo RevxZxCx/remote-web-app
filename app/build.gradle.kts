@@ -79,6 +79,13 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    // R056：判断「App 是否在前台」用进程级生命周期。Activity 生命周期不行——
+    // 分屏/画中画/刚按 Home 而 Activity 还没 onStop 时都会判错，
+    // 而判错的后果是「用户明明在用，通知还是弹出来」或「切出去收不到」。
+    implementation(libs.androidx.lifecycle.process)
+    // lifecycle-process 2.10.0 的 POM 点名 startup-runtime 1.1.1，离线缓存里只有 1.2.0。
+    // 显式提到 1.2.0 才能离线构建；顺带避开 1.1.1 里那批 provider 初始化竞态的修复前行为。
+    implementation(libs.androidx.startup.runtime)
     implementation(libs.androidx.activity.compose)
 
     implementation(platform(libs.androidx.compose.bom))

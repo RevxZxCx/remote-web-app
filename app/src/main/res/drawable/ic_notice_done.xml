@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  R056：通知小图标（「任务结束」频道）。
+
+  通知小图标有两条硬约束，不注意就会「通知不显示、也不报错」：
+  1. **必须是纯白剪影 + 透明背景**。系统会把它当成 alpha 蒙版上色，
+     带颜色的图标会变成一团黑块（Android 5+ 行为）。
+  2. **尺寸要 24dp**，且图形要贴边留出约 1dp 的安全区，否则部分 ROM 会裁掉边缘。
+
+  图形用一个对勾：跑完是「达成」的语义，比感叹号/铃铛更能一眼区分两个频道。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M9.55,17.6L4.4,12.45L6.17,10.68L9.55,14.06L17.83,5.78L19.6,7.55L9.55,17.6Z" />
+</vector>

@@ -14,11 +14,19 @@ import com.revxzxcx.remotewebapp.core.credentials.CredentialStore
 import com.revxzxcx.remotewebapp.core.credentials.DeviceCredential
 import com.revxzxcx.remotewebapp.core.credentials.KeystoreCredentialStore
 import com.revxzxcx.remotewebapp.core.net.HttpClients
+import com.revxzxcx.remotewebapp.core.notify.NoticeChannels
+import com.revxzxcx.remotewebapp.core.notify.NoticeIntents
+import com.revxzxcx.remotewebapp.core.notify.NoticeSettings
+import com.revxzxcx.remotewebapp.core.notify.NoticeStatus
+import com.revxzxcx.remotewebapp.core.notify.NotifyCoordinator
+import com.revxzxcx.remotewebapp.core.notify.NotificationCenter
+import com.revxzxcx.remotewebapp.core.notify.SessionNameTable
 import com.revxzxcx.remotewebapp.core.pairing.PairingApi
 import com.revxzxcx.remotewebapp.core.pairing.PairingCoordinator
 import com.revxzxcx.remotewebapp.core.prefs.PresetPreferences
 import com.revxzxcx.remotewebapp.core.prefs.ThemePreferences
 import com.revxzxcx.remotewebapp.core.protocol.DshJson
+import com.revxzxcx.remotewebapp.core.protocol.TypertException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -132,6 +140,142 @@ class AppContainer(context: Context) {
     val presetPreferences: PresetPreferences = PresetPreferences(appContext)
 
     /**
+     * 通知相关偏好（R056）：两个 App 内开关 + 「权限问过没」。
+     *
+     * 与 [themePreferences] 同样与容器同寿，构造时同步读一次 SharedPreferences。
+     */
+    val noticeSettings: NoticeSettings = NoticeSettings(appContext)
+
+    /**
+     * 系统通知的唯一出口（R056）。
+     *
+     * 只在这里建一个实例：`NotificationCenter` 内部持有「会话 → 通知 id」的池子
+     * （[NoticeIdPool]），多建一个就会有两套 id 互相顶掉——表现为「跑完的会话点了没反应」。
+     */
+    val notificationCenter: NotificationCenter = NotificationCenter(appContext, noticeSettings)
+
+    /**
+     * 事件 → 通知的翻译层（R056）。
+     *
+     * 挂在 [appScope] 上而不是任何界面作用域：用户在聊天页跑任务、按 Home 切出去，
+     * 只要进程还在，事件就该继续变成通知。这也是 Q1「只做事件→通知」的边界——
+     * **进程被系统回收之后什么都收不到**，那种情况由设置页的提示来兜。
+     */
+    val notifier: NotifyCoordinator = NotifyCoordinator(
+        scope = appScope,
+        center = notificationCenter,
+        settings = noticeSettings,
+        names = SessionNameTable(),
+    )
+
+    /**
+     * 回答一条来自通知按钮的审批（R056）。
+     *
+     * 由 [com.revxzxcx.remotewebapp.core.notify.NoticeActionReceiver] 调用：接收器
+     * `onReceive` 返回后进程随时可能被收回，所以真正的网络往返必须在 [appScope] 上跑。
+     *
+     * ## 失败为什么要把通知改成「没送出」
+     * 用户在通知栏点的按钮，此刻 App 可能根本没在前台，没有地方放错误横幅——这是
+     * 「不弹提示」的正当理由，但**不是「什么都不说」的理由**。第一版就是 `runCatching {}`
+     * 直接吞掉，结果是：连接断了，用户点「批准」，通知原样挂着、按钮原样能点，
+     * 再点几次全是同样的沉默。他唯一能得出的结论是「这按钮坏了」，而任务正卡在那里等。
+     *
+     * 所以失败时调 [NotificationCenter.postAskFailed] 把那条通知原地改成
+     * 「授权没能送出」+ 原因，按钮保留供重试。这是用户唯一能看到的通道。
+     *
+     * 成功时这里什么都不做：请求会从 `approvals` 消失，撤通知由
+     * [NotifyCoordinator.syncApprovals] 的对账负责（单一职责，不在这里重复撤）。
+     */
+    fun answerFromNotification(eventId: String, allow: Boolean) {
+        appScope.launch {
+            val client = linkStore.current().connection?.remoteEvents
+            if (client == null) {
+                // 连接都还没建立：与其静默失败，不如立刻把原因写回那条通知。
+                notificationCenter.postAskFailed(eventId, DISCONNECTED_HINT)
+                return@launch
+            }
+            try {
+                client.answer(eventId, allow)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 作用域被取消（进程要退），不是回答失败：不谎报「没送出」。
+                throw e
+            } catch (e: Exception) {
+                notificationCenter.postAskFailed(eventId, describeAnswerFailure(e))
+            }
+        }
+    }
+
+    /** 连接不在时给用户的说明；也用作各类传输失败的统一说辞。 */
+    private val DISCONNECTED_HINT = "连接已断开，进 App 重试。"
+
+    /** 把回答失败的原因翻成一句用户看得懂的话（通知栏里没有错误码的位置）。 */
+    private fun describeAnswerFailure(cause: Throwable): String {
+        val code = (cause as? TypertException)?.code
+        return when {
+            code == null -> cause.message?.takeIf { it.isNotBlank() } ?: DISCONNECTED_HINT
+            code.contains("transport", ignoreCase = true) -> DISCONNECTED_HINT
+            code.contains("unavailable", ignoreCase = true) -> "这条请求已经失效了，进 App 看看。"
+            else -> DISCONNECTED_HINT
+        }
+    }
+
+    /**
+     * 此刻四层通知开关的完整状态（R056 设置页用）。
+     *
+     * 四层是：系统总开关 / API 33 运行时权限 / 两个系统频道 / 两个 App 内开关。
+     * 全部在这里读一次，是为了让 UI 只拿到一个纯数据对象——设置页不读 `DshConnection`
+     * 也不读系统服务，它只负责把 [NoticeStatus] 画出来并回传动作。
+     *
+     * **只读，不修改任何状态。** 每次调用都现查，因为用户随时可能在系统设置里改完
+     * 再切回来（这时不会有任何回调通知我们）。
+     */
+    fun noticeStatus(): NoticeStatus = NoticeStatus(
+        systemEnabled = notificationCenter.systemEnabled(),
+        permissionGranted = notificationCenter.runtimePermissionGranted(),
+        requested = noticeSettings.permissionRequested,
+        doneEnabled = noticeSettings.doneEnabled,
+        askEnabled = noticeSettings.askEnabled,
+        lockScreenDetail = noticeSettings.lockScreenDetail,
+        askChannelEnabled = notificationCenter.isChannelEnabled(NoticeChannels.ASK),
+        doneChannelEnabled = notificationCenter.isChannelEnabled(NoticeChannels.DONE),
+    )
+
+    /**
+     * 改 App 内开关（R056）。三条都只是写偏好——它们不影响已在队列里的通知，
+     * 下一条事件到来时才生效，所以不需要在这里撤任何东西。
+     */
+    fun setNoticeChannelEnabled(channelId: String, enabled: Boolean) {
+        noticeSettings.setChannelEnabled(channelId, enabled)
+    }
+
+    /** 锁屏是否显示详细内容（R056）。 */
+    fun setLockScreenDetail(enabled: Boolean) {
+        noticeSettings.lockScreenDetail = enabled
+    }
+
+    /**
+     * 记录「已经主动请求过通知权限」（R056）。
+     *
+     * 必须在**调用 `requestPermissions` 之前**置位，不能等结果：权限被永久拒绝后，
+     * 系统会直接回调拒绝且不再弹框，等结果就永远等不到，App 会一遍遍以为「还没问过」
+     * 并一次次毫无反应地调下去。
+     */
+    fun markNoticePermissionRequested() {
+        noticeSettings.permissionRequested = true
+    }
+
+    /**
+     * 权限弹窗有了结果（R056）。
+     *
+     * 只做一件事：如果拿到了，把频道补齐——首次安装时 `ensureChannels()` 在
+     * `bootstrap()` 里跑过，但那之后用户可能已经清掉了 App 数据里的通知设置，
+     * 系统里的 channel 也就跟着没了。再调一次是幂等的。
+     */
+    fun onNoticePermissionResult(granted: Boolean) {
+        if (granted) notificationCenter.ensureChannels()
+    }
+
+    /**
      * 离线缓存（需求 FR-4.3）。
      *
      * 惰性建库：未配对的用户（只停在配对页）永远不该付出建 SQLite 文件的代价。
@@ -186,6 +330,10 @@ class AppContainer(context: Context) {
 
     /** 冷启动：把落盘的凭证簿读回来。解不开 / 不存在都按未配对处理。 */
     suspend fun bootstrap() {
+        // 频道必须在**任何 notify() 之前**建好：Android 8+ 往一个不存在的频道发通知，
+        // 系统直接丢弃且不抛异常（`NO_CHANNEL` 只会打个日志）。放在 bootstrap 里而不是
+        // 构造里，是因为建频道要碰系统服务，而本类的构造被承诺不碰磁盘/系统（见类 KDoc）。
+        notificationCenter.ensureChannels()
         // 已在运行中且簿没变：复用现有连接（配置变更会重跑 bootstrap，见 installConnection）。
         val loaded = credentialStore.loadBook()
         val active = loaded.active?.takeIf { it.isUsable }
@@ -395,6 +543,9 @@ class AppContainer(context: Context) {
                 // 复用 = 同一个连接实例，`publish` 据此保持代次不变（不会重建整组 ViewModel）。
                 linkStore.publish(book = book, connection = plan.connection)
                 _state.value = AppState.Paired
+                // 通知订阅跟着连接走。复用分支里 `attach` 收到的是同一个实例，
+                // 它会立刻返回（不改订阅）——配置变更重跑 bootstrap 时不会重复订一遍。
+                notifier.attach(plan.connection.remoteEvents)
             }
 
             ConnectionPlan.Drop -> {
@@ -404,6 +555,13 @@ class AppContainer(context: Context) {
                 val previous = linkStore.current().connection
                 linkStore.publish(book = book, connection = null)
                 _state.value = AppState.Unpaired
+                // 先退订再关连接：反过来的话，`RemoteEventsClient` 已经随连接一起死了，
+                // 协调器手里那个引用指向一条不再发事件的流，重连后也不会自己好。
+                notifier.attach(null)
+                // 退配对 = 这台设备不再属于任何主机：通知栏里那些条目全是上一台机器的，
+                // 留着只会让用户点进一个空 App。待打开的会话 id 同理。
+                notificationCenter.cancelAll()
+                NoticeIntents.clear()
                 previous?.close()
             }
 
@@ -439,6 +597,15 @@ class AppContainer(context: Context) {
         // 聊天页。晚一步的代价是「服务端已经把请求抛给第一个监听者」——没有监听者时它会
         // 一直等到请求自己的 signal 超时，用户看到的就是毫无反应（RemoteEventsClient KDoc）。
         rebuilt.remoteEvents.start()
+        // 上一台主机留下的通知必须先撤掉（R056）。它们背后是**另一台机器**上的会话：
+        // id 在这台机器上不存在，点进去只会得到「会话不存在」；审批通知更危险——
+        // 它的「批准」按钮会把回答发给一台根本不相干的机器，而用户看不出区别。
+        // 放在 attach 之前：撤完刚好接上新连接的事件，中间不会漏也不会掺。
+        notificationCenter.cancelAll()
+        // 通知订阅同样要跟着新连接走：`NotifyCoordinator` 只在构造时订一次是不行的——
+        // 换主机就换了一个 `RemoteEventsClient`，旧引用指向一条已死的流，
+        // 而那种「静默不再响」最难被发现（用户只会觉得「最近怎么不提醒了」）。
+        notifier.attach(rebuilt.remoteEvents)
         // B004 的关键一行：新簿与新连接在**同一次**赋值里换掉。放到这里（而不是更早）是因为
         // 上面每个挂起点之后都不该让观察者看到半新半旧的一份。
         linkStore.publish(book = book, connection = rebuilt)

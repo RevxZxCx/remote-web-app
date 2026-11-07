@@ -1,7 +1,12 @@
 package com.revxzxcx.remotewebapp
 
 import android.app.Application
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.revxzxcx.remotewebapp.core.AppContainer
+import com.revxzxcx.remotewebapp.core.notify.NoticeActionHost
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -42,14 +47,65 @@ object ImeInsets {
  * 本期不引入 Hilt：模块数量还少，一个手工容器 + `ViewModelProvider.Factory` 足够，
  * 也少一个注解处理器（决策记录 D05 的补充）。
  */
-class DshApplication : Application() {
+class DshApplication : Application(), NoticeActionHost {
 
     /** 应用级依赖容器，进程内唯一。 */
     lateinit var container: AppContainer
         private set
 
+    /**
+     * 通知里「批准 / 拒绝」按钮落到这里（R056）。
+     *
+     * **这个 `implements` 不是可选的。** [NoticeActionReceiver] 第一件事就是
+     * `context.applicationContext as? NoticeActionHost`：拿不到就只撤掉通知条然后返回。
+     * 少了它，用户点「批准」的观感是「通知消失了，但什么都没发生」——比按钮不存在更糟，
+     * 因为任务其实还在原地等授权，界面上那张审批卡也还在。
+     *
+     * 真机验收时这个遗漏就露过一次：单测只测 [AppContainer.answerFromNotification]，
+     * 从不经过 `Application` 这一跳，所以全绿。
+     */
+    override fun answerFromNotification(eventId: String, allow: Boolean) {
+        container.answerFromNotification(eventId, allow)
+    }
+
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+        watchForeground()
+    }
+
+    /**
+     * 把「App 现在是不是在前台」推给通知协调器（R056）。
+     *
+     * **为什么用 [ProcessLifecycleOwner] 而不是 Activity 生命周期**：
+     * 1. 分屏/画中画时 Activity 仍可见，但用户注意力可能在另一半屏——按 Activity 判会漏发通知；
+     * 2. 反过来，从通知点进来、旋转屏幕重建时 Activity 会经历 `onStop → onStart`，
+     *    按 Activity 判会误判成「切走了」而多发一条通知；
+     * 3. 进程级生命周期只在**所有** Activity 都停下之后才 `onStop`，语义正好是「用户离开了 App」。
+     *
+     * 判错的代价是双向的：判「在前台」则该响的不响（用户以为任务卡住），
+     * 判「在后台」则用户眼皮底下弹横幅（更烦人）。所以这条信号必须准。
+     *
+     * 观察者加在 `Application.onCreate`（主线程，且早于任何 Activity），
+     * 而不是某个 Composable 里——通知的触发不依赖任何界面是否活着，这也正是
+     * 「切到后台」这个场景的全部意义。
+     */
+    private fun watchForeground() {
+        val notifier = container.notifier
+        val lifecycle = ProcessLifecycleOwner.get().lifecycle
+        // 先按当前实际状态对齐一次。进程刚起来时还没 Activity 启动，
+        // 这里会是 false——这是对的：此刻用户确实还没看到界面。
+        notifier.setForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+        lifecycle.addObserver(
+            object : DefaultLifecycleObserver {
+                override fun onStart(owner: LifecycleOwner) {
+                    notifier.setForeground(true)
+                }
+
+                override fun onStop(owner: LifecycleOwner) {
+                    notifier.setForeground(false)
+                }
+            },
+        )
     }
 }

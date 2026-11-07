@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>R056 效果图 · 系统通知（会话完成 / 提问 / 审批 + 一加保活）</title>
+<style>
+:root{
+  --primary:#5AA2FF; --onPrimary:#04121F;
+  --background:#0B1420; --onBackground:#E6EFFA;
+  --surface:#111C2B; --onSurface:#E6EFFA;
+  --surfaceVariant:#1A2942; --onSurfaceVariant:#9BB0C8;
+  --outline:#31485F; --outlineVariant:#22334A;
+  --tertiary:#F2C14E; --running:#4ADE80; --error:#FF8A80;
+  --r-xs:6px; --r-sm:10px; --r-md:14px; --r-lg:20px; --r-xl:28px; --r-pill:999px;
+  --t-fast:140ms; --t-med:240ms; --t-slow:360ms;
+  --ease:cubic-bezier(.2,0,0,1);
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#060B12;color:var(--onBackground);
+  font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:13px;line-height:1.6;padding:28px 24px 80px}
+.wrap{max-width:1640px;margin:0 auto}
+h1{font-size:19px;font-weight:600;letter-spacing:.2px}
+.sub{color:var(--onSurfaceVariant);font-size:12px;margin-top:6px;line-height:1.8}
+.sub code{font-family:var(--mono);font-size:11px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+section{margin-top:40px}
+h2{font-size:14px;font-weight:600;color:var(--primary);display:flex;align-items:center;gap:8px}
+h2 .n{width:20px;height:20px;border-radius:50%;background:rgba(90,162,255,.14);
+  border:1px solid rgba(90,162,255,.4);font-size:11px;display:flex;
+  align-items:center;justify-content:center;color:var(--primary);flex:0 0 20px}
+.note{color:var(--onSurfaceVariant);font-size:11.5px;line-height:1.85;margin-top:8px}
+.note b{color:var(--onSurface);font-weight:600}
+.note code{font-family:var(--mono);font-size:10.5px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+.row{display:flex;gap:26px;align-items:flex-start;flex-wrap:wrap;margin-top:16px}
+.warnbox{background:rgba(255,138,128,.08);border-left:2px solid rgba(255,138,128,.55);
+  padding:9px 12px;border-radius:0 var(--r-sm) var(--r-sm) 0;margin-top:10px;
+  font-size:11.5px;line-height:1.85;color:var(--onSurfaceVariant)}
+.warnbox b{color:var(--error);font-weight:600}
+.okbox{background:rgba(74,222,128,.07);border-left:2px solid rgba(74,222,128,.5);
+  padding:9px 12px;border-radius:0 var(--r-sm) var(--r-sm) 0;margin-top:10px;
+  font-size:11.5px;line-height:1.85;color:var(--onSurfaceVariant)}
+.okbox b{color:var(--running);font-weight:600}
+
+/* ── 手机外壳 ─────────────────────────────────────────── */
+.phone{width:360px;flex:0 0 360px;background:var(--background);
+  border-radius:22px;border:1px solid var(--outlineVariant);
+  overflow:hidden;box-shadow:0 22px 60px rgba(0,0,0,.6);
+  display:flex;flex-direction:column;height:640px;position:relative}
+.phone.light{--background:#F4F7FB;--onBackground:#182430;--surface:#FFFFFF;
+  --onSurface:#182430;--surfaceVariant:#E9EFF7;--onSurfaceVariant:#45586D;
+  --outline:#C7D5E6;--outlineVariant:#DDE6F1;--primary:#1F6FEB;
+  --tertiary:#C08A12;--running:#15803D;--error:#C62828;
+  color:var(--onBackground);background:var(--background)}
+.cap{font-size:10.5px;color:var(--onSurfaceVariant);margin-top:7px;text-align:center;
+  width:360px;flex:0 0 360px;line-height:1.6}
+.cap b{color:var(--primary);font-weight:600}
+.status{height:26px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 13px;font-size:9.5px;color:var(--onSurfaceVariant);letter-spacing:.3px;flex:0 0 auto;z-index:3}
+
+/* ── 通知栏（下拉后的样子） ───────────────────────────── */
+.shade{flex:1;display:flex;flex-direction:column;padding:4px 10px 10px;gap:7px;
+  overflow:hidden;background:linear-gradient(180deg,rgba(26,41,66,.5),transparent 70%)}
+.phone.light .shade{background:linear-gradient(180deg,rgba(233,239,247,.85),transparent 70%)}
+.shade-head{display:flex;justify-content:space-between;align-items:center;
+  font-size:10px;color:var(--onSurfaceVariant);padding:0 3px 2px}
+.notif{background:var(--surface);border:1px solid var(--outlineVariant);
+  border-radius:var(--r-md);padding:8px 10px 9px;box-shadow:0 6px 18px rgba(0,0,0,.4)}
+.phone.light .notif{box-shadow:0 4px 14px rgba(24,36,48,.1)}
+.nhead{display:flex;align-items:center;gap:5px;font-size:9px;color:var(--onSurfaceVariant)}
+.nicon{width:14px;height:14px;border-radius:4px;display:flex;align-items:center;
+  justify-content:center;font-size:8px;background:rgba(90,162,255,.18);color:var(--primary);flex:0 0 14px}
+.nicon.ask{background:rgba(242,193,78,.18);color:var(--tertiary)}
+.nicon.bad{background:rgba(255,138,128,.18);color:var(--error)}
+.nicon.ok{background:rgba(74,222,128,.18);color:var(--running)}
+.nhead .sp{flex:1}
+.ntitle{font-size:11.5px;font-weight:600;margin-top:4px;line-height:1.5;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nbody{font-size:10px;color:var(--onSurfaceVariant);margin-top:2px;line-height:1.65;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.nacts{display:flex;gap:5px;margin-top:7px}
+.nact{font-size:9.5px;padding:4px 10px;border-radius:var(--r-sm);
+  background:rgba(90,162,255,.14);color:var(--primary);border:1px solid rgba(90,162,255,.3)}
+.nact.dgr{background:rgba(255,138,128,.1);color:var(--error);border-color:rgba(255,138,128,.3)}
+.notif.ongoing{border-color:rgba(90,162,255,.35);background:rgba(90,162,255,.06)}
+.notif.grouped{opacity:.86}
+.gstack{margin-top:-2px;font-size:9px;color:var(--onSurfaceVariant);padding-left:10px}
+
+/* ── 锁屏 ─────────────────────────────────────────────── */
+.lock{flex:1;display:flex;flex-direction:column;align-items:center;padding-top:38px;
+  background:linear-gradient(180deg,#0A1626 0%,#0B1420 55%,#111C2B 100%);gap:0}
+.phone.light .lock{background:linear-gradient(180deg,#DCE8F6 0%,#F4F7FB 60%,#FFFFFF 100%)}
+.lock-time{font-size:44px;font-weight:200;letter-spacing:1px;color:var(--onSurface);line-height:1}
+.lock-date{font-size:10px;color:var(--onSurfaceVariant);margin-top:5px;margin-bottom:20px}
+.lock-list{width:100%;padding:0 12px;display:flex;flex-direction:column;gap:7px}
+.lock-hint{font-size:9.5px;color:var(--onSurfaceVariant);margin-top:auto;
+  margin-bottom:14px;letter-spacing:.4px}
+
+/* ── 设置页 / 引导页 ──────────────────────────────────── */
+.topbar{height:50px;display:flex;align-items:center;gap:4px;padding:0 6px 0 4px;
+  border-bottom:1px solid var(--outlineVariant);flex:0 0 auto;z-index:2}
+.tb-btn{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;color:var(--onSurface);font-size:15px;flex:0 0 34px}
+.tb-mid{flex:1;min-width:0;padding:0 4px}
+.tb-t1{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb-t2{font-size:9px;color:var(--onSurfaceVariant);margin-top:1px}
+.body-scroll{flex:1;overflow:hidden;padding:8px 14px 14px;display:flex;flex-direction:column;gap:8px}
+.seclbl{font-size:9px;letter-spacing:.7px;color:var(--primary);font-weight:600;
+  margin:8px 2px -2px}
+.cardgrp{background:var(--surface);border:1px solid var(--outlineVariant);
+  border-radius:var(--r-md);overflow:hidden}
+.srow{display:flex;align-items:center;gap:10px;padding:10px 12px;min-height:46px}
+.srow+.srow{border-top:1px solid var(--outlineVariant)}
+.srow .st{flex:1;min-width:0}
+.st1{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.st2{font-size:9.5px;color:var(--onSurfaceVariant);margin-top:1px;line-height:1.5}
+.sw{width:34px;height:20px;border-radius:var(--r-pill);background:var(--surfaceVariant);
+  border:1px solid var(--outline);position:relative;flex:0 0 34px}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;
+  border-radius:50%;background:var(--onSurfaceVariant);transition:all var(--t-fast)}
+.sw.on{background:rgba(90,162,255,.28);border-color:rgba(90,162,255,.6)}
+.sw.on::after{left:16px;background:var(--primary)}
+.chev{font-size:9px;color:var(--onSurfaceVariant);flex:0 0 auto}
+
+/* 引导清单 */
+.gitem{display:flex;gap:10px;padding:11px 12px;align-items:flex-start}
+.gitem+.gitem{border-top:1px solid var(--outlineVariant)}
+.gchk{width:17px;height:17px;border-radius:5px;flex:0 0 17px;margin-top:1px;
+  border:1.4px solid var(--outline);display:flex;align-items:center;
+  justify-content:center;font-size:10px;color:transparent}
+.gchk.done{background:rgba(74,222,128,.2);border-color:rgba(74,222,128,.6);color:var(--running)}
+.gchk.unk{border-style:dashed;color:var(--tertiary)}
+.gt{flex:1;min-width:0}
+.gt1{font-size:11.5px;font-weight:600;line-height:1.5}
+.gt2{font-size:9.5px;color:var(--onSurfaceVariant);line-height:1.65;margin-top:2px}
+.gt2 code{font-family:var(--mono);font-size:9px;background:var(--surfaceVariant);
+  padding:0 3px;border-radius:2px}
+.gbtn{font-size:9.5px;padding:4px 9px;border-radius:var(--r-sm);flex:0 0 auto;
+  color:var(--primary);border:1px solid rgba(90,162,255,.32);white-space:nowrap}
+.gbtn.unk{color:var(--tertiary);border-color:rgba(242,193,78,.34)}
+.banner{display:flex;gap:8px;align-items:flex-start;padding:9px 11px;
+  border-radius:var(--r-sm);font-size:10px;line-height:1.7;
+  background:rgba(242,193,78,.08);border:1px solid rgba(242,193,78,.28);color:var(--onSurfaceVariant)}
+.banner b{color:var(--tertiary);font-weight:600}
+.banner.err{background:rgba(255,138,128,.08);border-color:rgba(255,138,128,.28)}
+.banner.err b{color:var(--error)}
+
+/* ── 解释卡（首次申请权限） ───────────────────────────── */
+.sheet{background:var(--surface);border:1px solid var(--outline);border-radius:var(--r-xl);
+  box-shadow:0 26px 64px rgba(0,0,0,.7);padding:16px 16px 10px;width:296px}
+.sheet .h{display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600}
+.sheet .h .i{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;font-size:13px;background:rgba(90,162,255,.16);color:var(--primary)}
+.sheet .b{font-size:11px;color:var(--onSurfaceVariant);line-height:1.85;margin-top:9px}
+.sheet .b b{color:var(--onSurface);font-weight:600}
+.sheet .f{display:flex;justify-content:flex-end;gap:4px;margin-top:12px}
+.btn{font-size:12px;padding:7px 13px;border-radius:var(--r-sm);color:var(--primary)}
+.scrim{position:absolute;inset:0;background:rgba(4,8,14,.6);z-index:4;
+  display:flex;align-items:center;justify-content:center}
+.phone.light .scrim{background:rgba(24,36,48,.28)}
+
+/* ── 表格 ─────────────────────────────────────────────── */
+table.t{width:100%;border-collapse:collapse;margin-top:12px;font-size:11.5px}
+table.t th{text-align:left;padding:8px 10px;background:var(--surfaceVariant);
+  color:var(--onSurface);font-size:10.5px;font-weight:600;
+  border-bottom:1px solid var(--outlineVariant)}
+table.t td{padding:8px 10px;border-bottom:1px solid var(--outlineVariant);
+  color:var(--onSurfaceVariant);line-height:1.75;vertical-align:top}
+table.t td b{color:var(--onSurface);font-weight:600}
+table.t td code{font-family:var(--mono);font-size:10px;background:var(--surfaceVariant);
+  padding:1px 4px;border-radius:3px;color:var(--primary)}
+table.t tr:last-child td{border-bottom:none}
+.badge2{display:inline-block;font-size:9px;padding:1px 6px;border-radius:var(--r-pill);
+  background:rgba(90,162,255,.14);color:var(--primary);border:1px solid rgba(90,162,255,.32);
+  white-space:nowrap}
+.badge2.ok{background:rgba(74,222,128,.12);color:var(--running);border-color:rgba(74,222,128,.34)}
+.badge2.warn{background:rgba(242,193,78,.12);color:var(--tertiary);border-color:rgba(242,193,78,.32)}
+.badge2.bad{background:rgba(255,138,128,.12);color:var(--error);border-color:rgba(255,138,128,.32)}
+
+/* ── 决策块 ───────────────────────────────────────────── */
+.q{background:var(--surface);border:1px solid var(--outlineVariant);border-radius:var(--r-md);
+  padding:12px 14px;margin-top:10px}
+.q .qt{font-size:12px;font-weight:600;color:var(--primary)}
+.q .qb{font-size:11.5px;color:var(--onSurfaceVariant);line-height:1.8;margin-top:5px}
+.q .qb b{color:var(--onSurface)}
+.opt{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.opt .o{font-size:10.5px;padding:4px 9px;border-radius:var(--r-pill);
+  border:1px solid var(--outline);color:var(--onSurfaceVariant)}
+.opt .o.rec{border-color:rgba(74,222,128,.5);color:var(--running)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>R056 效果图 · 系统通知</h1>
+<div class="sub">
+  目标：<b>把 App 退到后台，跑完 / 要你确认 / 出错了，都能在通知栏看到，点一下直接进那条会话。</b>
+  <br>这一版是<b>设计与调研</b>，不含代码。所有平台结论都来自官方文档，标了来源；一加的部分是社区实测，单独标出。
+  <br>优先适配机型：<b>一加 Ace 5</b>（ColorOS 15）。
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">1</span>先说清楚三件事：现在为什么收不到通知</h2>
+<div class="note">
+  这三条是这一轮读源码 + 查官方文档得出的，<b>它们决定了后面所有设计</b>，不是背景介绍。
+</div>
+<table class="t">
+<tr><th style="width:200px">现状</th><th>为什么这一点很关键</th></tr>
+<tr>
+  <td><b>App 里一行通知代码都没有</b></td>
+  <td><code>AndroidManifest.xml</code> 只有 <code>INTERNET</code> / <code>ACCESS_NETWORK_STATE</code> / <code>CAMERA</code> 三个权限，
+  没有 <code>POST_NOTIFICATIONS</code>，没有 <code>&lt;service&gt;</code>，依赖里也没有 WorkManager / lifecycle-process。
+  一切都是从零开始，<b>没有历史包袱，也没有现成轮子</b>。</td>
+</tr>
+<tr>
+  <td><b>连接是挂在 UI 上的</b></td>
+  <td><code>AppContainer.bootstrap()</code> 全项目只有 <b>一处</b>调用（<code>ui/AppRoot.kt:296</code> 的 <code>LaunchedEffect(Unit)</code>）。
+  也就是说<b>只有 Activity 起来时才会读凭证、建连接</b>。App 一退到后台、进程被系统回收，WebSocket 就没了——
+  没有连接，就没有任何事件，通知无从谈起。<b>这是整件事的真正门槛</b>。</td>
+</tr>
+<tr>
+  <td><b>事件流是「竞争消费」</b></td>
+  <td><code>RemoteEventsClient.sessionNotifications</code> 是 <code>Channel</code> + <code>receiveAsFlow()</code>。
+  <b>多个收集方会互相抢事件</b>：如果让通知模块也去 collect 同一条流，它会和 <code>HomeViewModel</code> 抢，
+  两边都随机丢数据（列表少一条会话、通知漏一条）。
+  所以必须<b>在源头旁路一份广播流</b>，不能两个订阅者抢同一条河。</td>
+</tr>
+</table>
+<div class="warnbox">
+  <b>结论</b>：这个需求真正的难点不是「调 <code>notify()</code>」，而是
+  <b>① 让进程在后台活着 ② 不破坏现有事件分发</b>。下面第 7 节讲怎么动，第 4 节讲一加会怎么拦。
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">2</span>通知长什么样：三种，加一条常驻</h2>
+<div class="note">
+  左边是<b>下拉通知栏</b>，右边是<b>锁屏</b>。锁屏这一屏很重要：会话内容里常有代码、路径、密钥，
+  默认<b>不该把正文放到锁屏上</b>。
+</div>
+<div class="row">
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>⌁ ▮▮▮</span></div>
+      <div class="shade">
+        <div class="shade-head"><span>DSHRM · 3 条新通知</span><span>全部清除</span></div>
+
+        <div class="notif">
+          <div class="nhead"><span class="nicon ask">?</span><span>DSHRM</span><span class="sp"></span><span>刚刚</span></div>
+          <div class="ntitle">需要你确认 · bot</div>
+          <div class="nbody">工具 <b>rm -rf build</b> 需要你的授权：清理构建产物</div>
+          <div class="nacts">
+            <span class="nact">批准</span>
+            <span class="nact dgr">拒绝</span>
+            <span class="nact" style="background:transparent;border-color:transparent;color:var(--onSurfaceVariant)">查看</span>
+          </div>
+        </div>
+
+        <div class="notif">
+          <div class="nhead"><span class="nicon ok">✓</span><span>DSHRM</span><span class="sp"></span><span>2 分钟前</span></div>
+          <div class="ntitle">跑完了 · dsh-plugin</div>
+          <div class="nbody">已生成回复，点开查看</div>
+        </div>
+
+        <div class="notif">
+          <div class="nhead"><span class="nicon bad">!</span><span>DSHRM</span><span class="sp"></span><span>8 分钟前</span></div>
+          <div class="ntitle">出错了 · model-filter</div>
+          <div class="nbody">这一轮没跑完：模型调用超时（已重试 3 次）</div>
+        </div>
+
+        <div class="notif grouped ongoing" style="margin-top:auto">
+          <div class="nhead"><span class="nicon">◍</span><span>DSHRM · 后台保持连接</span><span class="sp"></span><span>b.zcsb.ltd</span></div>
+          <div class="nbody" style="margin-top:3px">已连接 1 小时 12 分 · 点按查看</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>通知栏</b> · 提问（带操作）/ 完成 / 失败 / 常驻</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="lock">
+        <div class="lock-time">9:41</div>
+        <div class="lock-date">11月7日 星期五</div>
+        <div class="lock-list">
+          <div class="notif">
+            <div class="nhead"><span class="nicon ask">?</span><span>DSHRM</span><span class="sp"></span><span>刚刚</span></div>
+            <div class="ntitle">需要你确认 · bot</div>
+            <div class="nbody">点开查看详情</div>
+          </div>
+          <div class="notif grouped">
+            <div class="nhead"><span class="nicon ok">✓</span><span>DSHRM</span><span class="sp"></span><span>2 分钟前</span></div>
+            <div class="ntitle">有新消息</div>
+            <div class="nbody">点开查看详情</div>
+          </div>
+        </div>
+        <div class="lock-hint">向上滑动解锁</div>
+      </div>
+    </div>
+    <div class="cap"><b>锁屏</b> · <code>VISIBILITY_PRIVATE</code>，正文不外露</div>
+  </div>
+
+  <div style="flex:1;min-width:280px">
+    <div class="note" style="margin-top:0">
+      <b>三条频道的分工</b>（重要性在<b>首次创建时就定死</b>，之后改代码无效，只能换新 channel id）：
+    </div>
+    <table class="t" style="margin-top:8px">
+    <tr><th style="width:96px">频道</th><th style="width:80px">重要性</th><th>什么时候发</th></tr>
+    <tr><td><code>ask</code><br><span style="font-size:10px">请求确认</span></td>
+      <td><span class="badge2 bad">HIGH</span><br><span style="font-size:10px">横幅+响铃</span></td>
+      <td>模型提问、工具审批。<b>不设有效期</b>——你可能几小时后才看手机。<b>不并进分组</b>，
+      否则会被折叠成「N 个会话有新动态」，用户根本不会展开。</td></tr>
+    <tr><td><code>done</code><br><span style="font-size:10px">任务结束</span></td>
+      <td><span class="badge2">DEFAULT</span><br><span style="font-size:10px">响一声</span></td>
+      <td>一轮跑完、或跑挂了。同一条会话<b>固定 id 原地更新</b>，<code>setOnlyAlertOnce</code>，
+      连跑 5 轮也只响一次。</td></tr>
+    <tr><td><code>link</code><br><span style="font-size:10px">连接状态</span></td>
+      <td><span class="badge2 ok">LOW</span><br><span style="font-size:10px">无声、常驻</span></td>
+      <td>前台服务的常驻通知。必须<b>和业务通知分开</b>——否则用户想关「连接中」这条时，
+      会把业务通知一起关掉。</td></tr>
+    </table>
+    <div class="warnbox" style="margin-top:12px">
+      <b>为什么提问一定要 HIGH 且不进分组</b>：这两类通知是<b>瀑布式请求</b>（服务端抛给第一个愿意回答的
+      远程监听者然后等着）。用户看不见 = 整个会话卡在那里等到超时。<b>这是唯一必须打断用户的场景。</b>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">3</span>权限怎么要：别在启动时弹</h2>
+<div class="note">
+  Android 13（API 33）起 <code>POST_NOTIFICATIONS</code> 是运行时权限，<b>新装应用默认关闭</b>——
+  不申请就永远收不到，而且<b>失败是静默的</b>，排查时最容易误判成「服务端没推」。
+</div>
+<div class="row">
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>⌁ ▮▮▮</span></div>
+      <div class="topbar">
+        <div class="tb-btn">☰</div>
+        <div class="tb-mid">
+          <div class="tb-t1">PGBM10 ⌄</div>
+          <div class="tb-t2">工作区 10 · 会话 40</div>
+        </div>
+        <div class="tb-btn">⋮</div>
+      </div>
+      <div class="body-scroll" style="justify-content:center;padding:0 18px 40px">
+        <div class="sheet" style="width:100%">
+          <div class="h"><span class="i">🔔</span>让任务跑完时提醒你</div>
+          <div class="b">
+            会话在后台跑完、或者模型要你确认时，<b>会发一条系统通知</b>，点一下直接进那条会话。
+            <br>不打开也能收到——但要允许通知。
+          </div>
+          <div class="f">
+            <span class="btn" style="color:var(--onSurfaceVariant)">以后再说</span>
+            <span class="btn">开启通知</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>首次连上主机后</b>弹一张解释卡，不是系统弹窗</div>
+  </div>
+
+  <div style="flex:1;min-width:300px">
+    <div class="note" style="margin-top:0">
+      <b>时机</b>：第一次<b>成功连上某台主机</b>、回到首页时。不在 <code>Application.onCreate</code> 静默申请——
+      用户还不知道这 App 干嘛，拒绝率会很高，而被拒一次之后就很难再要回来了。
+      <br><b>形式</b>：先弹一张 App 内的解释卡（上图），用户点「开启通知」才触发系统弹窗。多这一步，通过率差别很大。
+    </div>
+    <div class="warnbox" style="margin-top:12px">
+      <b>一个必须自己记账的坑</b>：<code>shouldShowRequestPermissionRationale</code> 的三段状态<b>不可靠</b>——
+      从未请求过返回 <code>false</code>，拒绝过两次（永久）也返回 <code>false</code>。
+      <b>它分不出「还没问」和「已经被永久拒绝」</b>。
+      <br>所以必须自己存一个 <code>hasRequestedBefore</code>：
+      为 <code>false</code> 时才弹系统弹窗；为 <code>true</code> 且权限仍未授予，
+      就<b>直接引导去系统设置</b>（弹窗已经弹不出来了）。
+    </div>
+    <div class="okbox" style="margin-top:12px">
+      <b>还能监听用户中途关掉通知</b>：<code>ACTION_APP_BLOCK_STATE_CHANGED</code>（API 28+）与
+      <code>ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED</code>。
+      设置页据此显示「通知已被系统关闭」并给一键跳转。
+      <br>但它是<b>广播</b>，进程被杀时收不到——所以要配「每次冷启动主动查一次 <code>areNotificationsEnabled()</code>」双保险。
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">4</span>一加 Ace 5：这五件事只能引导，代码绕不过去</h2>
+<div class="note">
+  一加在 <b>dontkillmyapp 的恶劣指数是 5/5</b>（与小米、三星同列最差档），
+  而且官方给开发者的建议栏写的是 <b>「No known solution on the developer end」</b>——
+  就是说<b>没有纯代码解法，只能引导用户改系统设置</b>。
+</div>
+<div class="row">
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>⌁ ▮▮▮</span></div>
+      <div class="topbar">
+        <div class="tb-btn">←</div>
+        <div class="tb-mid">
+          <div class="tb-t1">通知与后台保活</div>
+          <div class="tb-t2">一加 / ColorOS 需要手动开 5 项</div>
+        </div>
+        <div class="tb-btn"></div>
+      </div>
+      <div class="body-scroll">
+        <div class="banner err">
+          <span>!</span>
+          <div><b>后台会被系统杀掉</b>：下面 5 项没做完，App 退到后台几分钟就可能收不到通知。</div>
+        </div>
+
+        <div class="cardgrp">
+          <div class="gitem">
+            <div class="gchk done">✓</div>
+            <div class="gt">
+              <div class="gt1">允许通知</div>
+              <div class="gt2">已开启</div>
+            </div>
+            <span class="gbtn">去设置</span>
+          </div>
+
+          <div class="gitem">
+            <div class="gchk unk">?</div>
+            <div class="gt">
+              <div class="gt1">电池：不优化</div>
+              <div class="gt2">已申请，但一加可能<b>自己改回去</b>——必须配合第 5 项</div>
+            </div>
+            <span class="gbtn unk">去设置</span>
+          </div>
+
+          <div class="gitem">
+            <div class="gchk">!</div>
+            <div class="gt">
+              <div class="gt1">关闭「深度优化」和「睡眠待机优化」</div>
+              <div class="gt2">
+                设置 › 电池 › 电池优化 › 右上角 ⋮ › <b>高级优化</b><br>
+                这两项<b>默认都开着</b>，是推送延迟的头号原因。睡眠待机还会在睡觉时段直接断网。
+              </div>
+            </div>
+            <span class="gbtn">去设置</span>
+          </div>
+
+          <div class="gitem">
+            <div class="gchk">!</div>
+            <div class="gt">
+              <div class="gt1">允许「自启动」和「后台运行」</div>
+              <div class="gt2">
+                设置 › 应用 › 应用管理 › DSHRM › <b>耗电管理</b><br>
+                一组开关：允许后台活动 / 自启动 / 关联启动，<b>全部打开</b>。
+              </div>
+            </div>
+            <span class="gbtn">去设置</span>
+          </div>
+
+          <div class="gitem">
+            <div class="gchk">!</div>
+            <div class="gt">
+              <div class="gt1">在多任务里锁定本应用</div>
+              <div class="gt2">
+                进入最近任务（上滑并按住）→ 长按窗口 → 点右上角「<b>锁定</b>」。<br>
+                锁定后图标带闭合锁。<b>不加锁，第 2 项会被一加随机改回去。</b>
+              </div>
+            </div>
+            <span class="gbtn">看图示</span>
+          </div>
+        </div>
+
+        <div class="banner">
+          <span>i</span>
+          <div>系统更新会<b>重置</b>这些设置。App 每次冷启动会重新检测，有退回的会再提醒一次。</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>保活引导页</b> · 能检测的自动打勾，检测不了的留给人看</div>
+  </div>
+
+  <div style="flex:1;min-width:300px">
+    <div class="note" style="margin-top:0">
+      <b>哪些能自动检测、哪些只能靠人</b>——这张表是设计这一页的依据：
+    </div>
+    <table class="t" style="margin-top:8px">
+    <tr><th style="width:150px">检查项</th><th style="width:88px">能检测吗</th><th>判据</th></tr>
+    <tr><td>通知总开关</td><td><span class="badge2 ok">能</span></td>
+      <td><code>NotificationManagerCompat.areNotificationsEnabled()</code></td></tr>
+    <tr><td>单个频道被关</td><td><span class="badge2 ok">能</span></td>
+      <td><code>getNotificationChannel(id).importance == IMPORTANCE_NONE</code></td></tr>
+    <tr><td>AOSP 电池白名单</td><td><span class="badge2 warn">能但不算数</span></td>
+      <td><code>PowerManager.isIgnoringBatteryOptimizations()</code> 会返回 <code>true</code>，
+      <b>但一加照样杀</b>——它由独立电池应用 <code>com.oplus.battery</code> 管控，两套机制并行。</td></tr>
+    <tr><td>自启动 / 后台运行</td><td><span class="badge2 bad">不能</span></td>
+      <td>无公开 API。只能跳转引导。<b>不要</b>去读厂商私有 ContentProvider 或反射，系统更新即失效。</td></tr>
+    <tr><td>深度优化 / 睡眠待机</td><td><span class="badge2 bad">不能</span></td><td>同上</td></tr>
+    <tr><td>最近任务是否已锁定</td><td><span class="badge2 bad">不能</span></td><td>同上</td></tr>
+    </table>
+
+    <div class="warnbox" style="margin-top:12px">
+      <b>跳转要用厂商 Activity 名，而且必须防崩</b>。一加 Ace 系列实测可用的是：
+      <br><code>com.oplus.battery / com.oplus.startupapp.view.StartupAppListActivity</code>
+      <br>老教程里的 <code>com.oneplus.security</code> 在<b>新机型上已经不存在</b>，照抄会崩。
+      <br>做法：按序试探 4 个候选 → 每个都 <code>resolveActivity()</code> 探测 + <code>try/catch</code> →
+      全失败就退到最稳的 <code>ACTION_APPLICATION_DETAILS_SETTINGS</code>（应用详情页）。
+    </div>
+
+    <div class="okbox" style="margin-top:12px">
+      <b>还有一个隐藏的坑：ColorOS 会自己折叠通知。</b>
+      ColorOS 12 起就有「系统自动把部分 App 设为不重要通知并折叠」，即使你授了权限也可能被折叠/静音。
+      <br>缓解办法：走高重要性频道，并在引导页加第 6 条「长按通知 › 设为重要」。
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">5</span>设置页：三个开关 + 一个入口</h2>
+<div class="row">
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>⌁ ▮▮▮</span></div>
+      <div class="topbar">
+        <div class="tb-btn">←</div>
+        <div class="tb-mid">
+          <div class="tb-t1">设置</div>
+          <div class="tb-t2">远程 Web 0.2.0</div>
+        </div>
+        <div class="tb-btn"></div>
+      </div>
+      <div class="body-scroll">
+        <div class="seclbl">外观</div>
+        <div class="cardgrp">
+          <div class="srow"><div class="st"><div class="st1">主题</div></div>
+            <span style="font-size:11px;color:var(--onSurfaceVariant)">跟随系统</span>
+            <span class="chev">›</span></div>
+        </div>
+
+        <div class="seclbl">通知</div>
+        <div class="cardgrp">
+          <div class="srow">
+            <div class="st"><div class="st1">系统通知</div>
+              <div class="st2">任务跑完、需要你确认时提醒</div></div>
+            <div class="sw on"></div>
+          </div>
+          <div class="srow">
+            <div class="st"><div class="st1">只看需要我确认的</div>
+              <div class="st2">关掉后，只是「跑完了」不再通知</div></div>
+            <div class="sw"></div>
+          </div>
+          <div class="srow">
+            <div class="st"><div class="st1">锁屏显示详细内容</div>
+              <div class="st2">关闭时锁屏只显示「有新消息」</div></div>
+            <div class="sw"></div>
+          </div>
+          <div class="srow">
+            <div class="st"><div class="st1">通知与后台保活</div>
+              <div class="st2"><b style="color:var(--tertiary)">有 3 项需要你手动开启</b></div></div>
+            <span class="chev">›</span>
+          </div>
+        </div>
+
+        <div class="seclbl">连接</div>
+        <div class="cardgrp">
+          <div class="srow"><div class="st"><div class="st1">管理设备</div></div><span class="chev">›</span></div>
+          <div class="srow"><div class="st"><div class="st1">重新配对</div></div><span class="chev">›</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>设置页</b> · 新增「通知」一段，其余原样</div>
+  </div>
+
+  <div style="flex:1;min-width:300px">
+    <div class="note" style="margin-top:0">
+      设置页现在是 <code>SettingsScreen(themePreferences, onBack, onUnpair, onOpenDebug, book, …)</code>，
+      <b>不读 <code>connection</code></b>（主题是进程级偏好）。
+      所以通知这块也照同样的写法：<b>传一个纯状态对象 + 若干回调</b>，不把 <code>DshConnection</code> 塞进去。
+      <br>唯一例外是「有 3 项需要你手动开启」这行提示——它需要一个「检测结果」，
+      那个由容器侧的检测器算好，同样以纯数据传进来。
+    </div>
+    <div class="okbox" style="margin-top:12px">
+      <b>为什么开关是三个而不是一堆</b>：通知的细分能力<b>应该交给系统</b>（用户能在系统设置里单独关每个频道），
+      App 里只留真正影响产品行为的三个：<b>要不要通知 / 只留必须打断的 / 锁屏给不给看</b>。
+      多加一层就变成和系统设置打架，反而让用户不知道该去哪关。
+    </div>
+    <div class="warnbox" style="margin-top:12px">
+      <b>「只看需要我确认的」这个开关不是可有可无</b>：一加/ColorOS 对「高频低价值通知」很敏感，
+      一个 AI 工具每次跑完都响一声，一两天就会被用户整个关掉——<b>那连提问通知一起没了</b>。
+      给用户一个「只留必须打断的」出口，是保住核心通知的手段。
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">6</span>什么时候发、什么时候不发（去重规则）</h2>
+<div class="note">
+  这一节是全篇<b>最容易做错</b>的地方。项目里已经有一个专门的「红点账本」
+  （<code>core/session/CompletionLedger.kt</code>），它的三条纪律正好可以照搬，
+  但它<b>不能直接复用</b>——它住在 <code>HomeViewModel</code> 里，Activity 一销毁就没了。
+</div>
+<table class="t">
+<tr><th style="width:250px">场景</th><th style="width:80px">发不发</th><th>理由</th></tr>
+<tr><td>App 在前台，正看着<b>这条</b>会话</td><td><span class="badge2 bad">不发</span></td>
+  <td>用户就盯着屏幕，还弹横幅是骚扰。判据：<code>ProcessLifecycleOwner</code> 处于 STARTED
+  <b>且</b> 当前打开的 sessionId 就是它。</td></tr>
+<tr><td>App 在前台，看的是别的页</td><td><span class="badge2">发</span></td>
+  <td>用户没在看这条会话，一样需要知道。但可以只更新不响铃。</td></tr>
+<tr><td>App 在后台</td><td><span class="badge2 ok">发</span></td><td>这是主场景。</td></tr>
+<tr><td>冷启动后第一次看到某会话 <code>running=false</code></td><td><span class="badge2 bad">不发</span></td>
+  <td><b>必须是边沿触发，不能是电平。</b>冷启动时所有会话都是「不在跑」，
+  按电平判会一次涌出几十条通知。判据同 <code>CompletionLedger</code>：记住上一次的 running，
+  只有 <code>true → false</code> 才算「跑完了」。</td></tr>
+<tr><td>同一条会话连续跑完 5 轮</td><td><span class="badge2">发，但只响一声</span></td>
+  <td><b>固定通知 id + <code>setOnlyAlertOnce(true)</code></b>，内容原地更新。
+  不要 <code>cancel()</code> 再 <code>notify()</code>——会重响并闪烁。</td></tr>
+<tr><td>重新连上主机，补发涌入几十条事件</td><td><span class="badge2 warn">合并</span></td>
+  <td>断线重连后事件可能积压。按会话合并，只留最新一条，否则一次刷 30 条通知。</td></tr>
+<tr><td>模型提问 / 工具审批</td><td><span class="badge2 bad">永远发</span></td>
+  <td>除非正看着这条会话。不设有效期、不进分组——看不见会话就卡住。</td></tr>
+<tr><td>流式输出每一个 token</td><td><span class="badge2 bad">不发</span></td>
+  <td>官方明确：更新间隔小于 1 秒系统可能丢更新。只在「开始跑」和「跑完」两个点更新。</td></tr>
+</table>
+
+<div class="warnbox" style="margin-top:14px">
+  <b>一个必须自己记的账：通知去重表不能放 ViewModel。</b>
+  现有的 <code>CompletionLedger</code> 和「通知过哪条」的表都得<b>升到容器级</b>（跟 Application 同寿），
+  否则 Activity 一重建，去重表清空 → 同一条会话又被通知一次。
+  这是「用户会立刻发现」的那类 bug。
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">7</span>保活方案：三种前台服务类型，只有一个能选</h2>
+<div class="note">
+  这是全篇<b>技术结论最硬</b>的一节。官方文档明确：<b>只有 <code>dataSync</code> 与
+  <code>mediaProcessing</code> 两种前台服务受「24 小时内累计 6 小时」限制</b>，
+  超时后系统会调 <code>Service.onTimeout()</code>，服务必须几秒内 <code>stopSelf()</code>，
+  否则抛 <code>RemoteServiceException</code> 崩溃。
+</div>
+<table class="t">
+<tr><th style="width:130px">前台服务类型</th><th style="width:96px">有时限吗</th><th>适配度</th></tr>
+<tr>
+  <td><code>dataSync</code></td>
+  <td><span class="badge2 bad">6 小时/天</span></td>
+  <td><b>排除</b>。官方定义是「在设备和云端之间传输数据」，语义上最贴近 WebSocket，
+  但 6 小时上限意味着<b>每天必被掐断一次，而且用户不开 App 就恢复不了</b>——产品上不可接受。
+  <br>（子代理的第一版报告推荐了这个，是我按官方 timeout 文档推翻的。）</td>
+</tr>
+<tr>
+  <td><code>remoteMessaging</code></td>
+  <td><span class="badge2 warn">无</span></td>
+  <td><b>次选</b>。不受 6 小时限制，运行时前提条件是「无」，只需清单权限。
+  但官方定义写死是「<b>将短信从一台设备传输到另一台设备</b>」——拿它跑 WebSocket 属擦边，
+  商店审核有被问的风险（侧载无所谓）。</td>
+</tr>
+<tr>
+  <td><code>specialUse</code></td>
+  <td><span class="badge2 ok">无</span></td>
+  <td><b style="color:var(--running)">推荐</b>。专为「不属于上面任何一类」的正当用途设计，
+  不受时限。代价是要在清单里加一段
+  <code>&lt;property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" …/&gt;</code>
+  说明用途，且上架 Google Play 会被人工审核。<b>我们是侧载分发，无碍。</b></td>
+</tr>
+</table>
+
+<div class="warnbox" style="margin-top:14px">
+  <b>一条走不通的路，先排除掉</b>：Android 15 起<b>明确禁止 <code>BOOT_COMPLETED</code> 广播启动
+  <code>dataSync</code> 类型的前台服务</b>。「开机自启自动恢复连接」这个最直觉的方案，
+  <b>已经被官方堵死了</b>，不要在这上面花时间。
+  <br>替代：超时/断开后发一条<b>可点击的通知</b>，用户点一下重新拉起（属「用户交互」豁免）。
+  用户不点就一直离线，所以 <b>界面上必须明确显示「当前离线」</b>。
+</div>
+
+<div class="okbox" style="margin-top:12px">
+  <b>分两步走，每步都能单独验收</b>：
+  <br><b>第一步（不含前台服务）</b>：只做「事件 → 通知」，进程活着就能收到。
+  App 退到后台的<b>前几分钟到半小时</b>可用，不引入任何保活风险、不耗电、不影响现在任何功能。
+  这一步就能覆盖「切出去看一眼别的 App，回来发现跑完了」这种最常见的场景。
+  <br><b>第二步（加前台服务）</b>：再加 <code>specialUse</code> 常驻通知 + 保活引导页。
+  这一步才谈得上「真的在后台也能收到」。
+  <br>分开做的理由：第一步出问题只影响通知本身；第二步出问题会影响<b>整个 App 的存活策略</b>（耗电、被杀、崩溃），
+  风险等级完全不同。
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">8</span>可行性：要动哪些层</h2>
+<table class="t">
+<tr><th style="width:210px">层</th><th>改动</th><th style="width:88px">风险</th></tr>
+<tr><td><code>RemoteEventsClient</code></td>
+  <td>加一条<b>旁路广播流</b>（<code>MutableSharedFlow</code>），在现有
+  <code>_sessionNotifications.trySend(...)</code> 那一行的<b>旁边</b>再 <code>tryEmit</code> 一次。
+  <b>绝不能</b>改现有 <code>Channel</code> 的语义——那条流的「不折叠、按到达顺序逐条」是被
+  <code>HomeViewModel</code> 的列表正确性依赖着的。</td>
+  <td><span class="badge2 warn">中</span></td></tr>
+<tr><td>新 <code>core/notify/</code></td>
+  <td><code>NotificationCenter</code>（建频道、发通知、固定 id 更新）、<code>SessionWatcher</code>
+  （边沿检测 + 标题表 + 去重账）、<code>NotificationPrefs</code>（三个开关 + <code>hasRequestedBefore</code>）。
+  纯逻辑部分可以写单测。</td>
+  <td><span class="badge2 ok">低</span></td></tr>
+<tr><td>标题从哪来</td>
+  <td><code>api-session/status</code> 只给 <code>sessionId</code>，<b>没有标题</b>。
+  通知模块得自己维护一份 <code>sessionId → 标题</code>：连上后拉一次 <code>session/list</code> 播种，
+  之后靠 <code>api-session/added</code>（带完整摘要）更新。
+  <b>不能</b>去问 <code>HomeViewModel</code>——方向反了，而且那个 VM 可能根本不在。</td>
+  <td><span class="badge2 warn">中</span></td></tr>
+<tr><td><code>AppContainer</code></td>
+  <td>持有 <code>NotificationCenter</code> 与 <code>SessionWatcher</code>，在
+  <b><code>appScope</code></b>（已有，与 Application 同寿）里 collect 旁路流。
+  <b>不能用 <code>viewModelScope</code> 或 <code>lifecycleScope</code></b>，那两个活不过 Activity。</td>
+  <td><span class="badge2 ok">低</span></td></tr>
+<tr><td><code>MainActivity</code> + <code>AppRoot</code></td>
+  <td>点击通知要能进到那一条会话。现有路由是 <code>AppRoot</code> 的
+  <code>when { … openSession … }</code> 状态机，<code>openSession</code> 是
+  <code>SessionSummary?</code>——所以要按 <code>sessionId</code> 从列表里反查。
+  <br>还要处理 <code>onNewIntent</code>：<b>只读 <code>intent</code> 会拿不到后续的通知点击</b>，
+  这是「点通知没跳对页」最常见的原因。</td>
+  <td><span class="badge2 warn">中</span></td></tr>
+<tr><td><code>AndroidManifest</code></td>
+  <td>第一步只需 <code>POST_NOTIFICATIONS</code>。第二步加
+  <code>FOREGROUND_SERVICE</code> + <code>FOREGROUND_SERVICE_SPECIAL_USE</code>、
+  <code>&lt;service&gt;</code> 声明、<code>MainActivity</code> 改 <code>launchMode="singleTop"</code>。</td>
+  <td><span class="badge2 ok">低</span></td></tr>
+<tr><td>新增依赖</td>
+  <td><code>androidx.lifecycle:lifecycle-process</code>（判断前台/后台的唯一可靠办法）。
+  版本目录里 lifecycle 已经是 <code>2.10.0</code>，同版本加一行即可。</td>
+  <td><span class="badge2 ok">低</span></td></tr>
+<tr><td><code>SettingsScreen</code></td>
+  <td>加「通知」一段 + 「通知与后台保活」入口。按现有写法传<b>纯状态对象 + 回调</b>，
+  不塞 <code>DshConnection</code>。</td>
+  <td><span class="badge2 ok">低</span></td></tr>
+</table>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">9</span>要你拍板的三件事</h2>
+
+<div class="q">
+<div class="qt">Q1 · 这一轮做到哪一步</div>
+<div class="qb">
+  <b>只做第一步</b>：事件 → 通知，不加前台服务。进程活着就能收到，通常覆盖「切出去几分钟」。
+  零保活风险、零耗电、不改任何存活策略。<b>今天就能验完。</b>
+  <br><b>一次做完两步</b>：加 <code>specialUse</code> 常驻通知 + 保活引导页，才真正「后台也能收到」。
+  但会引入前台服务，风险等级完全不同（耗电、被杀、崩溃都可能牵连主功能）。
+</div>
+<div class="opt">
+  <span class="o rec">先做第一步（推荐 · 单独验收，风险可控）</span>
+  <span class="o">两步一起做（一次到位，但回归面大）</span>
+</div>
+</div>
+
+<div class="q">
+<div class="qt">Q2 · 通知里要不要「批准 / 拒绝」按钮</div>
+<div class="qb">
+  <b>要</b>：不用打开 App 就能答，审批场景体验最好。代价是要处理
+  「点了但连接已经断了」「点了但请求已超时」这些分支，而且必须在通知里显示完整的
+  工具名和理由（很长，会被折叠）。
+  <br><b>不要</b>：通知只负责「叫醒你」，点进去再决定。<b>少很多出错的分支</b>，
+  且审批这种敏感操作留在 App 里做更稳妥。
+</div>
+<div class="opt">
+  <span class="o rec">不要，只做「点进去处理」（推荐 · 稳妥）</span>
+  <span class="o">要，加「批准 / 拒绝」两个 Action</span>
+</div>
+</div>
+
+<div class="q">
+<div class="qt">Q3 · 保活引导页放哪</div>
+<div class="qb">
+  <b>设置里的二级页</b>：用户主动去找，不打扰。但一加用户<b>大概率不会主动找</b>，
+  结果就是「装了、没配、收不到、以为坏了」。
+  <br><b>首次就强制引导</b>：连上主机后直接推到那一页，配完才算完。
+  保证能用，但第一次打开就让人去改五个系统设置，很容易劝退。
+</div>
+<div class="opt">
+  <span class="o rec">设置里放二级页 + 检测到后台被杀过时主动弹一次提示（推荐 · 折中）</span>
+  <span class="o">首次连上就强制引导（保证能用，但可能劝退）</span>
+  <span class="o">只放设置里，不主动提示（最安静，但多数人收不到通知）</span>
+</div>
+</div>
+
+<div class="note" style="margin-top:16px">
+  <b>我建议的落地顺序</b>：① 先做旁路事件流 + 三条频道 + 完成/失败/提问三种通知，
+  在真机上验证「切出去 → 跑完 → 收到通知 → 点进来」闭环；
+  ② 再加权限申请与设置页开关；③ 最后才碰前台服务与一加引导页。
+  <br>每一步都能单独验收，任一步卡住都不会把「通知」整条路堵死。
+  <br><br>
+  <b>另外提醒一句</b>：这个需求<b>没法做到「绝对可靠」</b>。没有 FCM 的情况下，
+  任何本地方案都只是「尽量活着」，一加的系统设置、ColorOS 的折叠、系统更新都可能让它失效。
+  设计上要接受这一点——<b>所以界面上必须能看出「现在是不是在连」</b>，
+  而不是让用户以为「没通知 = 没跑完」。
+</div>
+</section>
+
+</div>
+</body>
+</html>

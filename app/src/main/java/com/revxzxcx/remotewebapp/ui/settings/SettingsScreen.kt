@@ -101,6 +101,16 @@ fun SettingsScreen(
      * 同一个回调上，则会让用户以为只删一台却回到配对页。
      */
     onRemoveActiveHost: (() -> Unit)? = null,
+    /**
+     * 设置页「通知」一行的状态摘要（R056）。
+     *
+     * 传 `null` 表示通知功能没有接（预览/测试场景），那一行整段不渲染。
+     * 传进来的是**纯数据**，不是检测器——与 [onOpenNoticeSettings] 一样，
+     * 本屏不读 `DshConnection`（理由见类 KDoc：主题是进程级偏好，通知也要同样的写法）。
+     */
+    noticeSummary: String? = null,
+    /** 点「通知」一行 → 通知二级页。 */
+    onOpenNoticeSettings: (() -> Unit)? = null,
 ) {
     val mode by themePreferences.mode.collectAsState()
     val active = book.active
@@ -220,6 +230,28 @@ fun SettingsScreen(
                     // 明细已经在 detail 里，这里只放跳转说明。
                     Text(
                         text = "切换、重命名、改地址、测试连接都在这里。",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            SectionLabel("通知")
+
+            CardGroup {
+                SettingRow(
+                    // 没有铃铛图标：本项目只依赖 material-icons-core，可用集合有限
+                    // （见 `ui/` 各处的图标注释）。Info 是中性的，不会让整行看起来
+                    // 一直「有问题」——真要指出的那一层，二级页里有专门的琥珀色诊断卡。
+                    icon = Icons.Default.Info,
+                    tint = MaterialTheme.colorScheme.primary,
+                    title = "通知与后台保活",
+                    detail = noticeSummary ?: "任务跑完、需要你确认时提醒",
+                    onClick = onOpenNoticeSettings,
+                ) {
+                    // 一加/ColorOS 那四项没有 API，只能引导；这一行是让用户知道「还有事情要做」。
+                    Text(
+                        text = "一加 / ColorOS 上另有 4 项需要手动开启，进去可以逐项对照。",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

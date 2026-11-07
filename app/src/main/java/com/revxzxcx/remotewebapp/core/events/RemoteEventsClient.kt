@@ -11,6 +11,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.receiveAsFlow
@@ -135,6 +136,34 @@ class RemoteEventsClient(
     /** 每一条会话转发事件，按到达顺序逐条送达；**不折叠**（理由见 [_sessionNotifications]）。 */
     val sessionNotifications: kotlinx.coroutines.flow.Flow<SessionNotification> =
         _sessionNotifications.receiveAsFlow()
+
+    /**
+     * 与 [sessionNotifications] **同一批事件**的广播流，给系统通知模块用（R056）。
+     *
+     * ## 为什么不能直接用 `sessionNotifications`
+     * 那条是 `Channel` + `receiveAsFlow()`，**多个收集方会互相抢**：通知模块一旦也去
+     * `collect` 它，`HomeViewModel` 就开始随机丢事件（列表少一条会话、运行态小柱卡住），
+     * 反过来也一样。这是 `Channel` 的固有语义，加 `buffer` 也解决不了。
+     *
+     * 所以这里在**发帧的那行**旁路出一份：`Channel` 一个收件人（列表）照旧，广播流
+     * 任意多个收件人（目前只有通知）。两条出口互不影响——广播没人收时 `tryEmit`
+     * 直接丢弃，不会反压收帧线程。
+     *
+     * ## 为什么 `replay = 0` + `DROP_OLDEST`
+     * 通知只关心**当下**发生的事：进程刚起来时补发一批历史事件会连响一串，而那时用户
+     * 正在看 App。丢掉最旧的、只留最近 [SESSION_NOTIFICATION_BUFFER] 条，
+     * 与 [_sessionNotifications] 同一套理由。
+     */
+    private val _sessionNotificationFeed =
+        kotlinx.coroutines.flow.MutableSharedFlow<SessionNotification>(
+            replay = 0,
+            extraBufferCapacity = SESSION_NOTIFICATION_BUFFER,
+            onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
+        )
+
+    /** [sessionNotifications] 的广播副本，**不影响**那条 Channel 的投递。 */
+    val sessionNotificationFeed: kotlinx.coroutines.flow.SharedFlow<SessionNotification> =
+        _sessionNotificationFeed.asSharedFlow()
 
     private var job: Job? = null
 
@@ -307,7 +336,14 @@ class RemoteEventsClient(
                 )
                 // `trySend` 不会挂起（`handle` 跑在收帧线程上），缓冲满时由
                 // `DROP_OLDEST` 决定丢谁，语义见 [_sessionNotifications]。
-                if (notification != null) _sessionNotifications.trySend(notification)
+                if (notification != null) {
+                    _sessionNotifications.trySend(notification)
+                    // 旁路一份给通知模块（R056）。放在 `trySend` 之后、同样不挂起：
+                    // 谁也不会拖住收帧线程，谁失败也不影响另一条。返回值**故意不看**——
+                    // 广播没人收是正常状态（没给通知权限、或进程刚起来还没订阅），
+                    // 不该记日志更不该重试。
+                    _sessionNotificationFeed.tryEmit(notification)
+                }
             }
 
             "waterfall" -> {

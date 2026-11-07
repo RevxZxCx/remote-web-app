@@ -33,6 +33,13 @@ robolectric = "4.17"
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
 androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+# R056：ProcessLifecycleOwner 的唯一来源。判断「App 是否在前台」不能用 Activity 生命周期
+# （分屏/画中画/刚按 Home 而 Activity 还没 onStop 时都不该算前台），必须用进程级生命周期。
+androidx-lifecycle-process = { group = "androidx.lifecycle", name = "lifecycle-process", version.ref = "lifecycle" }
+# lifecycle-process 的 POM 里点名要 startup-runtime **1.1.1**，而本机离线缓存里只有 1.2.0。
+# 显式提到 1.2.0（同大版本、API 只增不减）既让离线构建能过，也避免 1.1.1 那版随
+# androidx.startup 修过的 provider 初始化竞态被带进来。
+androidx-startup-runtime = { group = "androidx.startup", name = "startup-runtime", version = "1.2.0" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 androidx-ui = { group = "androidx.compose.ui", name = "ui" }

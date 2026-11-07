@@ -4,6 +4,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- R056：任务跑完/需要授权时的系统通知。Android 13（API 33）起是运行时权限，
+         新装默认关闭，且未授权时 `notify()` 静默失败、不抛异常——所以 App 里必须
+         自己记账「问过没有」，否则用户每次冷启动都会被弹一次。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- 扫码配对需要相机；声明为可选，平板/无相机设备仍可粘贴链接。 -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature
@@ -28,6 +33,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:theme="@style/Theme.DshAssistant"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -35,6 +41,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- R056：通知里的「批准 / 拒绝」按钮落地处。
+             `exported="false"`：只接本进程内由自己的 PendingIntent 发出的显式广播，
+             别的应用即便知道类名也发不进来（否则任何 App 都能替用户批授权）。 -->
+        <receiver
+            android:name=".core.notify.NoticeActionReceiver"
+            android:exported="false" />
 
     </application>
 

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  R056：通知小图标（「需要确认」频道）。
+
+  与 ic_notice_done.xml 同一套约束（纯白剪影 + 透明背景 + 24dp + 留边）；
+  图形用圆圈里的感叹号——「需要你处理」的语义，与对勾区分开。
+  两个频道的小图标形状差异要足够大：锁屏和状态栏上只有十几像素，
+  形状接近就分辨不出来，用户会误以为「又是那条跑完的通知」而滑掉。
+
+  感叹号是**挖空**的，所以用 fillType="evenOdd"：外圈圆填充，内部两条子路径
+  成为孔洞。不用两段不同颜色的 path —— 通知图标只有 alpha 生效，颜色会被系统丢掉。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M12,2C6.48,2 2,6.48 2,12C2,17.52 6.48,22 12,22C17.52,22 22,17.52 22,12C22,6.48 17.52,2 12,2ZM11,6.5H13V13.5H11V6.5ZM11,15.5H13V17.5H11V15.5Z" />
+</vector>
