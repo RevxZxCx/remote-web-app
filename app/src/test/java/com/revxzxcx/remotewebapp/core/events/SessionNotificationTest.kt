@@ -102,4 +102,39 @@ class SessionNotificationTest {
         )
     }
 
+
+    @Test
+    fun `账号授权失效要认出来 它没有负载`() {
+        // asar 实证：`this.ctx.emit("deepseek-account/session-expired")` —— 一条 args 都没有。
+        // 若解析层要求 args 非空，这条会被默默丢掉，而它代表「所有任务都会开始失败」。
+        assertEquals(
+            SessionNotification.AccountExpired,
+            SessionNotification.parse("deepseek-account/session-expired", JsonArray(emptyList())),
+        )
+    }
+
+    @Test
+    fun `模型要重新登录要认出来`() {
+        assertEquals(
+            SessionNotification.AccountSignIn,
+            SessionNotification.parse("deepseek-account/model-sign-in-required", JsonArray(emptyList())),
+        )
+    }
+
+    @Test
+    fun `凭据更新要认出来 它是账号问题的复位信号`() {
+        // 服务端不会为「登录成功」专门发一条好消息，只能靠这条复位。
+        assertEquals(
+            SessionNotification.CredentialsChanged,
+            SessionNotification.parse("credentials/record-updated", JsonArray(emptyList())),
+        )
+    }
+
+    @Test
+    fun `没见过的账号事件不能被当成凭据更新`() {
+        // 复位信号若误认，用户会在凭据仍然失效的情况下被清掉「已提醒」，
+        // 下一次真失效还得多响一遍；更糟的是白名单里将来新增的账号事件
+        // 会被当成「好了」而把问题压掉。
+        assertNull(SessionNotification.parse("deepseek-account/unknown-thing", JsonArray(emptyList())))
+    }
 }

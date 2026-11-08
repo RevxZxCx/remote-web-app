@@ -454,6 +454,12 @@ class HomeViewModel(
                         is SessionNotification.Activity -> scheduleSessionsRefresh()
                         is SessionNotification.Error ->
                             applyError(notification.sessionId, notification.message)
+                        // 账号侧三条与列表无关：不要了也不能把 when 补错，
+                        // 列表这层只需要明确「忽略」。
+                        SessionNotification.AccountExpired,
+                        SessionNotification.AccountSignIn,
+                        SessionNotification.CredentialsChanged,
+                        -> Unit
                     }
                 }
         }

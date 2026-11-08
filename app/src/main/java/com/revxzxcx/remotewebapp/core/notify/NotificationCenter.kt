@@ -198,6 +198,51 @@ class NotificationCenter(
     }
 
     /**
+     * 发一条**自定义文案**的「这一轮没跑成」通知（R056 缺口 5）。
+     *
+     * ## 为什么单独一个方法而不是给 [postDone] 加参数
+     * [postDone] 的两个布尔（`failed` / `silent`）已经承载了「跑完 / 跑挂 / 静默」
+     * 三种组合，再加一组任意标题正文会让它的分支判断变成四不像。而这类通知
+     * 与「任务结束」**只在文案上不同**，其余语义完全一样：
+     *
+     * - 用同一个 id（[idFor]）：同一会话先「跑完」再「被截断」时原地替换，
+     *   而不是在通知栏里堆两条说同一轮的通知；
+     * - 每次都响（`setOnlyAlertOnce(false)`）：这一轮没跑成，用户必须知道，
+     *   不能因为上一轮响过就静默——这正是 R056 里失败通知踩过的坑；
+     * - 点开进同一个会话，自动撤销。
+     *
+     * @param silent 目前恒为 `false`（这些结局都属于「必须提醒」）。留着参数是为了
+     *   将来若想对「用户正看着的会话」也静默投递时不必再改签名。
+     */
+    fun postAttention(
+        sessionId: String,
+        title: String,
+        text: String,
+        silent: Boolean = false,
+    ) {
+        val nm = manager ?: return
+        val allocation = idFor(sessionId)
+        for (stale in allocation.evicted) nm.cancel(stale)
+
+        val notification = NotificationCompat.Builder(context, NoticeChannels.DONE)
+            .setSmallIcon(R.drawable.ic_notice_done)
+            .setColor(ACCENT_COLOR)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentIntent(openSessionIntent(sessionId))
+            .setAutoCancel(true)
+            // 同 postDone 的失败侧：这类结局每一轮都要响。
+            .setOnlyAlertOnce(false)
+            .setCategory(Notification.CATEGORY_STATUS)
+            .setVisibility(lockScreenVisibility())
+            .apply { if (silent) setSilent(true) }
+            .build()
+
+        nm.notify(allocation.id, notification)
+    }
+
+    /**
      * 发一条「请求授权」，带**批准 / 拒绝**两个动作（用户 m08797 明确要求）。
      *
      * 与 [postDone] 的三处不同，都是有意的：
@@ -418,6 +463,81 @@ class NotificationCenter(
         manager?.cancel(id)
     }
 
+    /**
+     * 发一条「连不上桌面端了」（R056 缺口 3）。
+     *
+     * 固定 id [LINK_ID]、**不进池子**（理由见该常量的 KDoc）。用
+     * `setOnlyAlertOnce(true)`：断线期间这条会因为重试被反复刷新（每次退避失败
+     * 都可能重新走一遍判定），但用户只需要知道一次，反复响只会让他把这个频道关掉。
+     *
+     * 不带 `setAutoCancel(true)`：它不是「点开就没事了」的通知——点开会话并不能
+     * 让连接回来。撤掉它的唯一途径是真的连上（见 [cancelLink]）。
+     */
+    fun postLink(offline: Boolean, text: String, title: String) {
+        val nm = manager ?: return
+        val notification = NotificationCompat.Builder(context, NoticeChannels.DONE)
+            .setSmallIcon(R.drawable.ic_notice_done)
+            .setColor(if (offline) WARN_COLOR else ACCENT_COLOR)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentIntent(openSessionIntent(null))
+            .setOngoing(offline)
+            // 恢复那条点开就该消失；「连不上」那条不能，理由见上面的 KDoc。
+            .setAutoCancel(!offline)
+            // ⚠️ 恢复那条必须重新响，不能沿用 `true`。
+            //
+            // 两条用的是同一个 `LINK_ID`，而 `setOnlyAlertOnce(true)` 的语义是
+            // 「这条通知已经响过一次，之后的更新只静默改文字」。于是「连不上」
+            // （响过）之后的「已经连回来了」在通知栏里文字变了、**一声不吭**——
+            // 而用户最想知道的就是「恢复了没有」。这与 `postDone` 失败侧当年踩的
+            // 是同一个坑，只是那次没人把修复带到这里。
+            .setOnlyAlertOnce(offline)
+            .setCategory(if (offline) Notification.CATEGORY_ERROR else Notification.CATEGORY_STATUS)
+            .setVisibility(lockScreenVisibility())
+            .build()
+        nm.notify(LINK_ID, notification)
+    }
+
+    /** 撤掉「连不上」通知。 */
+    fun cancelLink() {
+        manager?.cancel(LINK_ID)
+    }
+
+    /**
+     * 发一条账号提醒（R056 缺口 4）：账号掉线 / 某个模型要重新登录 / 已经恢复。
+     *
+     * ## 为什么固定 id、不进池子
+     * 与 [postLink] 同理，「账号要不要重登」是**整个桌面端唯一的一件事**：
+     * 同时有三条会话因为这个原因失败，通知栏里也不需要三条一样的提醒。
+     * 固定 id 让后一条原地替换前一条，用户左滑一次就清干净。
+     *
+     * 但与连接提醒**用不同的 id**：连接断了和账号掉了是两个独立的问题，
+     * 可能同时成立（一个共用一个槽位会互相顶掉，用户只能看到后发生的那个）。
+     *
+     * ## 为什么不用 `setOngoing`
+     * 它不像「连不上」那样有明确的生命周期：用户看到之后可能在桌面上登录，
+     * 也可能先去干别的。钉死在通知栏里没有必要，`setAutoCancel(true)` 更合适。
+     */
+    fun postAccount(title: String, text: String, resolved: Boolean = false) {
+        val nm = manager ?: return
+        val notification = NotificationCompat.Builder(context, NoticeChannels.DONE)
+            .setSmallIcon(R.drawable.ic_notice_done)
+            .setColor(if (resolved) ACCENT_COLOR else WARN_COLOR)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(false)
+            // 「已经恢复了」不是错误。混进 ERROR 分类会被系统的勿扰/排序规则区别对待，
+            // 而且用户看到的是一张卡片标题写着「账号已经恢复了」、分类却是 error。
+            .setCategory(if (resolved) Notification.CATEGORY_STATUS else Notification.CATEGORY_ERROR)
+            .setVisibility(lockScreenVisibility())
+            .build()
+        nm.notify(ACCOUNT_ID, notification)
+    }
+
+    /** 撤掉账号提醒（用户已经处理掉了，或者我们确认它不再成立）。 */
     /** 一条审批通知的 id。用 `eventId` 的稳定哈希——同一条请求重发也落在同一格。 */
     private fun askId(eventId: String): Int = ASK_ID_BASE + (eventId.hashCode() and ASK_ID_MASK)
 
@@ -505,6 +625,26 @@ class NotificationCenter(
          */
         const val QUESTION_ID_BASE = 85_536
 
+        /**
+         * 连接状态通知的 id（R056 缺口 3）。
+         *
+         * **固定单条，不进 [NoticeIdPool]**：连接是**全局**事实，不像会话那样可以有多条。
+         * 如果塞进池子，一个正在刷新的会话可能把它挤掉——恰恰在最需要它的时候
+         * （连着断、又有很多会话在跑）消失。
+         *
+         * 取值落在完成通知段（`10_000..10_031`）、审批段（`20_000..85_535`）、
+         * 提问段（`85_536..151_071`）之外的第一个空位之后，避免与任何一段撞车。
+         */
+        const val LINK_ID = 151_072
+
+        /**
+         * 账号提醒的固定 id。
+         *
+         * 紧挨着 [LINK_ID] 之后取，与它一样**不进 [NoticeIdPool]**。
+         * 两者必须不同：连接断了与账号掉了可以同时成立，共用一个槽位会互相顶掉。
+         */
+        const val ACCOUNT_ID = 151_073
+
         /** 审批 id 的取值范围掩码（`20_000..20_000+0xFFFF`，与完成通知段不重叠）。 */
         const val ASK_ID_MASK = 0xFFFF
 
@@ -555,5 +695,13 @@ class NotificationCenter(
 
         /** 通知强调色，与主题主色一致（`#5AA2FF`）。 */
         const val ACCENT_COLOR = 0xFF5AA2FF.toInt()
+
+        /**
+         * 「连不上了」用的警示色（与原型 `--error:#FF8A80` 同色）。
+         *
+         * 不复用 [ACCENT_COLOR]：那套蓝是「有事发生了，来看看」，
+         * 而这条说的是「你现在收不到东西」——两者在通知栏里必须一眼能分开。
+         */
+        const val WARN_COLOR = 0xFFFF8A80.toInt()
     }
 }

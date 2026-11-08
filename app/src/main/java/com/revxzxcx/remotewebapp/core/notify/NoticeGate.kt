@@ -60,6 +60,15 @@ class CompletionEdge {
     /** 当前是否记着它在跑（测试与诊断用）。 */
     fun isRunning(sessionId: String): Boolean = running[sessionId] == true
 
+    /**
+     * 当前记着在跑的全部会话（重连补账用，见 `NotifyCoordinator.settleMissedOutcomes`）。
+     *
+     * 返回快照而不是视图：调用方拿到后会跨挂起点去逐个查结局，
+     * 期间本账可能被事件协程改掉，边遍历边改会 `ConcurrentModificationException`
+     * ——这和 B008 里 `RemoteStreamMux.close` 的坑是同一个形状。
+     */
+    fun runningIds(): List<String> = running.filterValues { it }.keys.toList()
+
     /** 忘掉一条会话（它被删除了）。 */
     fun forget(sessionId: String) {
         running.remove(sessionId)

@@ -107,4 +107,93 @@ object NoticeText {
         if (question != null) return question
         return "点开回答问题，任务才能继续。"
     }
+
+    // ── 四种「没跑成但也不算报错」的结局（R056 缺口 5）────────────────────
+    //
+    // 这四类原先一条通知都没有：`api-session/status(false)` 只表示「不在跑了」，
+    // `api-session/error` 只在轮次之外失败时来，而它们既不是「跑完了」也不是
+    // 「报错了」。用户看到的是「转圈消失了，什么都没有」。
+    //
+    // 标题**不能**复用「任务结束」：那四个字的意思是「一切按预期收尾」，
+    // 而这几种恰恰不是。每一类都要说清「没成」以及「接下来怎么办」，
+    // 否则用户只能猜。
+
+    /** 输出被 token 上限切断：内容不完整，但能续写。 */
+    fun truncatedTitle(sessionName: String): String = "输出被截断 · $sessionName"
+
+    fun truncatedText(): String = "内容写到一半到了上限，没有跑完整。点开可以接着写。"
+
+    /** 被权限/策略拦下：需要用户去桌面端批准。 */
+    fun blockedTitle(sessionName: String): String = "被拦下了 · $sessionName"
+
+    fun blockedText(): String = "工具调用被权限策略拦下，需要你去桌面端批准后才能继续。"
+
+    /** 上游断流或进程重启：内容可能只有半截。 */
+    fun interruptedTitle(sessionName: String): String = "生成被中断 · $sessionName"
+
+    fun interruptedText(): String = "连接或进程在生成过程中断了，内容可能只有半截。点开看看。"
+
+    /**
+     * 非用户主动中止：进程被销毁、父会话取消、或说不清来源。
+     *
+     * **不含用户自己按停止的那种**——那种他知道，见 `OutcomeNotice` 的说明。
+     */
+    fun abortedTitle(sessionName: String): String = "本轮已中止 · $sessionName"
+
+    fun abortedText(): String = "这一轮没跑完就停了，不是你在主界面上按的停止。点开看进度。"
+
+    /** 认不出的结局：不猜语义，只说「结束了但 App 不认识」。 */
+    fun unknownTitle(sessionName: String): String = "本轮结束得不明不白 · $sessionName"
+
+    fun unknownText(): String = "这一轮结束了，但服务端给的结局 App 还不认识。点开看看现在是什么状态。"
+
+    // --- 连接状态（R056 缺口 3）---------------------------------------------
+    //
+    // 这两条与上面那批「某一轮的结局」不是一类：它们说的是**现在还能不能收到东西**。
+    // 标题里必须带上「收不到」这层意思——只说「连接断开」用户会以为是网络问题，
+    // 而真正要紧的是「桌面端在跑什么，你这边不会知道了」。
+
+    /** 连接断了：暂时收不到任何提醒。 */
+    fun offlineTitle(): String = "连不上桌面端了"
+
+    fun offlineText(seconds: Long): String {
+        val span = if (seconds >= 60) "${seconds / 60} 分钟" else "$seconds 秒"
+        return "已经断了 $span。这段时间里任务跑完了、要你确认，都不会提醒你——不是没发生，是你收不到。" +
+            "检查一下网络，App 会自己重连。"
+    }
+
+    /** 配对凭证失效：不会自己好了，必须重新配对。 */
+    fun unpairedTitle(): String = "这台手机已经不被信任了"
+
+    fun unpairedText(): String =
+        "桌面端那边已经撤销了这台设备的授权，不会自己恢复。回到 App 重新扫码配对才能继续收提醒。"
+
+    /** 重连成功后说一句，只在之前提醒过时才发。 */
+    fun onlineTitle(): String = "已经连回来了"
+
+    fun onlineText(): String = "断线期间可能漏掉了几条提醒，已经在补。"
+
+    // --- 账号（R056 缺口 4）-------------------------------------------------
+    //
+    // 这两条都要**说清楚去做什么**。模型凭据失效时 App 里看到的是「模型报了一句
+    // 看不懂的错」，用户的第一反应是「这模型坏了」，而真实原因是「去桌面端重登一下」。
+    // 只说「账号有问题」等于把同一个谜语再出一遍。
+
+    /** 桌面端账号授权失效。 */
+    fun accountExpiredTitle(): String = "桌面端的账号掉线了"
+
+    fun accountExpiredText(): String =
+        "桌面端那边的模型账号授权已经失效。在手机上重试没有用——所有任务都会失败。" +
+            "去桌面端重新登录一次，这边就会恢复。"
+
+    /** 某个模型 provider 要求重新登录。 */
+    fun accountSignInTitle(): String = "有一个模型要重新登录"
+
+    fun accountSignInText(): String =
+        "桌面端在这个模型上的登录失效了，用它跑的任务会一直失败。去桌面端重新登录一下这个模型。"
+
+    /** 凭据变了：之前的账号问题已经处理掉。 */
+    fun accountFixedTitle(): String = "账号已经恢复了"
+
+    fun accountFixedText(): String = "桌面端的登录已经更新，接下来不会再因为这个原因失败了。"
 }

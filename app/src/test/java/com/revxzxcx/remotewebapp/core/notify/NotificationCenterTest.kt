@@ -296,4 +296,41 @@ class NotificationCenterTest {
         reason = null,
         displayReason = mapOf("zh" to "写入全局 git 配置"),
     )
+
+    @Test
+    fun `账号恢复的通知不能被归成错误类别`() {
+        // `CATEGORY_ERROR` 在部分 ROM 上会走另一套样式（红底、且部分机型不允许
+        // 折叠进摘要），把「账号已经恢复了」当错误发出去，用户看到的是又出事了。
+        center.postAccount("账号已经恢复了", "现在可以继续用了", resolved = true)
+        val notice = shadowOf(manager).getNotification(NotificationCenter.ACCOUNT_ID)
+        assertEquals(Notification.CATEGORY_STATUS, notice.category)
+
+        center.postAccount("桌面端的账号掉线了", "去桌面端重新登录一次", resolved = false)
+        val again = shadowOf(manager).getNotification(NotificationCenter.ACCOUNT_ID)
+        assertEquals(Notification.CATEGORY_ERROR, again.category)
+    }
+
+    @Test
+    fun `连不上的通知是错误类别 恢复的是状态类别`() {
+        center.postLink(offline = true, text = "已经断开 2 分钟", title = "连不上桌面端了")
+        val down = shadowOf(manager).getNotification(NotificationCenter.LINK_ID)
+        assertEquals(Notification.CATEGORY_ERROR, down.category)
+
+        center.postLink(offline = false, text = "断线期间可能漏掉了几条提醒", title = "已经连回来了")
+        val up = shadowOf(manager).getNotification(NotificationCenter.LINK_ID)
+        assertEquals(Notification.CATEGORY_STATUS, up.category)
+    }
+
+    @Test
+    fun `恢复那条必须重新响 不能沿用连不上时的 ONLY_ALERT_ONCE`() {
+        // 两条共用 `LINK_ID`。若恢复那条也带 ONLY_ALERT_ONCE，系统只静默改文字：
+        // 用户最想知道的「恢复了没有」这一次恰好一声不吭（审查 A13）。
+        center.postLink(offline = true, text = "已经断开 2 分钟", title = "连不上桌面端了")
+        val down = shadowOf(manager).getNotification(NotificationCenter.LINK_ID)
+        assertTrue("离线那条只需响一次", (down.flags and Notification.FLAG_ONLY_ALERT_ONCE) != 0)
+
+        center.postLink(offline = false, text = "断线期间可能漏掉了几条提醒", title = "已经连回来了")
+        val up = shadowOf(manager).getNotification(NotificationCenter.LINK_ID)
+        assertEquals(0, up.flags and Notification.FLAG_ONLY_ALERT_ONCE)
+    }
 }

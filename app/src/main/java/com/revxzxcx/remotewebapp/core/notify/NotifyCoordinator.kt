@@ -4,12 +4,19 @@ import com.revxzxcx.remotewebapp.core.events.ApprovalRequest
 import com.revxzxcx.remotewebapp.core.events.QuestionRequest
 import com.revxzxcx.remotewebapp.core.events.RemoteEventsClient
 import com.revxzxcx.remotewebapp.core.events.SessionNotification
+import com.revxzxcx.remotewebapp.core.protocol.CarrierState
+import com.revxzxcx.remotewebapp.core.session.ChatFrame
 import com.revxzxcx.remotewebapp.core.session.SessionListParser
+import com.revxzxcx.remotewebapp.core.session.TurnProbe
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 把「连接上发生的事」翻译成「系统通知」（R056）。
@@ -37,7 +44,38 @@ class NotifyCoordinator(
     private val center: NotificationCenter,
     private val settings: NoticeSettings,
     private val names: SessionNameTable,
+    /**
+     * 查询一轮结局的入口（R056 缺口 5）。
+     *
+     * 返回该会话窗口内最后一条 `turn/end`；查不到（连接断了、服务端拒绝、超时）
+     * 返回 `null`，调用方退回「这一轮结束了」的旧口径。
+     *
+     * **做成参数而不是让协调器自己造一个 `ChatRepository`**：协调器只认识
+     * `RemoteEventsClient`，不认识 `DshConnection`；把「怎么查」留在容器里，
+     * 协调器就仍然是可测的纯编排。默认实现 `null` = 不查，此时行为与 R056
+     * 首版完全一致（只按 running 翻转发「任务结束」）。
+     */
+    private val fetchLastTurn: (suspend (String) -> TurnProbe?)? = null,
 ) {
+
+    /**
+     * 结局查询的串行闸。
+     *
+     * 存在的理由与 `ChatViewModel` 里 `goalMutex` 相同：一次 running 翻转可能同时
+     * 从 `status` 与 `error` 两条路径进来，两次查询会各自开一条 `session/follow`，
+     * 拿到同一条 `turn/end` 再各发一条通知。串行化之后第二次查到同一个 `seq`，
+     * 被 [OutcomeLedger] 认成「已经报过」。
+     */
+    private val outcomeMutex = Mutex()
+
+    /** 已就哪些 `turn/end` 发过通知（见 [OutcomeLedger]）。 */
+    private val outcomes = OutcomeLedger()
+
+    /** 账号问题的提醒账（R056 缺口 4）。 */
+    private val accounts = AccountNoticeGate()
+
+    /** 连接状态的判定器（R056 缺口 3）。 */
+    private val link = LinkNoticeGate()
 
     /**
      * 用户此刻是否正看着某个会话。
@@ -118,6 +156,16 @@ class NotifyCoordinator(
         forgetAllNotified()
         edge.reset()
         names.clear()
+        // 结局账按 `turn/end.seq` 记，`seq` 是**每台主机各自**的编程序号：
+        // 拿 A 机器的 seq 去比 B 机器的 seq，会把一条从没报过的结局判成已报过。
+        outcomes.clear()
+        // 连接判定器同理：它记着「上一台断多久了、提醒过没有」。
+        // 不复位的话，切到一台连得好好的主机之后，那条「连不上」还挂在通知栏里
+        // ——因为新连接的第一帧被订阅处刻意跳过（不构成「变化」），
+        // 判定器永远不会知道自己已经恢复，`takeSettle` 也就永远不触发。
+        link.reset()
+        // 账号是**每台桌面端机器各自的**：切过去之后那台的账号可能是好的。
+        accounts.reset()
         if (client == null) return
 
         linkJob = scope.launch {
@@ -142,6 +190,134 @@ class NotifyCoordinator(
     /** 界面推「App 是否在前台」。 */
     fun setForeground(value: Boolean) {
         foreground = value
+    }
+
+    /**
+     * 容器推「载波现在是什么状态」（R056 缺口 3）。
+     *
+     * 由 `AppContainer` 订阅 `connection.mux.stats` 后喂进来，而不是协调器自己去
+     * 订阅——它只认识 `RemoteEventsClient`，不认识 `DshConnection`，多一样依赖就
+     * 多一样测试要造的东西。
+     *
+     * @param nowMillis 当前墙钟。由调用方给而不是内部读时钟：判定里有 90 秒宽限，
+     *   测试必须能瞬间跨过它。
+     */
+    fun onCarrier(state: CarrierState?, nowMillis: Long) {
+        val phase = linkPhaseOf(state)
+        when (val action = link.onCarrier(phase, nowMillis)) {
+            is LinkAction.Silent -> Unit
+            is LinkAction.Warn -> deliverLinkWarning(action.phase, nowMillis)
+            // 之前提醒过「收不到了」，现在连回来了：换成一条「已经连回来」而不是
+            // 直接撤掉。撤掉的话用户只看到通知莫名消失，无从判断是恢复了、
+            // 还是自己不小心划掉了——而这两件事对他的行动含义完全不同。
+            is LinkAction.Clear -> center.postLink(
+                offline = false,
+                title = NoticeText.onlineTitle(),
+                text = NoticeText.onlineText(),
+            )
+            is LinkAction.Settle -> Unit
+        }
+        // 补账与「撤提醒」是两条独立的出口：断 30 秒没到宽限就恢复的，
+        // 上面拿到的是 `Silent`（没发过警告所以没得撤），但事件照样丢了、照样要补。
+        if (phase == LinkPhase.Up && link.takeSettle()) settleMissedOutcomes()
+    }
+
+    /** 发「连不上 / 需要重新配对」的提醒。 */
+    private fun deliverLinkWarning(phase: LinkPhase, nowMillis: Long) {
+        if (phase == LinkPhase.Unpaired) {
+            center.postLink(
+                offline = true,
+                title = NoticeText.unpairedTitle(),
+                text = NoticeText.unpairedText(),
+            )
+            return
+        }
+        val since = link.downSinceMillis() ?: nowMillis
+        val seconds = ((nowMillis - since) / 1000L).coerceAtLeast(0L)
+        center.postLink(
+            offline = true,
+            title = NoticeText.offlineTitle(),
+            text = NoticeText.offlineText(seconds),
+        )
+    }
+
+    /**
+     * 重连之后补账：把断线期间正在跑的会话逐个查一遍结局。
+     *
+     * ## 为什么不只是「重发那些丢失的通知」
+     * 断线期间的事件是**永久丢了**（旁路是 `replay = 0` + `DROP_OLDEST`），
+     * 补不回来。能补的是**结果**：那些会话现在是什么状态。所以这里不重放事件，
+     * 而是对每个「断线前在跑」的会话重新查一次 `turn/end`。
+     *
+     * ## 为什么只补「断线前在跑」的
+     * 没在跑的会话没有正在进行的一轮，结局早就在账上了。`edge` 里记着跑没跑完
+     * （[CompletionEdge.runningIds]），正好就是这份名单。
+     */
+    private fun settleMissedOutcomes() {
+        val running = edge.runningIds()
+        if (running.isEmpty()) return
+        for (sessionId in running) {
+            scope.launch { postSettledOutcome(sessionId) }
+        }
+    }
+
+    /**
+     * 补账路径的结局查询：与 [postOutcome] 的区别是**必须确认没有轮次开着**。
+     *
+     * 分开写而不是给 [postOutcome] 加参数：即时路径的语义是「结束是既定事实」，
+     * 补账路径是「结束只是可能」；两条判断一旦合并，后来者很难分清哪个分支在防谁。
+     */
+    private suspend fun postSettledOutcome(sessionId: String) {
+        // 与 [postOutcome] 相反的顺序：**先判门控，再查结局**。
+        //
+        // 补账路径什么账都还没记（连结局都没查），所以 Skip 时直接走人最干净：
+        // 不留任何「已报」痕迹，将来真有事件再来时还能正常报。
+        //
+        // 不能像原先那样「先 `decide` 再判门控」：`decide` 会写 `postedSeq`，
+        // 而门控 Skip 时什么都不发——用户在后台期间这一轮跑完了、他此刻正看着这个
+        // 会话（所以不发），但他随后切到后台时 `running` **不会再翻转第二次**，
+        // 这次结局就永久丢了。这与 [postOutcome] 里 A4 那条是同一类错误。
+        val channel = NoticeChannels.DONE
+        val delivery = NoticeGate.decide(
+            visibility = NoticeVisibility(
+                foreground = foreground,
+                viewingSessionId = viewingSessionId,
+                completedSessionId = sessionId,
+            ),
+            channelId = channel,
+            permissionGranted = center.canPost(),
+            channelEnabled = settings.effectiveEnabled(channel, center.isChannelEnabled(channel)),
+        )
+        if (delivery == NoticeDelivery.Skip) return
+
+        val name = NoticeText.sessionName(names.titleOf(sessionId), sessionId)
+        val decision = outcomeMutex.withLock {
+            val probe = fetchLastTurn?.let { fetch ->
+                withTimeoutOrNull(OUTCOME_QUERY_TIMEOUT_MS) { fetch(sessionId) }
+            }
+            // ⚠️ 补账路径**查不到就不报**，与即时路径相反。
+            //
+            // 即时路径知道「这一轮确实停了」（running 翻转是事实），查不到结局只是
+            // 不知道**怎么**停的，所以退回「任务结束」是诚实的。补账路径什么都不知道：
+            // 它只有一份「断线前记着在跑」的名单。断线期间那个会话可能已经跑完、
+            // 已经被删除（`Removed` 事件也在断线里丢了，`edge` 无从得知）、或者
+            // 根本是另一台机器上的旧账。此时查不到结局，凭空报一条「任务结束 · xxx」
+            // 会让用户点进一个**不存在的会话**。
+            if (probe == null) {
+                OutcomeDecision.Skip
+            } else if (!probe.settled) {
+                // 还有一轮开着：结论不成立，不发。
+                OutcomeDecision.Skip
+            } else {
+                outcomes.decide(sessionId, probe.lastEnd, name)
+            }
+        }
+
+        when (decision) {
+            is OutcomeDecision.AlreadyNotified -> Unit
+            is OutcomeDecision.Skip -> Unit
+            is OutcomeDecision.Notify -> deliver(sessionId, name, decision.notice, delivery)
+        }
     }
 
     /** 用首页那份会话列表播种标题表（`session/list` 每次刷新调一次）。 */
@@ -188,6 +364,7 @@ class NotifyCoordinator(
                 center.cancelDone(notification.sessionId)
                 edge.forget(notification.sessionId)
                 names.forget(notification.sessionId)
+                outcomes.forget(notification.sessionId)
                 // 审批通知不在这里撤：`eventId` 与 `sessionId` 没有稳定映射，
                 // 硬要按会话找会误撤别人的。它们会在 `syncApprovals` 下一次对账时
                 // 因「不在 approvals 列表里」被统一撤掉。
@@ -196,7 +373,9 @@ class NotifyCoordinator(
             is SessionNotification.Status -> {
                 val edgeHit = edge.observe(notification.sessionId, notification.running)
                 if (edgeHit == true) {
-                    postDone(notification.sessionId, failed = false, reason = null)
+                    // 不再直接发「任务结束」：先查这一轮的结局。查不到才退回旧口径
+                    // （会话确实停了，只是我们看不到它是怎么停的）。
+                    launchOutcome(notification.sessionId, errorMessage = null)
                 }
             }
 
@@ -206,18 +385,83 @@ class NotifyCoordinator(
                 // 不依赖边沿——但会顺手把 edge 标成不在跑，避免紧随其后的
                 // status(false) 再发一条「任务结束」（同一件事响两次）。
                 edge.observe(notification.sessionId, false)
-                postDone(notification.sessionId, failed = true, reason = notification.message)
+                // 仍然交给结局查询：若这一轮有 `turn/end` 且带具体错误（429 之类），
+                // 用它比用 error 帧的一句话更准；查不到才用 error 帧的原文。
+                launchOutcome(notification.sessionId, errorMessage = notification.message)
             }
 
             is SessionNotification.Activity -> {
                 // 「有活动」只影响列表排序与红点，不产生通知。显式列出而不写 else，
                 // 是为了将来加第五种事件时编译能提醒到这里。
             }
+
+            is SessionNotification.AccountExpired ->
+                onAccountProblem(AccountProblem.SessionExpired)
+
+            is SessionNotification.AccountSignIn ->
+                onAccountProblem(AccountProblem.ModelSignIn)
+
+            is SessionNotification.CredentialsChanged -> {
+                // 凭据变了：之前那条「去重新登录」已经过期。撤掉它，并清账，
+                // 否则下次再失效时用户会一声不吭。
+                if (accounts.onCredentialsChanged()) {
+                    center.postAccount(
+                        title = NoticeText.accountFixedTitle(),
+                        text = NoticeText.accountFixedText(),
+                        resolved = true,
+                    )
+                }
+            }
         }
     }
 
-    /** 发一条完成/失败通知（若门控允许）。 */
-    private fun postDone(sessionId: String, failed: Boolean, reason: String?) {
+    /**
+     * 账号侧问题：账号授权失效 / 某个模型要重新登录（R056 缺口 4）。
+     *
+     * 这两条都是**整个桌面端**级的，不属于任何会话，所以不走 [NoticeGate]：
+     * 门控里那些条件（前台、正看着这个会话）对它没有意义——用户正在 App 里看着
+     * 某个会话，也不代表他知道账号已经掉了。
+     *
+     * 唯一该判的是权限与频道：没给通知权限、或用户把这个频道关了，就不发。
+     */
+    private fun onAccountProblem(problem: AccountProblem) {
+        if (!accounts.onProblem(problem)) return
+        val channel = NoticeChannels.DONE
+        val delivery = NoticeGate.decide(
+            visibility = NoticeVisibility(foreground = foreground),
+            channelId = channel,
+            permissionGranted = center.canPost(),
+            channelEnabled = settings.effectiveEnabled(channel, center.isChannelEnabled(channel)),
+        )
+        if (delivery == NoticeDelivery.Skip) return
+        when (problem) {
+            AccountProblem.SessionExpired -> center.postAccount(
+                title = NoticeText.accountExpiredTitle(),
+                text = NoticeText.accountExpiredText(),
+            )
+            AccountProblem.ModelSignIn -> center.postAccount(
+                title = NoticeText.accountSignInTitle(),
+                text = NoticeText.accountSignInText(),
+            )
+        }
+    }
+
+    /**
+     * 查这一轮的结局，然后按结局发通知（R056 缺口 5）。
+     *
+     * 为什么不在 [handle] 里同步做：`handle` 是事件收集协程里的普通函数，里面
+     * 发一个网络请求会把后续所有事件一起卡住（审批、提问的通知都会迟到）。
+     * 所以这里只启动一个协程，收集循环立刻返回。
+     *
+     * 查询失败（超时 / 断连 / 服务端拒绝）一律当「查不到」，退回 R056 首版的
+     * 口径：error 帧照着发失败、否则发「任务结束」。**不因为查不到就不发**——
+     * 用户已经知道那一轮停了，静默才是最坏的结果。
+     */
+    private fun launchOutcome(sessionId: String, errorMessage: String?) {
+        scope.launch { postOutcome(sessionId, errorMessage) }
+    }
+
+    private suspend fun postOutcome(sessionId: String, errorMessage: String?) {
         val channel = NoticeChannels.DONE
         val delivery = NoticeGate.decide(
             visibility = NoticeVisibility(
@@ -229,9 +473,70 @@ class NotifyCoordinator(
             permissionGranted = center.canPost(),
             channelEnabled = settings.effectiveEnabled(channel, center.isChannelEnabled(channel)),
         )
-        if (delivery == NoticeDelivery.Skip) return
+        // ⚠️ 门控只决定「发不发」，**不能顺手跳过记账**。
+        //
+        // 原来这里在 `delivery == Skip` 时直接 return，连 `outcomes.noteError` 都不做。
+        // 后果：App 在前台、用户正看着这个会话时（最常见的路径——用户刚发完消息就
+        // 盯着等），这一轮的结局永远不会进账；而他随后切到后台时，`running` **已经
+        // 不会再翻转第二次**，于是「这一轮被截断了」「这一轮被 blocked 了」这类提示
+        // 一条都收不到——只有下次有新的事件时才可能被补上。
+        //
+        // 仍然要省下网络流：Skip 时不去查（查询只为拼通知文案），但要记账。
         val name = NoticeText.sessionName(names.titleOf(sessionId), sessionId)
-        center.postDone(sessionId, name, failed, reason, silent = delivery == NoticeDelivery.Silent)
+        val decision: OutcomeDecision? = outcomeMutex.withLock {
+            if (errorMessage != null) outcomes.noteError(sessionId, errorMessage)
+            // 注定不发通知时不再去查结局（省一条 `session/follow`），错误原文已经
+            // 记进账里了（上面那行 noteError），下一条真正要发的通知会把它带上。
+            //
+            // 不在这里调 `decide`：没查到结局的 `decide` 会往账上记一笔「已就这次
+            // 翻转发过通知」，而我们并没有发——那会把之后真正该发的那条压掉。
+            if (delivery == NoticeDelivery.Skip) return@withLock null
+            val probe = fetchLastTurn?.let { fetch ->
+                withTimeoutOrNull(OUTCOME_QUERY_TIMEOUT_MS) { fetch(sessionId) }
+            }
+            // ⚠️ 即时路径也要看 `settled`，只在**窗口末尾确实有一轮开着**时才不认这条结局。
+            //
+            // 原先这里无条件用 `probe?.lastEnd`，理由是「从 running 已翻转进来，结束是
+            // 既定事实」。这句话对「跑完了」成立，对 `api-session/status` 的**全部语义**
+            // 不成立：服务端是 `agent.status = phase.kind in (idle, maintenance) ? idle :
+            // running` 的翻转，进入 `maintenance` 阶段同样会发一条 `running = false`，
+            // 而那一轮并没有结束。更常见的是竞态——`running=false` 到达时用户已经又发了
+            // 一条，新一轮 `turn/start` 已在窗口里，此时拿到的 `turn/end` 属于**上一轮**。
+            //
+            // 那种情况下报「任务结束」是把正在跑的任务说成跑完了；更糟的是上一轮的结局
+            // 若是 `Aborted(USER)` 会被 `outcomeNotice` 判成 `Skip`，于是这一轮真正该发的
+            // 通知**一条都没有**。
+            val found = if (probe != null && probe.settled) probe.lastEnd else null
+            outcomes.decide(sessionId, found, name)
+        }
+
+        when (decision) {
+            null -> Unit
+            is OutcomeDecision.AlreadyNotified -> Unit
+            is OutcomeDecision.Skip -> Unit
+            is OutcomeDecision.Notify -> deliver(sessionId, name, decision.notice, delivery)
+        }
+    }
+
+    /** 把一条结局按门控结果投递出去。 */
+    private fun deliver(
+        sessionId: String,
+        sessionName: String,
+        notice: OutcomeNotice,
+        delivery: NoticeDelivery,
+    ) {
+        val silent = delivery == NoticeDelivery.Silent
+        when (notice) {
+            // 走到这里的情况：`decide` 已把 `OutcomeNotice.Skip` 转成
+            // `OutcomeDecision.Skip`，所以这一支正常情况下到不了。保留它是因为
+            // `when` 必须穷尽，且 [deliver] 是 public 之外唯一入口、将来若有人
+            // 绕过 `decide` 直接投递，这里静默反而比崩掉安全（通知层不该抛）。
+            is OutcomeNotice.Skip -> Unit
+            is OutcomeNotice.Done ->
+                center.postDone(sessionId, sessionName, notice.failed, notice.reason, silent)
+            is OutcomeNotice.Attention ->
+                center.postAttention(sessionId, notice.title, notice.text, silent)
+        }
     }
 
     /**
@@ -362,5 +667,15 @@ class NotifyCoordinator(
     companion object {
         /** 已通知过的 `eventId` 环容量。 */
         const val NOTIFIED_RING = 64
+
+        /**
+         * 查一次结局最多等多久。
+         *
+         * 为什么不设更长：这条查询发生在「用户已经被通知要响一声」的路径上，
+         * 卡住只会让通知迟迟不来。4 秒够一次 `session/follow` 的首帧到达
+         * （局域网内通常几十毫秒），超时就按「查不到」处理——退回旧口径照样
+         * 会有一条「任务结束」，只是说不出具体是怎么结束的。
+         */
+        const val OUTCOME_QUERY_TIMEOUT_MS = 4_000L
     }
 }

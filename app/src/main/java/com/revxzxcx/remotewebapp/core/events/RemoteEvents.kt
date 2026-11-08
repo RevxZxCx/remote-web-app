@@ -177,6 +177,32 @@ sealed interface SessionNotification {
      */
     data class Error(val sessionId: String, val message: String) : SessionNotification
 
+    /**
+     * 桌面端账号授权失效（`deepseek-account/session-expired`）。
+     *
+     * 服务端**撤销/过期凭据时**发一次，**无负载**。与 [AccountSignIn] 的区别见
+     * `AccountProblem` 的 KDoc：这条是「账号本身没了」，那条是「这个 provider 要重登」。
+     */
+    data object AccountExpired : SessionNotification
+
+    /**
+     * 模型 provider 要求重新登录（`deepseek-account/model-sign-in-required`）。
+     *
+     * 服务端在 `agent/error` 里看到 `LlmError.code == "ACCOUNT_SIGN_IN_REQUIRED"` 时发，**无负载**。
+     * 注意它**同时**会伴随一条 `api-session/error`——两条各自都有用：后者告诉用户
+     * 「这个会话这一轮挂了」，前者告诉他「不是这个会话的问题，是账号要重登」。
+     */
+    data object AccountSignIn : SessionNotification
+
+    /**
+     * 凭据记录变了（`credentials/record-updated`）。
+     *
+     * 不是坏消息，是**复位信号**：用户去桌面端重新登录成功后，服务端不会专门来一条
+     * 「好了」，但这条会发。用它把「已提醒过账号问题」的账清掉，否则下次再失效时
+     * App 会一声不吭。
+     */
+    data object CredentialsChanged : SessionNotification
+
     companion object {
         /**
          * 把一帧 `emit` 翻译成 [SessionNotification]；不关心的 `event` 返回 null。
@@ -206,6 +232,11 @@ sealed interface SessionNotification {
                     // 消息缺失也要认：红点该亮就得亮，文案只是提示。空串比丢掉整条事件安全。
                     Error(id, (args.getOrNull(1) as? JsonPrimitive)?.content.orEmpty())
                 }
+                // 账号侧的三条（R056 缺口 4）。两条坏消息都是**无负载 emit**，
+                // 所以不看 args；`credentials/record-updated` 只是「凭据变了」的复位信号。
+                "deepseek-account/session-expired" -> AccountExpired
+                "deepseek-account/model-sign-in-required" -> AccountSignIn
+                "credentials/record-updated" -> CredentialsChanged
                 else -> null
             }
         }

@@ -29,12 +29,21 @@ import com.revxzxcx.remotewebapp.core.prefs.PresetPreferences
 import com.revxzxcx.remotewebapp.core.prefs.ThemePreferences
 import com.revxzxcx.remotewebapp.core.protocol.DshJson
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
+import com.revxzxcx.remotewebapp.core.session.ChatFrame
+import com.revxzxcx.remotewebapp.core.session.ChatRepository
+import com.revxzxcx.remotewebapp.core.session.TurnProbe
+import com.revxzxcx.remotewebapp.core.session.lastTurnEnd
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import com.revxzxcx.remotewebapp.core.protocol.CarrierState
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -90,6 +99,15 @@ class AppContainer(context: Context) {
      * 清理它那片缓存分区）。用 `SupervisorJob`：一次维护失败不该取消整个作用域。
      */
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * 当前那条「载波状态 → 通知层」的订阅（R056 缺口 3）。
+     *
+     * 换连接时必须先取消再重订：旧连接的 `stats` 是它自己的 `StateFlow`，
+     * 留着不取消的话，旧连接最后那一帧 `Reconnecting` 会继续喂给判定器，
+     * 新连接却连得好好的——表现是「明明连着，却一直说连不上」。
+     */
+    private var carrierJob: Job? = null
 
     /**
      * 凭证簿的「读-改-写」串行锁（R054）。
@@ -168,7 +186,82 @@ class AppContainer(context: Context) {
         center = notificationCenter,
         settings = noticeSettings,
         names = SessionNameTable(),
+        fetchLastTurn = { sessionId -> fetchLastTurnEnd(sessionId) },
     )
+
+    /**
+     * 查一个会话窗口内最后一条 `turn/end`（R056 缺口 5）。
+     *
+     * 只在「检测到这一轮结束了」时调一次，拿到就取消订阅——**不常驻**。
+     * 理由：常驻订阅要为每个正在跑的会话各开一条 `session/follow` 流，
+     * 而通知层真正需要的只是「刚刚那一轮的结局」，一个瞬间值。
+     *
+     * 取快照而不是等流上的下一条事件：等下一事件意味着「已经结束的那一轮的
+     * `turn/end` 永远不会再来」——它早就在历史窗口里了。
+     *
+     * 失败一律返回 null（连接断了、服务端拒绝、超时由调用方兜）：
+     * 通知层据此退回「这一轮结束了」的旧口径，而不是彻底不发。
+     */
+    /**
+     * 订阅一条连接的载波状态并喂给通知层（R056 缺口 3）。
+     *
+     * ## 为什么要订阅 `stats` 而不是等某个 `AppState` 变化
+     * `AppState` 只有 `Loading / Unpaired / Paired` 三种，**不含「重连中」**：
+     * 连接断了又自己在重试的过程里，`AppState` 一直是 `Paired`。也就是说
+     * 「App 这会儿收不到东西」这件事在容器对外暴露的状态里**根本不存在**，
+     * 只有 mux 自己知道（`MuxStats.carrier`）。
+     *
+     * ## 为什么要去重
+     * `stats` 是 `StateFlow`，但 `MuxStats` 里还有帧计数等字段——它们每秒变几十次。
+     * 每次都喂给判定器会让 90 秒宽限被「同一状态的重复值」不断刷新计时起点吗？
+     * 不会（[LinkNoticeGate] 只在 Down 时记起点），但会产生大量无谓的调用。
+     * 这里只把 `carrier` **真的变了**的那些帧转发下去。
+     *
+     * @param connection 新连接；传 `null` 表示没有连接了（退配对），此时退订即可。
+     */
+    private fun watchCarrier(connection: DshConnection?) {
+        carrierJob?.cancel()
+        carrierJob = null
+        if (connection == null) {
+            // 没有连接 = 不存在「正在重连」这回事，把判定器恢复成初始态。
+            // 不复位的话，下次配对成功时会拿着上一台的断开计时立刻弹一条「连不上」。
+            notifier.onCarrier(CarrierState.Idle, System.currentTimeMillis())
+            return
+        }
+        carrierJob = appScope.launch {
+            var last: CarrierState? = null
+            connection.mux.stats
+                .map { it.carrier }
+                .distinctUntilChanged()
+                .collect { carrier ->
+                    // `distinctUntilChanged` 已经去重，这里的 `last` 只用于跳过
+                    // 第一个值（订阅瞬间那帧不构成「变化」，否则每次切主机都会
+                    // 把 Connected 当成一次「连上了」而去补一遍账）。
+                    if (last == null) {
+                        last = carrier
+                        return@collect
+                    }
+                    last = carrier
+                    notifier.onCarrier(carrier, System.currentTimeMillis())
+                }
+        }
+    }
+
+    private suspend fun fetchLastTurnEnd(sessionId: String): TurnProbe? {
+        val link = linkStore.current()
+        val connection = link.connection ?: return null
+        return runCatching {
+            val snapshot = ChatRepository(connection).follow(sessionId)
+                .first { it is ChatFrame.Snapshot } as ChatFrame.Snapshot
+            TurnProbe(
+                lastEnd = lastTurnEnd(snapshot.envelopes),
+                // 用快照自己算好的 `tailTurnOpen`，不拿信封重算一遍：这个字段是
+                // `ChatFrameParser` 按窗口里最后一个 turn/start 与 turn/end 谁在后
+                // 得出的，R004 P2-1 已经为它踩过一次坑，重算一份只会多一处会漂移的实现。
+                tailTurnOpen = snapshot.tailTurnOpen,
+            )
+        }.getOrNull()
+    }
 
     /**
      * 「上次进程是怎么没的」探测器（R056 / Q3）。
@@ -562,6 +655,7 @@ class AppContainer(context: Context) {
                 // 通知订阅跟着连接走。复用分支里 `attach` 收到的是同一个实例，
                 // 它会立刻返回（不改订阅）——配置变更重跑 bootstrap 时不会重复订一遍。
                 notifier.attach(plan.connection.remoteEvents)
+                watchCarrier(plan.connection)
             }
 
             ConnectionPlan.Drop -> {
@@ -574,9 +668,13 @@ class AppContainer(context: Context) {
                 // 先退订再关连接：反过来的话，`RemoteEventsClient` 已经随连接一起死了，
                 // 协调器手里那个引用指向一条不再发事件的流，重连后也不会自己好。
                 notifier.attach(null)
+                watchCarrier(null)
                 // 退配对 = 这台设备不再属于任何主机：通知栏里那些条目全是上一台机器的，
                 // 留着只会让用户点进一个空 App。待打开的会话 id 同理。
                 notificationCenter.cancelAll()
+                // 「连不上」那条也必须撤：它说的是「等一下会重连」，
+                // 而退配对之后再也不会重连了，留着等于一句永远兑现不了的承诺。
+                notificationCenter.cancelLink()
                 NoticeIntents.clear()
                 previous?.close()
             }
@@ -622,6 +720,7 @@ class AppContainer(context: Context) {
         // 换主机就换了一个 `RemoteEventsClient`，旧引用指向一条已死的流，
         // 而那种「静默不再响」最难被发现（用户只会觉得「最近怎么不提醒了」）。
         notifier.attach(rebuilt.remoteEvents)
+        watchCarrier(rebuilt)
         // B004 的关键一行：新簿与新连接在**同一次**赋值里换掉。放到这里（而不是更早）是因为
         // 上面每个挂起点之后都不该让观察者看到半新半旧的一份。
         linkStore.publish(book = book, connection = rebuilt)
