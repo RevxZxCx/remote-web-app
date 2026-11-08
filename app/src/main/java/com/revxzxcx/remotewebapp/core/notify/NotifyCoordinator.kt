@@ -1,6 +1,7 @@
 package com.revxzxcx.remotewebapp.core.notify
 
 import com.revxzxcx.remotewebapp.core.events.ApprovalRequest
+import com.revxzxcx.remotewebapp.core.events.QuestionRequest
 import com.revxzxcx.remotewebapp.core.events.RemoteEventsClient
 import com.revxzxcx.remotewebapp.core.events.SessionNotification
 import com.revxzxcx.remotewebapp.core.session.SessionListParser
@@ -66,6 +67,8 @@ class NotifyCoordinator(
 
     private var approvalJob: kotlinx.coroutines.Job? = null
 
+    private var questionJob: kotlinx.coroutines.Job? = null
+
     /**
      * 已经为哪些 `eventId` 发过审批通知。
      *
@@ -80,6 +83,17 @@ class NotifyCoordinator(
 
     private val notifiedApprovalsSet = HashSet<String>()
 
+    /**
+     * 已经为哪些 `eventId` 发过**提问**通知。
+     *
+     * 与审批那对本账分开，不共用：审批与提问是两套独立的 waterfall 事件流，
+     * `eventId` 由服务端各自生成。共用一本的坏处是「一条审批通知把提问的记账挤掉」，
+     * 于是同一条提问被重复通知。
+     */
+    private val notifiedQuestions = ArrayDeque<String>()
+
+    private val notifiedQuestionsSet = HashSet<String>()
+
     private val parser = SessionListParser()
 
     /**
@@ -92,6 +106,7 @@ class NotifyCoordinator(
         current = client
         linkJob?.cancel()
         approvalJob?.cancel()
+        questionJob?.cancel()
         // 换连接 = 换了一台机器（或同一台机器的另一次连接）。两本按 eventId 记的账
         // 必须一起清：不清的话，新连接上「同 eventId 的请求」会被当成已经通知过而跳过
         // ——用户永远收不到它；反过来，旧账里的 id 在新连接上根本不存在，
@@ -112,6 +127,10 @@ class NotifyCoordinator(
             // 用 `collect` 而不是 `collectLatest`：通知是**逐条**该发的，
             // 取消前一条会丢掉中间某个请求（waterfall 丢一条就永久卡住）。
             client.approvals.collect { list -> syncApprovals(list) }
+        }
+        questionJob = scope.launch {
+            // 同审批：waterfall 丢一条就永久卡住，所以不能 `collectLatest`。
+            client.questions.collect { list -> syncQuestions(list) }
         }
     }
 
@@ -263,10 +282,69 @@ class NotifyCoordinator(
         notifiedApprovals.remove(eventId)
     }
 
+    /**
+     * 同步提问列表：新出现的发通知，消失的撤通知。
+     *
+     * 与 [syncApprovals] 是同一套双向对账、同一个理由（`questions` 也是 `StateFlow`，
+     * 重连后可能整体换一批，只判新增会留下撤不掉的旧通知）。**分开两本账**而不是
+     * 合并成一个「待回答请求」列表：审批与提问的 `eventId` 由服务端各自生成，
+     * 混在一本里会让两边的环容量互相挤占，而且撤通知时要按不同的 id 段撤。
+     *
+     * 为什么提问必须发通知：`user-questions/request` 与 `approval/request` 在
+     * `API_REMOTE_FORWARDED_EVENTS` 里**都是 `waterfall`**，服务端抛给第一个愿意
+     * 回答的远程监听者然后等。没人答就是 `NO_PROVIDER`，任务直接失败——而那个失败
+     * 原因（`no user-questions answerer accepted the request`）对用户毫无信息量。
+     */
+    private fun syncQuestions(list: List<QuestionRequest>) {
+        val alive = list.map { it.eventId }.toHashSet()
+        val gone = notifiedQuestionsSet - alive
+        for (eventId in gone) {
+            center.cancelQuestionByEventId(eventId)
+            forgetNotifiedQuestion(eventId)
+        }
+        for (request in list) {
+            if (request.eventId in notifiedQuestionsSet) continue
+            val channel = NoticeChannels.ASK
+            val delivery = NoticeGate.decide(
+                visibility = NoticeVisibility(
+                    foreground = foreground,
+                    viewingSessionId = viewingSessionId,
+                    completedSessionId = request.agentId,
+                ),
+                channelId = channel,
+                permissionGranted = center.canPost(),
+                channelEnabled = settings.effectiveEnabled(channel, center.isChannelEnabled(channel)),
+            )
+            if (delivery == NoticeDelivery.Skip) continue
+            markNotifiedQuestion(request.eventId)
+            center.postQuestion(
+                eventId = request.eventId,
+                sessionId = request.agentId,
+                first = request.questions.firstOrNull(),
+                count = request.questions.size,
+            )
+        }
+    }
+
+    private fun markNotifiedQuestion(eventId: String) {
+        if (!notifiedQuestionsSet.add(eventId)) return
+        notifiedQuestions.addLast(eventId)
+        while (notifiedQuestions.size > NOTIFIED_RING) {
+            notifiedQuestionsSet.remove(notifiedQuestions.removeFirst())
+        }
+    }
+
+    private fun forgetNotifiedQuestion(eventId: String) {
+        if (!notifiedQuestionsSet.remove(eventId)) return
+        notifiedQuestions.remove(eventId)
+    }
+
     /** 清空「已通知过」的环（换连接时用，见 [attach]）。 */
     private fun forgetAllNotified() {
         notifiedApprovals.clear()
         notifiedApprovalsSet.clear()
+        notifiedQuestions.clear()
+        notifiedQuestionsSet.clear()
     }
 
     /**

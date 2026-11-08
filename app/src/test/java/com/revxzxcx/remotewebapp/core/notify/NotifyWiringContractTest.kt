@@ -148,4 +148,54 @@ class NotifyWiringContractTest {
             body.contains("NoticeIntents.clear()"),
         )
     }
+
+    @Test
+    fun `必须订阅 questions 流 否则模型提问永远不通知`() {
+        // 缺口2（m11638）：`user-questions/request` 与 `approval/request` 在
+        // `API_REMOTE_FORWARDED_EVENTS` 里**都是 waterfall**，服务端抛给第一个愿意回答的
+        // 远程监听者然后**等**。没人答就是 `NO_PROVIDER`，任务直接失败。
+        // 只订阅 approvals 而不订阅 questions，等于「模型要授权时打断你、
+        // 模型要信息时一声不吭让任务挂掉」——这两种情况对用户的意义完全一样。
+        val body = codeOnly(bodyOf(coordinatorSource(), "fun attach(client: RemoteEventsClient?)"))
+        assertTrue("attach 里必须订阅 client.questions", body.contains("client.questions.collect"))
+        assertTrue("订阅要挂在 syncQuestions 上", body.contains("syncQuestions("))
+        assertTrue(
+            "换连接时要取消提问订阅，否则切过主机之后有两条订阅都在发",
+            body.contains("questionJob?.cancel()"),
+        )
+    }
+
+    @Test
+    fun `提问也要双向对账 不能只听新增`() {
+        // `questions` 是 StateFlow，重连后可能整体换一批（旧的被清空）。
+        // 只判新增会留下一排永远撤不掉的旧通知——点进去那个问题早就不存在了。
+        val body = codeOnly(bodyOf(coordinatorSource(), "private fun syncQuestions("))
+        assertTrue("要算出「已经不在了」的那批", body.contains("notifiedQuestionsSet - alive"))
+        assertTrue("消失的要撤通知", body.contains("cancelQuestionByEventId("))
+        assertTrue(
+            "撤了通知还要销账，否则下次同 eventId 又来会被当成通知过",
+            body.contains("forgetNotifiedQuestion("),
+        )
+        assertTrue(
+            "发过要记账，否则同一条提问会被反复通知",
+            body.contains("markNotifiedQuestion("),
+        )
+        assertTrue("同样要过闸门（权限/频道/前后台）", body.contains("NoticeGate.decide("))
+        assertTrue(
+            "闸门说 Skip 就必须真的跳过：只算出来不判，等于前台正看着、用户没授权、" +
+                "频道被关掉时照样弹通知",
+            body.contains("if (delivery == NoticeDelivery.Skip) continue"),
+        )
+    }
+
+    @Test
+    fun `换连接时要清掉提问的账`() {
+        val body = codeOnly(bodyOf(coordinatorSource(), "private fun forgetAllNotified()"))
+        assertTrue("审批的账要清", body.contains("notifiedApprovals.clear()"))
+        assertTrue(
+            "提问的账也要清：不清的话新主机上同 eventId 的提问被当成通知过而跳过",
+            body.contains("notifiedQuestions.clear()"),
+        )
+        assertTrue(body.contains("notifiedQuestionsSet.clear()"))
+    }
 }

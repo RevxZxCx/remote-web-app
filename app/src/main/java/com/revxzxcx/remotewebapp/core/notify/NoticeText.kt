@@ -1,6 +1,7 @@
 package com.revxzxcx.remotewebapp.core.notify
 
 import com.revxzxcx.remotewebapp.core.events.ApprovalRequest
+import com.revxzxcx.remotewebapp.core.session.AskQuestion
 
 /**
  * 通知里的文案（R056）。
@@ -62,4 +63,48 @@ object NoticeText {
      */
     fun sessionName(title: String?, sessionId: String): String =
         title?.takeIf { it.isNotBlank() } ?: "未命名会话 ${sessionId.takeLast(8)}"
+
+    // ── 提问（user-questions/request）───────────────────────────────────────
+    //
+    // 为什么提问也要通知：它与审批是**同一种协议**——`user-questions/request` 在
+    // `API_REMOTE_FORWARDED_EVENTS` 里同样是 `mode: 'waterfall'`，服务端把请求抛给
+    // 第一个愿意回答的远程监听者然后**等**。没人答就是
+    // `NO_PROVIDER`（`no user-questions answerer accepted the request`），
+    // 也就是整个任务直接失败。只通知审批、不通知提问是不自洽的：
+    // 两者对用户的意义完全一样——「模型停下来等你」。
+    //
+    // 文案不复用审批那套：提问的标题应该直接是问题本身，因为问题往往一句话
+    // 就能让人决定「要不要现在处理」，而「请求授权：工具名」必须点开才知道问什么。
+
+    /**
+     * 提问通知的标题。
+     *
+     * 用**第一道题的 `header`**（模型的短标签，形如「选择方案」）优先，
+     * 没有就用问题正文的首行。都不为空时也不拼在一起：通知标题只有一行，
+     * 拼起来必然被截断，反而两头都读不全。
+     *
+     * @param count 这次一共几道题；>1 时标题带上「等 N 个问题」，让用户知道
+     *   点进去不是答一道就完事。
+     */
+    fun questionTitle(first: AskQuestion?, count: Int): String {
+        val head = first?.header?.takeIf { it.isNotBlank() }
+            ?: first?.question?.lineSequence()?.firstOrNull()?.trim()?.takeIf { it.isNotBlank() }
+            ?: "模型有问题要问你"
+        return if (count > 1) "$head（等 $count 个问题）" else head
+    }
+
+    /**
+     * 提问通知的正文。
+     *
+     * 优先用第一道题的 `detail`（模型给的补充说明），没有就用问题正文本身；
+     * 两者都空时给一句兜底。**不再回落成「工具 X 需要你的授权」**——那是审批的语义，
+     * 用在提问上会让用户以为要批准什么危险操作。
+     */
+    fun questionText(first: AskQuestion?): String {
+        val detail = first?.detail?.takeIf { it.isNotBlank() }
+        if (detail != null) return detail
+        val question = first?.question?.takeIf { it.isNotBlank() }
+        if (question != null) return question
+        return "点开回答问题，任务才能继续。"
+    }
 }

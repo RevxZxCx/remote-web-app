@@ -299,4 +299,79 @@ class NoticeTextTest {
             NoticeText.sessionName(null, "session-4f5e6d7c"),
         )
     }
+
+    // ── 提问文案（缺口2）────────────────────────────────────────────────────
+    //
+    // 提问与审批是同一套 waterfall 协议，但文案不能混用：审批的「请求授权：工具名」
+    // 用在提问上会让用户以为要批准什么危险操作。
+
+    private fun question(
+        text: String = "用哪个方案？",
+        header: String? = null,
+        detail: String? = null,
+    ) = com.revxzxcx.remotewebapp.core.session.AskQuestion(
+        id = "q1",
+        question = text,
+        header = header,
+        detail = detail,
+    )
+
+    @Test
+    fun `提问标题优先用 header`() {
+        assertEquals("选择方案", NoticeText.questionTitle(question(header = "选择方案"), 1))
+    }
+
+    @Test
+    fun `没有 header 时标题用问题首行 多行只取第一行`() {
+        assertEquals("用哪个方案？", NoticeText.questionTitle(question("用哪个方案？\n第二行细节"), 1))
+    }
+
+    @Test
+    fun `header 是空白时也要回落到问题本身 不能显示一片空`() {
+        assertEquals("用哪个方案？", NoticeText.questionTitle(question(header = "   "), 1))
+    }
+
+    @Test
+    fun `连问题都没有时给兜底标题 不能是空串`() {
+        assertEquals("模型有问题要问你", NoticeText.questionTitle(null, 1))
+    }
+
+    @Test
+    fun `多道题时标题带上数量`() {
+        assertEquals("选择方案（等 3 个问题）", NoticeText.questionTitle(question(header = "选择方案"), 3))
+    }
+
+    @Test
+    fun `只有一道题时标题不加数量 否则是噪音`() {
+        assertFalse(NoticeText.questionTitle(question(header = "选择方案"), 1).contains("个问题"))
+    }
+
+    @Test
+    fun `提问正文优先用 detail`() {
+        assertEquals(
+            "这一版会改动 3 个文件",
+            NoticeText.questionText(question(text = "用哪个方案？", detail = "这一版会改动 3 个文件")),
+        )
+    }
+
+    @Test
+    fun `没有 detail 时正文用问题本身`() {
+        assertEquals("用哪个方案？", NoticeText.questionText(question("用哪个方案？")))
+    }
+
+    @Test
+    fun `提问正文空时给兜底 且不能说成需要你的授权`() {
+        val text = NoticeText.questionText(null)
+        assertEquals("点开回答问题，任务才能继续。", text)
+        assertFalse(
+            "审批语义的文案不能出现在提问上，否则用户以为要批准危险操作",
+            text.contains("授权"),
+        )
+    }
+
+    @Test
+    fun `提问标题不能退化成审批标题`() {
+        val title = NoticeText.questionTitle(question(header = "选择方案"), 1)
+        assertFalse("提问标题不该出现「请求授权」", title.contains("请求授权"))
+    }
 }

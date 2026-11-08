@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat
 import com.revxzxcx.remotewebapp.MainActivity
 import com.revxzxcx.remotewebapp.R
 import com.revxzxcx.remotewebapp.core.events.ApprovalRequest
+import com.revxzxcx.remotewebapp.core.session.AskQuestion
 
 /**
  * 真正碰系统通知 API 的唯一一层（R056）。
@@ -172,9 +173,17 @@ class NotificationCenter(
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setContentIntent(openSessionIntent(sessionId))
             .setAutoCancel(true)
-            // 同一个会话反复跑完时只响第一次（见方法 KDoc）。不同会话各自独立，
-            // 因为 `setOnlyAlertOnce` 的作用域是「这条通知」，而 id 是按会话分的。
-            .setOnlyAlertOnce(true)
+            // 🔴 只有「跑完」才只响第一次；「跑挂」必须每次都响。
+            //
+            // 这里原本写死 `setOnlyAlertOnce(true)`，于是留下一条静默的漏报：
+            // 同一会话先正常跑完（响过一声）→ 再跑一轮并且失败时，`notify()` 用的是
+            // 同一个 id，而 `ONLY_ALERT_ONCE` 的语义是「这条通知已经响过就不再响」，
+            // 结果通知栏文字更新成了「任务出错 · xxx」，却**不响铃、不弹横幅**。
+            // 用户看到的现象正是「跑挂了却一声不吭」——失败比跑完更需要他知道。
+            //
+            // 成功侧保留 `true` 的理由不变：连跑五轮只响一次，否则用户会把这个频道关掉，
+            // 那是比不响更坏的结果。失败侧置 `false`：每一次失败都是独立的事故。
+            .setOnlyAlertOnce(!failed)
             .setCategory(Notification.CATEGORY_STATUS)
             // 锁屏上显示到什么程度由设置决定，见 lockScreenVisibility()。
             .setVisibility(lockScreenVisibility())
@@ -235,6 +244,69 @@ class NotificationCenter(
         postedAsks.remove(eventId)
         manager?.cancel(askId(eventId))
     }
+
+    /**
+     * 发一条「模型有问题要问你」。
+     *
+     * ## 为什么它和审批同频道、同重要性、同样每条独立 id
+     * `user-questions/request` 与 `approval/request` 在
+     * `API_REMOTE_FORWARDED_EVENTS` 里**都是 `mode: 'waterfall'`**：服务端把请求抛给
+     * 第一个愿意回答的远程监听者，然后**等**。没人答就是 `NO_PROVIDER`
+     * （`no user-questions answerer accepted the request`）——任务直接失败，
+     * 而且失败原因对用户毫无信息量。所以它必须和审批一样能打断用户。
+     *
+     * 不再单独开第三个频道：频道是给用户**分组静音**用的。用户想「别在干活时烦我」
+     * 时会去关「需要确认」——提问和审批在他眼里就是同一件事（模型停下来等钱/等信息）。
+     * 拆成两个频道反而会让他关了一个以为安静了、结果另一个还在响。
+     *
+     * ## 没有动作按钮
+     * 审批可以只靠「批准 / 拒绝」两个词完成，适合在通知栏直接点；
+     * 而提问的答案是选项列表或自由文本，通知栏里放不下，硬塞一个「同意」
+     * 会把多选题变成默认选第一项。所以点通知主体进会话，由会话页的交互卡片处理。
+     *
+     * @param eventId waterfall 事件 id，用作通知 id 的稳定哈希（同一条请求重发落同一格）。
+     * @param sessionId 点通知要跳进的会话。
+     */
+    fun postQuestion(eventId: String, sessionId: String?, first: AskQuestion?, count: Int) {
+        val nm = manager ?: return
+        val id = questionId(eventId)
+        val text = NoticeText.questionText(first)
+
+        val notification = NotificationCompat.Builder(context, NoticeChannels.ASK)
+            .setSmallIcon(R.drawable.ic_notice_ask)
+            .setColor(ACCENT_COLOR)
+            .setContentTitle(NoticeText.questionTitle(first, count))
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentIntent(openSessionIntent(sessionId))
+            // 不 autoCancel：用户在通知栏划掉它，问题并不会因此不存在——
+            // 任务还在那里等。真正的移除时机是「已回答」或「请求已消失」，
+            // 由协调器对账后调 [cancelQuestionByEventId]。
+            .setAutoCancel(false)
+            .setCategory(Notification.CATEGORY_MESSAGE)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(lockScreenVisibility())
+            // 每条提问都是独立事件，不能因为「这个会话刚响过」就被静默。
+            .setOnlyAlertOnce(false)
+            .build()
+
+        nm.notify(id, notification)
+    }
+
+    /** 撤掉某条提问通知（已回答、或请求已消失）。 */
+    fun cancelQuestionByEventId(eventId: String) {
+        manager?.cancel(questionId(eventId))
+    }
+
+    /**
+     * 提问通知的 id。
+     *
+     * 与审批**共用 `ASK_ID_BASE` 段但用不同哈希源**会撞车，所以这里加一个固定偏移
+     * 把两段错开——碰撞的后果是「一条提问把一条审批盖掉」，而那条审批背后是一个
+     * 正在等授权的任务。宁可多花 65536 个 id 也不用一个可能撞的方案。
+     */
+    private fun questionId(eventId: String): Int =
+        QUESTION_ID_BASE + (eventId.hashCode() and ASK_ID_MASK)
 
     /**
      * 发过通知、还没撤掉的那些请求，按 `eventId` 索引。
@@ -423,6 +495,15 @@ class NotificationCenter(
 
         /** 审批通知 id 的起点。 */
         const val ASK_ID_BASE = 20_000
+
+        /**
+         * 提问通知 id 的起点。
+         *
+         * 与审批段**必须错开**：两者都是 waterfall，同时挂着的可能性很高；共用一段
+         * 就会互相顶掉，而顶掉的那条背后是一个正在等回答的任务。取 20_000 + 0xFFFF + 1
+         * 之后的整数（= 85_536），保证 `questionId()` 的结果永远落在审批段之外。
+         */
+        const val QUESTION_ID_BASE = 85_536
 
         /** 审批 id 的取值范围掩码（`20_000..20_000+0xFFFF`，与完成通知段不重叠）。 */
         const val ASK_ID_MASK = 0xFFFF
