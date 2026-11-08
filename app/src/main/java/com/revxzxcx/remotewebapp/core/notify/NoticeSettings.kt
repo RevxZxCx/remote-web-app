@@ -107,11 +107,41 @@ class NoticeSettings(context: Context) {
         else -> true
     }
 
+    /**
+     * 「被杀提示」的基线：上一次已经处理到哪个时刻（epoch 毫秒，`0` = 还没建过）。
+     *
+     * 语义是**提示位点的水位线**，不是「上次被杀的时刻」：写入的是
+     * `baselineFor(退出历史)`，即「这批数据我已经看过了」。这样比「记录上次杀掉的时间」
+     * 更稳——同一时刻可能有多条记录，用水位线不会漏也不会重。
+     */
+    var deathBaselineAt: Long
+        get() = prefs.getLong(KEY_DEATH_BASELINE_AT, 0L)
+        set(value) {
+            prefs.edit { putLong(KEY_DEATH_BASELINE_AT, value) }
+        }
+
+    /**
+     * 上一次**进后台**的时刻（epoch 毫秒，`0` = 没记录到）。
+     *
+     * [pickDeathNotice] 用它排除「用户正开着 App 时进程没了」的情况：那种是崩溃，
+     * 提示他「去改电池设置」等于答非所问。没有这个时刻就一律不提示。
+     *
+     * 只在 `onStop` 写、不在 `onStart` 清——保留上一次的值，因为我们要判断的正是
+     * 「这次死亡发生在上次进后台之后」。
+     */
+    var backgroundedAt: Long
+        get() = prefs.getLong(KEY_BACKGROUNDED_AT, 0L)
+        set(value) {
+            prefs.edit { putLong(KEY_BACKGROUNDED_AT, value) }
+        }
+
     private companion object {
         const val FILE = "dsh-notice"
         const val KEY_PERMISSION_REQUESTED = "permission_requested"
         const val KEY_DONE_ENABLED = "done_enabled"
         const val KEY_ASK_ENABLED = "ask_enabled"
         const val KEY_LOCK_SCREEN_DETAIL = "lock_screen_detail"
+        const val KEY_DEATH_BASELINE_AT = "death_baseline_at"
+        const val KEY_BACKGROUNDED_AT = "backgrounded_at"
     }
 }

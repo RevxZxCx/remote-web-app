@@ -14,6 +14,8 @@ import com.revxzxcx.remotewebapp.core.credentials.CredentialStore
 import com.revxzxcx.remotewebapp.core.credentials.DeviceCredential
 import com.revxzxcx.remotewebapp.core.credentials.KeystoreCredentialStore
 import com.revxzxcx.remotewebapp.core.net.HttpClients
+import com.revxzxcx.remotewebapp.core.notify.DeathWatcher
+import com.revxzxcx.remotewebapp.core.notify.ExitHistoryReader
 import com.revxzxcx.remotewebapp.core.notify.NoticeChannels
 import com.revxzxcx.remotewebapp.core.notify.NoticeIntents
 import com.revxzxcx.remotewebapp.core.notify.NoticeSettings
@@ -167,6 +169,20 @@ class AppContainer(context: Context) {
         settings = noticeSettings,
         names = SessionNameTable(),
     )
+
+    /**
+     * 「上次进程是怎么没的」探测器（R056 / Q3）。
+     *
+     * **构造即探测**（[DeathWatcher.probe] 在初始化块里跑）：基线必须在这一刻写掉。
+     * 若等到用户进首页再判，中间这段时间进程若又被杀（一加上完全可能），这次的历史
+     * 会和上次重叠，下次启动提示的仍是旧事。
+     *
+     * 读的是一次 binder 调用（最多 20 条记录），开销远小于一次 Compose 首帧。
+     */
+    val deathWatcher: DeathWatcher = DeathWatcher(
+        settings = noticeSettings,
+        reader = ExitHistoryReader(appContext),
+    ).also { it.probe() }
 
     /**
      * 回答一条来自通知按钮的审批（R056）。

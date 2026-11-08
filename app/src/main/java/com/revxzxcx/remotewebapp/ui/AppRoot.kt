@@ -443,6 +443,9 @@ fun AppRoot(container: AppContainer) {
                     // 键是 `noticeTarget` 这个可空字符串：它是 `StateFlow.collectAsState()`
                     // 出来的值，变化才会重跑（直接用 flow 当键只会在首次组合时跑一次）。
                     val noticeTarget by NoticeIntents.pendingSessionId.collectAsState()
+                    // R056 / Q3：上次进程是不是被系统杀掉的。null 表示「这次不用提示」。
+                    // 一次性：只要有值就会渲染卡片，用户点掉后 `consume()` 置回 null。
+                    val deathNotice by container.deathWatcher.pending.collectAsState()
                     LaunchedEffect(noticeTarget) {
                         val target = noticeTarget ?: return@LaunchedEffect
                         // 消费即清：否则用户自己返回首页后，下一次重组又把他弹进那条会话。
@@ -677,6 +680,17 @@ fun AppRoot(container: AppContainer) {
                                     },
                                     onOpenDebug = { openDebug = true },
                                     onOpenSettings = { openSettings = true },
+                                    // R056 / Q3：「上次是被系统杀掉的」提示卡。
+                                    // 数据源是容器的 DeathWatcher（构造时已 probe 过一次），
+                                    // 这里只负责渲染与两条回调。
+                                    deathNotice = deathNotice,
+                                    onDeathNoticeAction = {
+                                        // 「去开保活」：直接落到通知二级页——保活四项、
+                                        // 权限状态、两类开关全在那页，用户不用再找一层。
+                                        container.deathWatcher.consume()
+                                        openNoticeSettings = true
+                                    },
+                                    onDeathNoticeDismiss = { container.deathWatcher.consume() },
                                     // R054 多主机。四个写操作全走 `runInBackground`：切主机会把整个
                                     // home 分支重建（VM key 带 deviceId），用界面 scope 会让写到一半被取消。
                                     book = book,

@@ -105,6 +105,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.revxzxcx.remotewebapp.core.credentials.CredentialBook
 import com.revxzxcx.remotewebapp.core.credentials.DeviceCredential
+import com.revxzxcx.remotewebapp.core.notify.DeathNotice
 import com.revxzxcx.remotewebapp.core.session.SessionGrouping
 import com.revxzxcx.remotewebapp.core.connection.HostProbe
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
@@ -202,6 +203,17 @@ fun HomeScreen(
      * 而真机上它永远非空（[com.revxzxcx.remotewebapp.ui.AppRoot] 一定传）。
      */
     onNewSession: (() -> Unit)? = null,
+    /**
+     * 「上次是被系统杀掉的」提示（R056 / Q3）。
+     *
+     * 只为 null 时不渲染这一块——既有渲染测试不必逐个补参数，真机上 [com.revxzxcx.remotewebapp.ui.AppRoot]
+     * 总传。传 [com.revxzxcx.remotewebapp.core.notify.DeathNotice] 才有卡片可显示。
+     */
+    deathNotice: DeathNotice? = null,
+    /** 卡片上的主按钮：去开保活（跳通知二级页）。 */
+    onDeathNoticeAction: () -> Unit = {},
+    /** 卡片上的「先不管」：只关掉这一次，不改基线。 */
+    onDeathNoticeDismiss: () -> Unit = {},
 ) {
     val state by viewModel.state.collectAsState()
     val actionBusy by viewModel.actionBusy.collectAsState()
@@ -711,6 +723,17 @@ fun HomeScreen(
                             onSettle = { open -> settleInsights(open, viaSwipe = true) },
                         ),
                 ) {
+                    // R056 / Q3：上次进程是被系统杀掉的话，在最上面先说清楚。
+                    // **排在连接错误条之前**：那是「现在」的状态，而这是「上次」的解释——
+                    // 用户放下手机再回来时，心里的疑问是后者。
+                    deathNotice?.let { notice ->
+                        DeathNoticeCard(
+                            notice = notice,
+                            onAction = onDeathNoticeAction,
+                            onDismiss = onDeathNoticeDismiss,
+                        )
+                    }
+
                     // 两条可滑动标识贴在内容区底角（R051 原型第 4 节）。
                     // 放在 Column **内部**、且排在所有内容之后，让它们盖在列表上方而不是
                     // 被列表挤走；用 `fillMaxSize` 的 Box 包住整列，两条各自贴自己的角。

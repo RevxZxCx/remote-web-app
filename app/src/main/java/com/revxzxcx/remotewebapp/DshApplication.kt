@@ -92,6 +92,12 @@ class DshApplication : Application(), NoticeActionHost {
      */
     private fun watchForeground() {
         val notifier = container.notifier
+        // R056 / Q3：进后台的时刻也要记进偏好。`DeathWatcher` 靠它区分「用户正开着 App 时
+        // 进程没了」（那是崩溃，提示去改电池设置等于答非所问）与「切出去之后被系统杀掉」。
+        //
+        // 跟着 `onStop` 而不是 `onPause`：`onPause` 在弹权限框、下拉通知栏时都会触发，
+        // 用它会把「其实还开着」记成进后台，从而把一次崩溃误判成系统杀的。
+        val watcher = container.deathWatcher
         val lifecycle = ProcessLifecycleOwner.get().lifecycle
         // 先按当前实际状态对齐一次。进程刚起来时还没 Activity 启动，
         // 这里会是 false——这是对的：此刻用户确实还没看到界面。
@@ -104,6 +110,7 @@ class DshApplication : Application(), NoticeActionHost {
 
                 override fun onStop(owner: LifecycleOwner) {
                     notifier.setForeground(false)
+                    watcher.onBackgrounded()
                 }
             },
         )
