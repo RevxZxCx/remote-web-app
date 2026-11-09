@@ -899,6 +899,7 @@ fun ChatScreen(
                             QueuedStrip(
                                 messages = state.queued,
                                 generating = state.generating,
+                                pendingQueueIds = state.pendingQueueIds,
                                 now = now,
                                 expanded = expandedDock == DockTarget.Queue,
                                 onToggleExpanded = {
@@ -948,6 +949,7 @@ fun ChatScreen(
                             },
                             onSubmitQuestions = viewModel::submitQuestionGroup,
                             onSkipQuestions = viewModel::skipQuestionGroup,
+                            onStepQuestions = viewModel::stepQuestion,
                             permissionChip = {
                                 PermissionChip(
                                     permission = state.permission,
@@ -1447,6 +1449,7 @@ internal fun Composer(
     onQuestionCustom: (String, AskQuestion, String) -> Unit = { _, _, _ -> },
     onSubmitQuestions: (String) -> Unit = {},
     onSkipQuestions: (String) -> Unit = {},
+    onStepQuestions: (String, Int) -> Unit = { _, _ -> },
     /** 模型配置入口（展开态第二行）。由调用方组装，Composer 不关心它长什么样。 */
     modelChip: @Composable () -> Unit,
     /** 审批权限入口（展开态第二行）。同上。 */
@@ -1511,6 +1514,7 @@ internal fun Composer(
             onCustomAnswer = onQuestionCustom,
             onSubmit = onSubmitQuestions,
             onSkip = onSkipQuestions,
+            onStepQuestion = onStepQuestions,
         )
         return
     }
@@ -3335,6 +3339,8 @@ internal fun QueuedStrip(
     onRemove: (QueuedMessage) -> Unit,
     onSteer: (QueuedMessage) -> Unit,
     onEditingChanged: (Boolean) -> Unit = {},
+    /** 插队请求正在飞的条目 id（B009：在途时按钮置灰，连点不再发第二个请求）。 */
+    pendingQueueIds: Set<String> = emptySet(),
 ) {
     // 整条带竖向展开动画：排队条在 composer **上方**，硬切会让输入区被猛地顶上去一截。
     AnimatedVisibility(
@@ -3352,6 +3358,7 @@ internal fun QueuedStrip(
                     onRemove = { onRemove(messages.first()) },
                     onSteer = { onSteer(messages.first()) },
                     onEditingChanged = onEditingChanged,
+                    inFlight = messages.first().id in pendingQueueIds,
                 )
             } else {
                 QueuedHeaderRow(
@@ -3378,6 +3385,7 @@ internal fun QueuedStrip(
                                 onRemove = { onRemove(message) },
                                 onSteer = { onSteer(message) },
                                 onEditingChanged = onEditingChanged,
+                                inFlight = message.id in pendingQueueIds,
                             )
                         }
                     }
@@ -3476,6 +3484,8 @@ internal fun QueuedRow(
     onRemove: () -> Unit,
     onSteer: () -> Unit,
     onEditingChanged: (Boolean) -> Unit = {},
+    /** 这一条的插队请求正在飞（B009）。 */
+    inFlight: Boolean = false,
 ) {
     var editing by rememberSaveable { mutableStateOf(false) }
     val actionable = echo.confirmed
@@ -3521,19 +3531,25 @@ internal fun QueuedRow(
                     icon = SteerIcon,
                     description = "插队",
                     tint = MaterialTheme.colorScheme.primary,
-                    enabled = generating,
+                    // B009：请求在途时也置灰，否则连点会连着发多个必然被拒的请求。
+                    enabled = generating && !inFlight,
                     onClick = onSteer,
                 )
                 QueueIconAction(
                     icon = Icons.Default.Edit,
                     description = "编辑排队消息",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    // 编辑请求在途时也置灰：串行化之后连点会发第二个必然被拒的请求。
+                    enabled = !inFlight,
                     onClick = { editing = true },
                 )
                 QueueIconAction(
                     icon = Icons.Default.Delete,
                     description = "删除排队消息",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    // R058 第二轮审查 P2：删除连点两个请求，第一个移出队列、第二个必然被拒，
+                    // 又会渲染出带「重试」的英文错误条——正是 B009 要消灭的体验。
+                    enabled = !inFlight,
                     onClick = onRemove,
                 )
             }

@@ -1,6 +1,8 @@
 package com.revxzxcx.remotewebapp.ui.chat
 
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -58,6 +60,7 @@ class QueuedRowRenderTest {
         onEdit: (QueuedMessage, String) -> Unit = { _, _ -> },
         onRemove: (QueuedMessage) -> Unit = {},
         onSteer: (QueuedMessage) -> Unit = {},
+        pendingQueueIds: Set<String> = emptySet(),
     ) {
         compose.setContent {
             QueuedStrip(
@@ -69,6 +72,7 @@ class QueuedRowRenderTest {
                 onEdit = onEdit,
                 onRemove = onRemove,
                 onSteer = onSteer,
+                pendingQueueIds = pendingQueueIds,
             )
         }
     }
@@ -81,6 +85,69 @@ class QueuedRowRenderTest {
         compose.onNodeWithContentDescription("插队").assertExists()
         compose.onNodeWithContentDescription("编辑排队消息").assertExists()
         compose.onNodeWithContentDescription("删除排队消息").assertExists()
+    }
+
+    // ---- B009：插队在途 / 已插队时的按钮状态 ----
+    //
+    // 用户原话：「排队消息在发出的时候没有做锁，发送排队消息后，重复点击插队会报错，
+    // 交互上应该只是提醒」。修法分两层，这里钉第二层：在途时按钮本身就置灰，
+    // 连点连请求都发不出去。
+
+    /** 正常状态（会话说在生成中、这条还在 next-turn）下插队按钮可用。 */
+    @Test
+    fun `可插队时按钮可用`() {
+        setStrip(listOf(echo("a")), generating = true)
+        compose.onNodeWithContentDescription("插队").assertIsEnabled()
+    }
+
+    /** 请求在途：按钮置灰，用户点不动 —— 也就发不出第二个必然被拒的请求。 */
+    @Test
+    fun `插队请求在途时按钮置灰`() {
+        setStrip(listOf(echo("a")), generating = true, pendingQueueIds = setOf("a"))
+        compose.onNodeWithContentDescription("插队").assertIsNotEnabled()
+    }
+
+    /** 在途标记按条目 id 匹配：别的条目在飞不该连累这一条。 */
+    @Test
+    fun `别的条目在途不影响这一条的插队按钮`() {
+        setStrip(listOf(echo("a")), generating = true, pendingQueueIds = setOf("other"))
+        compose.onNodeWithContentDescription("插队").assertIsEnabled()
+    }
+
+    // ---- R058 第二轮审查 P2：删除 / 编辑连点 ----
+    //
+    // 串行化掉 `queueJob?.cancel()` 之后，删除连点会连着发两个请求：第一个把条目移出队列，
+    // 第二个必然被服务端拒绝，又渲染出带「重试」的英文错误条 —— 正是 B009 要消灭的体验。
+    // 所以「有 updateQueue 在飞」这件事必须把删除与编辑也一起置灰。
+
+    /** 删除请求在途：删除按钮置灰，连点发不出第二个必然被拒的请求。 */
+    @Test
+    fun `删除请求在途时删除按钮置灰`() {
+        setStrip(listOf(echo("a")), generating = true, pendingQueueIds = setOf("a"))
+        compose.onNodeWithContentDescription("删除排队消息").assertIsNotEnabled()
+    }
+
+    /** 编辑请求在途：编辑按钮同样置灰。 */
+    @Test
+    fun `编辑请求在途时编辑按钮置灰`() {
+        setStrip(listOf(echo("a")), generating = true, pendingQueueIds = setOf("a"))
+        compose.onNodeWithContentDescription("编辑排队消息").assertIsNotEnabled()
+    }
+
+    /** 没有请求在飞时删除 / 编辑都要可用，别把闸做成永久关闭。 */
+    @Test
+    fun `没有请求在飞时删除与编辑可用`() {
+        setStrip(listOf(echo("a")), generating = true)
+        compose.onNodeWithContentDescription("删除排队消息").assertIsEnabled()
+        compose.onNodeWithContentDescription("编辑排队消息").assertIsEnabled()
+    }
+
+    /** 已经插过队（target 不再是 next-turn）：状态文案切到「已插队 · 在当前轮执行」。 */
+    @Test
+    fun `已插队的条目状态文案切换`() {
+        setStrip(listOf(echo("a", awaiting = false)))
+        compose.onNodeWithText("已插队 · 在当前轮执行", substring = true).assertExists()
+        compose.onNodeWithText("等当前轮结束后发出", substring = true).assertDoesNotExist()
     }
 
     @Test

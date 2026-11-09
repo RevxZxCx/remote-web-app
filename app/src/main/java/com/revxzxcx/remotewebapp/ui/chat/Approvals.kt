@@ -1,14 +1,17 @@
 package com.revxzxcx.remotewebapp.ui.chat
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -42,6 +45,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -56,10 +60,13 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.revxzxcx.remotewebapp.core.session.AskQuestion
@@ -90,6 +97,13 @@ internal fun InteractiveWindow(
     onCustomAnswer: (String, AskQuestion, String) -> Unit,
     onSubmit: (String) -> Unit,
     onSkip: (String) -> Unit,
+    /**
+     * 切到组内另一题（B010）：正值下一题、负值上一题。
+     *
+     * 有默认值是为了让只关心审批卡/提问卡布局的渲染测试不必凭空补一个回调；
+     * `ChatScreen` 一定显式传 `viewModel::stepQuestion`。
+     */
+    onStepQuestion: (String, Int) -> Unit = { _, _ -> },
 ) {
     when (request) {
         null -> ComposerShell(title = request.headline(), accent = request.accent(), actions = {}) {}
@@ -107,29 +121,63 @@ internal fun InteractiveWindow(
             ApprovalBody(request = request, error = error)
         }
 
-        is InteractiveComposerRequest.Question -> ComposerShell(
-            title = request.headline(),
-            accent = request.accent(),
-            hasPinned = true,
-            actions = {
-                QuestionActions(
+        is InteractiveComposerRequest.Question -> {
+            val index = request.currentIndex()
+            val swipeThreshold = with(LocalDensity.current) { QUESTION_SWIPE_THRESHOLD.toPx() }
+            val stepQuestion = rememberUpdatedState(onStepQuestion)
+            // 手势挂在整张卡的 Surface 上（而不是只挂正文）：用户滑的是「这道题」，
+            // 手指落在选项、题号还是空白处都该翻页。`pointerInput` 以 callId + index
+            // 为键：翻页后重建，一次滑动最多只翻一题，闭包也不会读到旧 index。
+            val swipeModifier = if (request.questions.size > 1) {
+                Modifier.pointerInput(request.callId, index) {
+                    var total = 0f
+                    var fired = false
+                    detectHorizontalDragGestures(
+                        onDragStart = {
+                            total = 0f
+                            fired = false
+                        },
+                    ) { _, dragAmount ->
+                        if (!fired) {
+                            total += dragAmount
+                            val direction = questionSwipeStep(total, swipeThreshold)
+                            if (direction != 0) {
+                                fired = true
+                                stepQuestion.value(request.callId, direction)
+                            }
+                        }
+                    }
+                }
+            } else {
+                Modifier
+            }
+            ComposerShell(
+                title = request.headline(),
+                accent = request.accent(),
+                hasPinned = true,
+                modifier = swipeModifier,
+                contentKey = request.callId to index,
+                actions = {
+                    QuestionActions(
+                        request = request,
+                        onSubmit = { onSubmit(request.callId) },
+                        onSkip = { onSkip(request.callId) },
+                    )
+                },
+                pinned = {
+                    QuestionPinned(
+                        request = request,
+                        error = error,
+                        onCustomAnswer = onCustomAnswer,
+                    )
+                },
+            ) {
+                QuestionBody(
                     request = request,
-                    onSubmit = { onSubmit(request.callId) },
-                    onSkip = { onSkip(request.callId) },
+                    onToggleOption = onToggleOption,
+                    onStepQuestion = onStepQuestion,
                 )
-            },
-            pinned = {
-                QuestionPinned(
-                    request = request,
-                    error = error,
-                    onCustomAnswer = onCustomAnswer,
-                )
-            },
-        ) {
-            QuestionBody(
-                request = request,
-                onToggleOption = onToggleOption,
-            )
+            }
         }
     }
 }
@@ -167,8 +215,18 @@ private fun ComposerShell(
     title: String,
     accent: Color,
     actions: @Composable () -> Unit,
+    /** 挂在外壳 Surface 上的额外修饰符（提问卡的横向滑动切题就挂这里）。 */
+    modifier: Modifier = Modifier,
     /** 是否有钉住区（提问卡的「其他答案」）。算上限时必须把它的高度扣掉。 */
     hasPinned: Boolean = false,
+    /**
+     * 正文滚动状态的键。换键即丢弃旧滚动位置。
+     *
+     * 提问卡切题时必须换键（R058 审查 P2）：正文超过 [INTERACTIVE_BODY_MAX_HEIGHT] 才需要
+     * 滚动，而多选长选项很容易超。沿用旧偏移量翻到下一题，用户看到的是选项列表的中段，
+     * 题干和题号都在画布外，容易误点。
+     */
+    contentKey: Any? = null,
     pinned: @Composable () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
@@ -178,7 +236,7 @@ private fun ComposerShell(
             color = MaterialTheme.colorScheme.surfaceVariant,
             shape = RoundedCornerShape(20.dp),
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().then(modifier),
         ) {
             Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -211,7 +269,7 @@ private fun ComposerShell(
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(max = bodyMaxHeight)
-                        .verticalScroll(rememberScrollState()),
+                        .verticalScroll(remember(contentKey) { ScrollState(0) }),
                 ) {
                     content()
                 }
@@ -258,6 +316,28 @@ internal fun interactiveBodyMaxHeight(availableHeight: Dp, hasPinned: Boolean): 
     val overhead = if (hasPinned) SHELL_OVERHEAD_WITH_PINNED else SHELL_OVERHEAD_WITHOUT_PINNED
     val spare = availableHeight - overhead - SHELL_SAFE_GAP
     return spare.coerceIn(INTERACTIVE_BODY_MIN_HEIGHT, INTERACTIVE_BODY_MAX_HEIGHT)
+}
+
+/**
+ * 横向滑动切题的位移阈值（B010）。
+ *
+ * 48dp 是 Material 的常规拖拽阈值量级：小于它时手指轻微抖动（点选项时常见的 5~15dp
+ * 横向偏移）会被误判成翻页，大于它又要滑过半张卡才有反应。用 `Dp` 而不是像素，
+ * 是为了在不同 density 上保持同一个「手感」。
+ */
+internal val QUESTION_SWIPE_THRESHOLD = 48.dp
+
+/**
+ * 把一次横向拖动的累计位移换算成「翻几题」（B010，纯函数，便于 JVM 单测钉住）。
+ *
+ * 约定与所有横向翻页一致：**手指往左拖 = 看下一题**。返回 0 表示位移还没到阈值——
+ * 调用方必须把 0 当成「什么都不做」，而不是「回到第一题」。
+ */
+internal fun questionSwipeStep(dragTotalPx: Float, thresholdPx: Float): Int = when {
+    thresholdPx <= 0f -> 0
+    dragTotalPx <= -thresholdPx -> 1
+    dragTotalPx >= thresholdPx -> -1
+    else -> 0
 }
 
 /** 权限审批正文：工具名 + 服务端给的理由。动作区见 [ApprovalActions]。 */
@@ -307,18 +387,38 @@ private fun ApprovalBody(
 private fun QuestionBody(
     request: InteractiveComposerRequest.Question,
     onToggleOption: (String, AskQuestion, String) -> Unit,
+    onStepQuestion: (String, Int) -> Unit = { _, _ -> },
 ) {
     val index = request.currentIndex()
     val question = request.questions.getOrNull(index) ?: return
     val draft = request.draftOf(question.id)
 
-    // 多题时告诉用户「这是第几道 / 共几道」：桌面端也是一道一道来，不并排铺开。
+    // 多题时告诉用户「这是第几道 / 共几道」，并给出左右翻页入口（B010）。
+    // 只在多于一道时出现：单题加一排箭头只会白占一行高度。
     if (request.questions.size > 1) {
-        Text(
-            text = "第 ${index + 1} / ${request.questions.size} 题",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            QuestionStepButton(
+                label = "上一题",
+                enabled = index > 0,
+                onClick = { onStepQuestion(request.callId, -1) },
+            )
+            Text(
+                text = "第 ${index + 1} / ${request.questions.size} 题",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.Center,
+            )
+            QuestionStepButton(
+                label = "下一题",
+                enabled = index < request.questions.lastIndex,
+                onClick = { onStepQuestion(request.callId, 1) },
+            )
+        }
         Spacer(Modifier.height(2.dp))
     }
     Text(
@@ -417,6 +517,25 @@ private fun ApprovalActions(onAllow: () -> Unit, onReject: () -> Unit) {
             Spacer(Modifier.width(6.dp))
             Text("拒绝")
         }
+    }
+}
+
+/**
+ * 组内翻页按钮（B010）。
+ *
+ * 用 `TextButton` 而不是箭头图标：material-icons-core 里没有左右箭头（只有
+ * `KeyboardArrowRight`/`KeyboardArrowUp`），自绘一套要维护 path；而「上一题 / 下一题」
+ * 这两个词本身就是最不需要猜的提示，也顺带给了无障碍朗读。
+ */
+@Composable
+private fun QuestionStepButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RoundedCornerShape(14.dp),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+    ) {
+        Text(label, style = MaterialTheme.typography.labelMedium)
     }
 }
 

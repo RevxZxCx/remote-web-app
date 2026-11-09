@@ -149,14 +149,19 @@ sealed interface InteractiveComposerRequest {
         val callId: String,
         val questions: List<AskQuestion>,
         val drafts: Map<String, QuestionDraft> = emptyMap(),
+        /**
+         * 用户正在看第几道题（0 基，由 `ChatUiState.questionIndex` 显式维护）。
+         *
+         * B010 之前这里是**推导**出来的（`indexOfFirst { !isAnswered }`），于是「显示哪道题」
+         * 取决于「铺过多少默认草稿」，而铺草稿是每帧都会被调用的动作 —— 帧数一多游标就被
+         * 顶到最后一道。游标是用户的导航位置，不是由答案推出来的结论，所以改成显式状态。
+         */
+        val index: Int = 0,
     ) : InteractiveComposerRequest {
         override val token: String get() = callId
 
-        /** 当前题：第一道没有草稿的题；全部有草稿就停在最后一道。 */
-        fun currentIndex(): Int {
-            val index = questions.indexOfFirst { drafts[it.id]?.isAnswered != true }
-            return if (index < 0) questions.lastIndex.coerceAtLeast(0) else index
-        }
+        /** 当前题：显式游标，越界时夹到合法范围（题数变化时不至于崩或显示空白）。 */
+        fun currentIndex(): Int = index.coerceIn(0, questions.lastIndex.coerceAtLeast(0))
 
         fun draftOf(questionId: String): QuestionDraft =
             drafts[questionId] ?: InteractiveComposerRequest.defaultOf(

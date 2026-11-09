@@ -459,13 +459,14 @@ class ChatReducerTest {
     }
 
     /**
-     * R025 UI 层 P1-1：只给**当前**那道题铺默认值。
+     * R025 UI 层 P1-1 + B010：打开多题组时停在**第一道**，并且只给第一道铺默认值。
      *
-     * 每道题都铺的时候 `currentIndex()` 的 `indexOfFirst` 全部落空 → 回落到 lastIndex →
-     * 多题组只显示最后一道，前 N-1 道被按预选项自动作答。
+     * 两条不变量必须同时成立：
+     * ① 游标从头开始（B010 之前这里是 1 —— 因为「第一道有草稿 = 已答」被当成了游标来源）；
+     * ② 只铺第一道的默认草稿（R025：每道都铺的话，用户没看过的题会按预选项静默交出去）。
      */
     @Test
-    fun `多题组只给当前题铺默认值`() {
+    fun `多题组打开时停在第一道且只给第一道铺默认值`() {
         val questions = listOf(
             AskQuestion("q1", "第一题", options = listOf(AskOption("继续"), AskOption("停止"))),
             AskQuestion("q2", "第二题", options = listOf(AskOption("红"), AskOption("蓝"))),
@@ -476,14 +477,25 @@ class ChatReducerTest {
 
         assertEquals(setOf("q1"), seeded.questionDrafts["call-a"]?.keys)
         assertEquals(setOf("继续"), seeded.questionDrafts["call-a"]?.get("q1")?.selected)
-        // 第一道有草稿 = 已答，第二道没有 = 未答 → currentIndex 应该落在第二道。
-        val current = InteractiveComposerRequest.Question("call-a", questions, seeded.questionDrafts["call-a"].orEmpty())
-        assertEquals(1, current.currentIndex())
+        assertEquals(0, ChatReducer.questionCursor(seeded, "call-a"))
+        val current = InteractiveComposerRequest.Question(
+            callId = "call-a",
+            questions = questions,
+            drafts = seeded.questionDrafts["call-a"].orEmpty(),
+            index = ChatReducer.questionCursor(seeded, "call-a"),
+        )
+        assertEquals(0, current.currentIndex())
     }
 
-    /** 答完当前题之后，下一题才铺默认值（桌面端「点单选选项立即前进」的配套行为）。 */
+    /**
+     * B010：答题**不推进**游标，用户不点「下一题」就停在原地。
+     *
+     * 早先的语义是「答完当前题，下一次 seed 顺手把下一道也铺上」——看起来像桌面端的
+     * 「点选项立即前进」，实际是**服务端投影帧**在推游标：帧数一多就从第一道滑到最后一道。
+     * 现在答题与导航彻底分开。
+     */
     @Test
-    fun `答完当前题后下一题才铺默认值`() {
+    fun `答题不会把游标推到下一题`() {
         val questions = listOf(
             AskQuestion("q1", "第一题", options = listOf(AskOption("继续"), AskOption("停止"))),
             AskQuestion("q2", "第二题", options = listOf(AskOption("红"), AskOption("蓝"))),
@@ -493,17 +505,110 @@ class ChatReducerTest {
 
         val again = ChatReducer.seedQuestionDefaults(state, "call-a", questions)
 
-        assertEquals(setOf("q1", "q2"), again.questionDrafts["call-a"]?.keys)
-        assertEquals(setOf("红"), again.questionDrafts["call-a"]?.get("q2")?.selected)
-        // 已经答过的题不能被重铺冲掉。
+        assertEquals(setOf("q1"), again.questionDrafts["call-a"]?.keys)
         assertEquals(setOf("停止"), again.questionDrafts["call-a"]?.get("q1")?.selected)
+        assertEquals(0, ChatReducer.questionCursor(again, "call-a"))
+    }
+
+    /** 用户点「下一题」之后，下一道才拿到默认草稿 —— 铺草稿与移动游标是同一个动作。 */
+    @Test
+    fun `前进到下一题时才给它铺默认值`() {
+        val questions = listOf(
+            AskQuestion("q1", "第一题", options = listOf(AskOption("继续"), AskOption("停止"))),
+            AskQuestion("q2", "第二题", options = listOf(AskOption("红"), AskOption("蓝"))),
+        )
+        var state = ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", questions)
+        state = ChatReducer.toggleOption(state, "call-a", questions[0], "停止")
+
+        val stepped = ChatReducer.stepQuestion(state, "call-a", questions, 1)
+
+        assertEquals(1, ChatReducer.questionCursor(stepped, "call-a"))
+        assertEquals(setOf("q1", "q2"), stepped.questionDrafts["call-a"]?.keys)
+        assertEquals(setOf("红"), stepped.questionDrafts["call-a"]?.get("q2")?.selected)
+        // 已经答过的题不能被重铺冲掉。
+        assertEquals(setOf("停止"), stepped.questionDrafts["call-a"]?.get("q1")?.selected)
+    }
+
+    /**
+     * 提交被挡下时，游标要回到**第一道没有答案**的题上。
+     *
+     * 这是显式游标带来的新义务（R058 审查 P1）：旧实现里 `currentIndex()` 用
+     * `indexOfFirst { !isAnswered }` 现算，所以「跳到第一道未答」是免费的副作用；
+     * 游标变成 `questionIndex` 之后必须主动移，否则用户滑到第 3 题答完点提交，
+     * 看到的是已经答好的第 3 题 + 一句「还有 1 道题没有答案」，既不知道是哪道、
+     * 也没有跳转入口。ViewModel 侧调用的就是这个组合。
+     */
+    @Test
+    fun `提交被挡时游标回到第一道没答案的题`() {
+        val questions = listOf(
+            AskQuestion("q1", "第一题", options = listOf(AskOption("继续"), AskOption("停止"))),
+            AskQuestion("q2", "第二题", options = listOf(AskOption("红"), AskOption("蓝"))),
+            AskQuestion("q3", "第三题", options = listOf(AskOption("是"), AskOption("否"))),
+        )
+        // 铺过默认草稿的题算「已答」（预选第一个选项）——这正是缺陷的病灶所在，
+        // 所以 seed 之后只有「从未被游标走到过」的第二道是空的。
+        var state = ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", questions)
+        state = ChatReducer.placeQuestionCursor(state, "call-a", questions, 2)
+        assertEquals(2, ChatReducer.questionCursor(state, "call-a"))
+
+        val missing = ChatReducer.unansweredCount(state, "call-a", questions)
+        assertEquals(1, missing)
+
+        val jumped = ChatReducer.placeQuestionCursor(
+            state = state,
+            callId = "call-a",
+            questions = questions,
+            index = ChatReducer.firstUnansweredIndex(state, "call-a", questions),
+        )
+
+        assertEquals(1, ChatReducer.questionCursor(jumped, "call-a"))
+        // 跳过去的那道题必须同时拿到草稿，否则界面显示「已选」但提交仍判未答。
+        assertEquals(setOf("红"), jumped.questionDrafts["call-a"]?.get("q2")?.selected)
+        // 第一道的默认答案不能被冲掉。
+        assertEquals(setOf("继续"), jumped.questionDrafts["call-a"]?.get("q1")?.selected)
+    }
+
+    /** 「第一道未答」的判据必须与 [ChatReducer.unansweredCount] 同源，否则跳过去仍然提交不了。 */
+    @Test
+    fun `第一道未答的下标与未答计数同源`() {
+        val questions = listOf(
+            AskQuestion("q1", "第一题", options = listOf(AskOption("继续"))),
+            AskQuestion("q2", "第二题", options = listOf(AskOption("红"))),
+            AskQuestion("q3", "第三题", options = listOf(AskOption("是"))),
+        )
+        // seed 铺第一道 → 直接跳第三道，第二道始终没有草稿。
+        var state = ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", questions)
+        state = ChatReducer.placeQuestionCursor(state, "call-a", questions, 2)
+
+        assertEquals(1, ChatReducer.firstUnansweredIndex(state, "call-a", questions))
+        assertEquals(1, ChatReducer.unansweredCount(state, "call-a", questions))
+
+        // 再把第一道「碰过又清空」——两处判据都必须把它算进去，且下标回到 0。
+        state = ChatReducer.setCustomAnswer(state, "call-a", questions[0], "")
+        assertEquals(0, ChatReducer.firstUnansweredIndex(state, "call-a", questions))
+        assertEquals(2, ChatReducer.unansweredCount(state, "call-a", questions))
+    }
+
+    /** 全部有答案时 `firstUnansweredIndex` 收到 0，不抛也不越界。 */
+    @Test
+    fun `全答完时第一道未答的下标是零`() {
+        val questions = listOf(
+            AskQuestion("q1", "第一题", options = listOf(AskOption("继续"))),
+            AskQuestion("q2", "第二题", options = listOf(AskOption("红"))),
+        )
+        // 两道都被游标走到过 → 都有默认草稿 → 全答完。
+        var state = ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", questions)
+        state = ChatReducer.placeQuestionCursor(state, "call-a", questions, 1)
+
+        assertEquals(0, ChatReducer.unansweredCount(state, "call-a", questions))
+        assertEquals(0, ChatReducer.firstUnansweredIndex(state, "call-a", questions))
     }
 
     /**
      * 用户**主动清空**某一道题的选择后，不能因为「它还没答案」就重新预选第一个选项。
      *
      * 草稿的键在不在，才是「这题被用户碰过没有」的唯一判据；`isAnswered` 会把「碰过但
-     * 故意清空」误判成没碰过。所以 [ChatReducer.seedQuestionDefaults] 截断用的是
+     * 故意清空」误判成没碰过。所以 [ChatReducer.enterQuestion] 用的判据是
      * `containsKey` 而不是 `isAnswered`。
      *
      * 清空的现实路径是自定义答案框：打进去又删掉（`setCustomAnswer("")`）。单选下点已
@@ -518,17 +623,119 @@ class ChatReducerTest {
         var state = ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", questions)
         state = ChatReducer.setCustomAnswer(state, "call-a", questions[0], "")
         state = ChatReducer.seedQuestionDefaults(state, "call-a", questions)
+        state = ChatReducer.stepQuestion(state, "call-a", questions, 1)
         state = ChatReducer.setCustomAnswer(state, "call-a", questions[1], "")
 
         val again = ChatReducer.seedQuestionDefaults(state, "call-a", questions)
 
         assertEquals(setOf("q1", "q2"), again.questionDrafts["call-a"]?.keys)
         assertEquals(emptySet<String>(), again.questionDrafts["call-a"]?.get("q2")?.selected)
-        // 而一道**新出现**的题（服务端往组里加了题）照样会拿到预选。
+        assertEquals(emptySet<String>(), again.questionDrafts["call-a"]?.get("q1")?.selected)
+        // 服务端往组里**加题**时，新题要等用户导航过去才铺默认值：静默按预选项代答正是
+        // R025 要挡的现象，而「多出一道没答的题」会由 unansweredCount 挡在提交前。
         val third = AskQuestion("q3", "第三题", options = listOf(AskOption("是")))
         val grown = ChatReducer.seedQuestionDefaults(again, "call-a", questions + third)
-        assertEquals(setOf("q1", "q2", "q3"), grown.questionDrafts["call-a"]?.keys)
-        assertEquals(setOf("是"), grown.questionDrafts["call-a"]?.get("q3")?.selected)
+        assertEquals(setOf("q1", "q2"), grown.questionDrafts["call-a"]?.keys)
+        val navigated = ChatReducer.stepQuestion(grown, "call-a", questions + third, 1)
+        assertEquals(setOf("q1", "q2", "q3"), navigated.questionDrafts["call-a"]?.keys)
+        assertEquals(setOf("是"), navigated.questionDrafts["call-a"]?.get("q3")?.selected)
+    }
+
+    /**
+     * B010 守门：**多帧投影不会把游标顶到最后一道**。
+     *
+     * 这就是缺陷本身的复现——修复前 `currentIndex()` 由「第一道没有草稿的题」推导，
+     * 而 `seedQuestionDefaults` 每被调用一次就多铺一道，`applyQuestions` 又是每帧调一次，
+     * 于是 N 道题只要来 N 帧游标就滑到第 N 道。现在游标是显式状态，帧数再多也不动。
+     */
+    @Test
+    fun `连续多帧投影不会把游标顶到最后一道`() {
+        val questions = listOf(
+            AskQuestion("q1", "第一题", options = listOf(AskOption("继续"))),
+            AskQuestion("q2", "第二题", options = listOf(AskOption("红"))),
+            AskQuestion("q3", "第三题", options = listOf(AskOption("是"))),
+        )
+
+        var state = ChatUiState()
+        repeat(8) { state = ChatReducer.seedQuestionDefaults(state, "call-a", questions) }
+
+        assertEquals(0, ChatReducer.questionCursor(state, "call-a"))
+        val current = InteractiveComposerRequest.Question(
+            callId = "call-a",
+            questions = questions,
+            drafts = state.questionDrafts["call-a"].orEmpty(),
+            index = ChatReducer.questionCursor(state, "call-a"),
+        )
+        assertEquals(0, current.currentIndex())
+        // 而且没铺过的题不能凭空多出草稿（否则会被 unansweredCount 当成已答交出去）。
+        assertEquals(setOf("q1"), state.questionDrafts["call-a"]?.keys)
+    }
+
+    /** 上一题 / 下一题在两端越界时原样返回，不产生新状态。 */
+    @Test
+    fun `游标在两端越界时不动`() {
+        val questions = listOf(
+            AskQuestion("q1", "第一题", options = listOf(AskOption("继续"))),
+            AskQuestion("q2", "第二题", options = listOf(AskOption("红"))),
+        )
+        val atFirst = ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", questions)
+        assertSame(atFirst, ChatReducer.stepQuestion(atFirst, "call-a", questions, -1))
+
+        val atLast = ChatReducer.placeQuestionCursor(atFirst, "call-a", questions, 1)
+        assertEquals(1, ChatReducer.questionCursor(atLast, "call-a"))
+        assertSame(atLast, ChatReducer.stepQuestion(atLast, "call-a", questions, 1))
+    }
+
+    /** 越界的索引被夹回合法范围（服务端把题数改少时，旧游标不能把 UI 打空）。 */
+    @Test
+    fun `越界游标被夹回最后一道`() {
+        val questions = listOf(
+            AskQuestion("q1", "第一题", options = listOf(AskOption("继续"))),
+            AskQuestion("q2", "第二题", options = listOf(AskOption("红"))),
+        )
+        val state = ChatUiState(questionIndex = mapOf("call-a" to 7))
+
+        val seeded = ChatReducer.seedQuestionDefaults(state, "call-a", questions)
+
+        assertEquals(1, ChatReducer.questionCursor(seeded, "call-a"))
+    }
+
+    /** 「跳过整组」把游标一起清掉，否则服务端复用 callId 时新组会从上次的位置开始。 */
+    @Test
+    fun `清空整组草稿时游标一并清掉`() {
+        val questions = listOf(
+            AskQuestion("q1", "第一题", options = listOf(AskOption("继续"))),
+            AskQuestion("q2", "第二题", options = listOf(AskOption("红"))),
+        )
+        val state = ChatReducer.placeQuestionCursor(
+            ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", questions),
+            "call-a",
+            questions,
+            1,
+        )
+
+        val cleared = ChatReducer.clearQuestion(state, "call-a")
+
+        assertNull(cleared.questionDrafts["call-a"])
+        assertNull(cleared.questionIndex["call-a"])
+        assertEquals(0, ChatReducer.questionCursor(cleared, "call-a"))
+    }
+
+    /** 剪枝同时剪游标；两个 map 的键都没变时必须还是同一个实例（每帧投影都会走这里）。 */
+    @Test
+    fun `剪枝同时剪掉游标且键未变时返回原实例`() {
+        var state = ChatReducer.placeQuestionCursor(ChatUiState(), "call-a", listOf(
+            AskQuestion("q1", "第一题", options = listOf(AskOption("继续"))),
+        ), 0)
+        state = ChatReducer.placeQuestionCursor(state, "call-b", listOf(
+            AskQuestion("q2", "第二题", options = listOf(AskOption("红"))),
+        ), 0)
+
+        assertSame(state, ChatReducer.pruneQuestionDrafts(state, setOf("call-a", "call-b")))
+
+        val pruned = ChatReducer.pruneQuestionDrafts(state, setOf("call-b"))
+        assertEquals(setOf("call-b"), pruned.questionDrafts.keys)
+        assertEquals(setOf("call-b"), pruned.questionIndex.keys)
     }
 
     /**

@@ -1,5 +1,7 @@
 package com.revxzxcx.remotewebapp.ui.chat
 
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -245,6 +247,7 @@ class ComposerLayoutRenderTest {
         onCustom: (String, AskQuestion, String) -> Unit = { _, _, _ -> },
         onSubmit: (String) -> Unit = {},
         onSkip: (String) -> Unit = {},
+        onStep: (String, Int) -> Unit = { _, _ -> },
     ) {
         compose.setContent {
             InteractiveWindow(
@@ -255,6 +258,7 @@ class ComposerLayoutRenderTest {
                 onCustomAnswer = onCustom,
                 onSubmit = onSubmit,
                 onSkip = onSkip,
+                onStepQuestion = onStep,
             )
         }
     }
@@ -392,6 +396,75 @@ class ComposerLayoutRenderTest {
         val reject = compose.onNodeWithText("拒绝").getBoundsInRoot()
         assertTrue("允许按钮被裁掉", allow.bottom <= root.bottom)
         assertTrue("拒绝按钮被裁掉", reject.bottom <= root.bottom)
+    }
+
+    // ---- 交互窗口：多题导航（R058 / B010）----
+    //
+    // 用户原话：「多提问的时候只显示了最后一道，而且没有上一题/下一题按钮，也不行滑动切换」。
+    // 下面四条钉住验收标准里的前两项（按钮存在 + 真的能切），滑动手势要靠真机验证。
+
+    /** 单题时不出现导航按钮 —— 只有一道题还摆「下一题」是噪声。 */
+    @Test
+    fun `单题组不显示上一题下一题`() {
+        setInteractive(questionRequest(questions = listOf(question())))
+        compose.onNodeWithText("上一题").assertDoesNotExist()
+        compose.onNodeWithText("下一题").assertDoesNotExist()
+    }
+
+    /** 多题时两个按钮都在，且在第一题上「上一题」是禁用的。 */
+    @Test
+    fun `多题组显示导航按钮且第一题不能上一题`() {
+        setInteractive(
+            questionRequest(questions = listOf(question("q-1", "第一题"), question("q-2", "第二题"))),
+        )
+        compose.onNodeWithText("上一题").assertExists()
+        // 第一题上「上一题」不可用、「下一题」可用。
+        compose.onNodeWithText("上一题").assertIsNotEnabled()
+        compose.onNodeWithText("下一题").assertIsEnabled()
+    }
+
+    /** 点「下一题」交出 `(callId, +1)`，点「上一题」交出 `(callId, -1)`。 */
+    @Test
+    fun `点导航按钮交出方向与callId`() {
+        val steps = mutableListOf<Pair<String, Int>>()
+        setInteractive(
+            questionRequest(callId = "call-77", questions = listOf(question("q-1", "第一题"), question("q-2", "第二题"))),
+            onStep = { callId, delta -> steps += callId to delta },
+        )
+        compose.onNodeWithText("下一题").performClick()
+        compose.waitForIdle()
+        assertEquals(listOf("call-77" to 1), steps)
+    }
+
+    /** 游标在第二道时显示的是第二道题，且「下一题」在末尾禁用。 */
+    @Test
+    fun `游标在第二道时显示第二题并禁用下一题`() {
+        setInteractive(
+            InteractiveComposerRequest.Question(
+                callId = "call-1",
+                questions = listOf(question("q-1", "第一题"), question("q-2", "第二题")),
+                index = 1,
+            ),
+        )
+        compose.onNodeWithText("第 2 / 2 题").assertExists()
+        compose.onNodeWithText("第二题").assertExists()
+        compose.onNodeWithText("第一题").assertDoesNotExist()
+        compose.onNodeWithText("上一题").assertIsEnabled()
+        compose.onNodeWithText("下一题").assertIsNotEnabled()
+    }
+
+    /** 三题时题干里的题号随游标走，越界的 index 被夹到合法范围而不是把卡片打空。 */
+    @Test
+    fun `越界游标被夹回最后一道而不是打空`() {
+        setInteractive(
+            InteractiveComposerRequest.Question(
+                callId = "call-1",
+                questions = listOf(question("q-1", "第一题"), question("q-2", "第二题")),
+                index = 9,
+            ),
+        )
+        compose.onNodeWithText("第 2 / 2 题").assertExists()
+        compose.onNodeWithText("第二题").assertExists()
     }
 
     @Test

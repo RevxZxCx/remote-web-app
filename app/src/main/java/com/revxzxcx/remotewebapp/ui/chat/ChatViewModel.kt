@@ -14,6 +14,7 @@ import com.revxzxcx.remotewebapp.core.events.QuestionRequest
 import com.revxzxcx.remotewebapp.core.events.RemoteEvents
 import com.revxzxcx.remotewebapp.core.protocol.CarrierState
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
+import com.revxzxcx.remotewebapp.core.session.QueueSteer
 import com.revxzxcx.remotewebapp.core.session.ChatArgs
 import com.revxzxcx.remotewebapp.core.session.ChatFrame
 import com.revxzxcx.remotewebapp.core.session.ChatItem
@@ -443,6 +444,7 @@ class ChatViewModel(
                     callId = group.callId,
                     questions = group.questions,
                     drafts = ui.questionDrafts[group.callId].orEmpty(),
+                    index = ui.questionIndex[group.callId] ?: 0,
                 )
             } ?: pushed.firstOrNull { it.belongsTo(sessionId) }?.let { request ->
                 val key = request.callId ?: waterfallCallId(request.eventId)
@@ -450,6 +452,7 @@ class ChatViewModel(
                     callId = key,
                     questions = request.questions,
                     drafts = ui.questionDrafts[key].orEmpty(),
+                    index = ui.questionIndex[key] ?: 0,
                 )
             }
         }
@@ -569,6 +572,15 @@ class ChatViewModel(
 
     /** 「编辑/删除/插队」排队消息的协程（`session/updateQueue`）。 */
     private var queueJob: Job? = null
+
+    /**
+     * 排队消息操作的**串行闸**（B009）。
+     *
+     * 编辑/删除/插队改的是同一条队列，服务端按到达顺序处理；并发发出去会让「先删后插」
+     * 变成「先插后删」。而且插队本身不可重入（第二次必被拒），串行化之后连点最多是排队，
+     * 不会有两个请求同时压在服务端。
+     */
+    private val queueMutex = Mutex()
 
     /**
      * 斜杠命令执行的协程（`commands/execute`，R045）。
@@ -1076,23 +1088,60 @@ class ChatViewModel(
      * 文案挂到 `sendError` 上并让 reducer 自行纠正**： splice 事件是权威的，服务端拒绝
      * 我们的操作时不会发 splice，所以界面会保持原样——那时用户看到的就是错误条。
      *
+     * **插队是例外**（B009）：它被拒说明这条已经不在 `next-turn`，不是故障，只是
+     * 「你已经插过了」。那种情况走 [attachNotice] 给一句话，不进 [ChatUiState.sendError]。
+     *
      * @param message 目标条目；`confirmed == false`（本地回声还没拿到 itemId）时直接忽略，
      *   因为服务端只认 `itemId`。
      */
     private fun queueAction(message: QueuedMessage, action: ChatArgs.QueueAction, pending: String?) {
         if (!message.confirmed) return
-        queueJob?.cancel()
+        // 串行闸，不再 `queueJob?.cancel()`（B009）。
+        // 取消在飞的请求有两个害处：那个 RPC 可能已经到达服务端（队列实际变了），
+        // 而协程被取消后又不会上报失败，界面就停在旧状态且没有任何提示。
+        // 这与目标动词的 `goalMutex` 是同一个理由（R031 独立审查 P3）。
+        val steering = action is ChatArgs.QueueAction.Steer
+        if (message.id in _state.value.pendingQueueIds) {
+            // 连点：前一个还在飞，这一下直接给提醒，别再发一个必然被拒的请求。
+            // 编辑 / 删除连点走同一道闸（R058 第二轮审查 P2）：删除的第二个请求必然被拒，
+            // 那正是 B009 要消灭的「英文错误码 + 无关重试按钮」。
+            _attachNotice.value = if (steering) {
+                QueueSteer.NOTICE_IN_FLIGHT
+            } else {
+                QueueSteer.NOTICE_QUEUE_BUSY
+            }
+            return
+        }
+        _state.value = _state.value.copy(pendingQueueIds = _state.value.pendingQueueIds + message.id)
         queueJob = viewModelScope.launch {
-            _state.value = _state.value.copy(sending = true)
-            try {
-                repository.updateQueue(sessionId, message.id, action)
-                _state.value = _state.value.copy(sendError = null)
-            } catch (cause: kotlinx.coroutines.CancellationException) {
-                throw cause
-            } catch (cause: Exception) {
-                _state.value = _state.value.copy(sendError = describe(cause))
-            } finally {
-                _state.value = _state.value.copy(sending = false)
+            queueMutex.withLock {
+                _state.value = _state.value.copy(sending = true)
+                try {
+                    repository.updateQueue(sessionId, message.id, action)
+                    // 成功了就把上一次留下的插队提示收掉（R058 第二轮审查 P2）：
+                    // 行内已经显示「已插队 · 在当前轮执行」，上方还挂着「没能插队」是自相矛盾。
+                    _state.value = _state.value.copy(sendError = null)
+                    if (steering && _attachNotice.value == QueueSteer.NOTICE_REJECTED) {
+                        _attachNotice.value = null
+                    }
+                } catch (cause: kotlinx.coroutines.CancellationException) {
+                    throw cause
+                } catch (cause: Exception) {
+                    if (steering && isSteerUnavailable(cause)) {
+                        // 插队被拒不是故障：这条已经不在 `next-turn` 了。挂到 sendError 上会
+                        // 渲染成一条「重试」绑着 retrySend 的错误横幅，点下去与插队毫无关系。
+                        // **不顺手清 sendError**（R058 审查 P3）：那条横幅是别的动作留下的，
+                        // 与这次插队无关，静默清掉等于替用户丢掉了信息。
+                        _attachNotice.value = QueueSteer.NOTICE_REJECTED
+                    } else {
+                        _state.value = _state.value.copy(sendError = describe(cause))
+                    }
+                } finally {
+                    _state.value = _state.value.copy(
+                        sending = false,
+                        pendingQueueIds = _state.value.pendingQueueIds - message.id,
+                    )
+                }
             }
         }
     }
@@ -1117,7 +1166,14 @@ class ChatViewModel(
      * 服务端要求该条目在 `next-turn` 且会话正在运行，否则抛 `session/steer-unavailable`
      * （`index.js:966`）。UI 因此只在 `generating` 时才显示这个按钮。
      */
-    fun steerQueued(message: QueuedMessage) = queueAction(message, ChatArgs.QueueAction.Steer, null)
+    fun steerQueued(message: QueuedMessage) {
+        // 本地就能判出必然失败的两种情况（已在飞 / 已经不在 next-turn），先给提醒不发请求。
+        QueueSteer.blockReason(message, _state.value.pendingQueueIds)?.let { reason ->
+            _attachNotice.value = reason
+            return
+        }
+        queueAction(message, ChatArgs.QueueAction.Steer, null)
+    }
 
     // ---------------------------------------------------- 目标（R031）
 
@@ -1668,9 +1724,26 @@ class ChatViewModel(
         )
     }
 
-    /** 给一组题铺默认草稿：只铺到「第一道还没有草稿的题」为止。见 [ChatReducer.seedQuestionDefaults]。 */
+    /** 给一组题铺默认草稿（只铺游标所在那道）。见 [ChatReducer.seedQuestionDefaults]。 */
     private fun seedDefaults(callId: String, questions: List<AskQuestion>) {
         _state.value = ChatReducer.seedQuestionDefaults(_state.value, callId, questions)
+    }
+
+    /**
+     * 上一题 / 下一题（`delta = -1` / `+1`）。
+     *
+     * 只动游标，不发任何 RPC：草稿与已选答案都在本地，提交时才一次性发出整组。
+     * 越界时 reducer 原样返回，所以按钮即便因为状态抖动短暂可点也不会把游标推出范围。
+     */
+    /**
+     * 上一题 / 下一题。
+     *
+     * 越界会**夹到合法范围**并写回游标（[ChatReducer.stepQuestion] 走 `coerceIn`），
+     * 不是 no-op；只有题组为空或 `delta == 0` 才什么都不做。
+     */
+    fun stepQuestion(callId: String, delta: Int) {
+        val questions = questionGroupOf(callId) ?: return
+        _state.value = ChatReducer.stepQuestion(_state.value, callId, questions, delta)
     }
 
     /** waterfall 路径同样要铺默认草稿（投影路在 [applyQuestions] 里铺）。 */
@@ -1712,6 +1785,16 @@ class ChatViewModel(
         }
         val missing = ChatReducer.unansweredCount(_state.value, callId, group)
         if (missing > 0) {
+            // 游标是显式状态（B010），「跳到第一道未答」不再是 currentIndex() 的副作用，
+            // 必须在这里主动移过去（R058 审查 P1）。否则用户滑到第 3 题答完点提交，
+            // 看到的是已经答好的第 3 题 + 一句「还有 1 道题没有答案」，既不知道是哪道、
+            // 也没有跳转入口，只能自己一题题翻回去找。
+            _state.value = ChatReducer.placeQuestionCursor(
+                state = _state.value,
+                callId = callId,
+                questions = group,
+                index = ChatReducer.firstUnansweredIndex(_state.value, callId, group),
+            )
             _questionError.value = "还有 $missing 道题没有答案，请先答完再提交"
             return
         }
@@ -2288,6 +2371,10 @@ class ChatViewModel(
         val shift = attempt.coerceAtMost(5)
         return (1_000L shl shift.toInt()).coerceAtMost(MAX_BACKOFF_MS)
     }
+
+    /** 这次失败是不是「插队被拒」这种正常答复（B009）。 */
+    private fun isSteerUnavailable(cause: Throwable): Boolean =
+        cause is TypertException && cause.code == TypertException.CODE_STEER_UNAVAILABLE
 
     /** 把异常翻译成给用户看的一句话。 */
     private fun describe(cause: Throwable): String {

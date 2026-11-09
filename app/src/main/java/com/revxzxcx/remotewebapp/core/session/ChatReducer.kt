@@ -92,6 +92,28 @@ data class ChatUiState(
      * 两者生命周期必须一致才说得清「这题的答案有没有提交过」。
      */
     val questionDrafts: Map<String, Map<String, QuestionDraft>> = emptyMap(),
+    /**
+     * 有 `session/updateQueue` 请求在飞的排队消息 id 集合（插队 / 编辑 / 删除都算）。
+     *
+     * B009：插队按钮此前只看 `generating`，于是同一秒里连点几下会发出多个
+     * `session/updateQueue(steer)`。第二个必然被服务端以 `session/steer-unavailable`
+     * 拒绝，而那时错误又被挂到 [sendError] 上，用户看到的是带「重试」的英文错误条。
+     * 有这个集合，按钮在请求在途期间就能置灰，同时失败的答复也能降级成一句提醒。
+     *
+     * R058 第二轮审查 P2：**不能只记插队**。串行化掉 `queueJob?.cancel()` 之后，
+     * 删除按钮连点两下会连着发两个删除——第一个把条目移出队列，第二个必然被拒，
+     * 又回到「英文错误码 + 无关的重试按钮」这个 B009 要消灭的体验，只是换了动作。
+     * 所以这里的口径是「这条队列消息有一次更新在飞」，与动作种类无关。
+     */
+    val pendingQueueIds: Set<String> = emptySet(),
+    /**
+     * 多题组里用户正在看第几道题：`callId` → 0 基题号。
+     *
+     * 与 [questionDrafts] 分开放，是因为它们是两件事：草稿是「答了什么」，游标是「在看哪道」。
+     * 合在一起（B010 之前就是这样）会让「铺默认草稿」这个后台动作顺带移动用户的位置。
+     * 键不存在表示这组还没被打开过，此时由 [seedQuestionDefaults] 初始化为 0。
+     */
+    val questionIndex: Map<String, Int> = emptyMap(),
     /** 翻页（加载更早历史）失败。重试动作是重新翻页。 */
     val pageError: String? = null,
     /** 是否已成功收到过第一帧（用于区分「空会话」与「还没加载」）。 */
@@ -760,16 +782,13 @@ object ChatReducer {
     }
 
     /**
-     * 给一组题铺默认草稿，**只铺到「第一道还没有草稿的题」为止**。
+     * 打开一组题：确保这组有游标，并给**游标所在那道题**铺默认草稿。
      *
-     * 为什么不能每道题都铺（R025 UI 层 P1-1，真缺陷）：`defaultOf` 预选第一个选项，于是每道
-     * 题的草稿都是 `isAnswered`；`InteractiveComposerRequest.Question.currentIndex()` 用的
-     * 是 `indexOfFirst { drafts[it.id]?.isAnswered != true }`，全部命中时回落到 `lastIndex`
-     * → 多题组只显示最后一道题，前 N-1 道被按预选项自动作答。用户看到的是「我明明只答了
-     * 一题，另外几题去哪了」。
+     * 只给当前这道铺，**不能给组内每道题都铺**（R025 UI 层 P1-1）：`defaultOf` 预选第一个选项，
+     * 铺满之后每道题都是 `isAnswered`，用户没看过的题会被按预选项静默交出去。
      *
-     * 桌面端的规格是「当前那道题预选第一个选项」：答完当前题、切到下一题时，下一题才该有
-     * 预选。所以这里按「第一个没有草稿的题」截断，全部有草稿时停在最后一道。
+     * 游标本身是显式状态（[ChatUiState.questionIndex]），这里**只在没有游标时**置 0，
+     * 有游标就原样保留 —— B010 的病灶正是「每帧重算游标」，帧数一多就顶到最后一道。
      */
     fun seedQuestionDefaults(
         state: ChatUiState,
@@ -777,14 +796,49 @@ object ChatReducer {
         questions: List<AskQuestion>,
     ): ChatUiState {
         if (questions.isEmpty()) return state
-        val existing = state.questionDrafts[callId].orEmpty()
-        val upTo = questions.indexOfFirst { !existing.containsKey(it.id) }
-            .let { if (it < 0) questions.lastIndex else it }
-        var current = state
-        questions.take(upTo + 1).forEach { question ->
-            current = enterQuestion(current, callId, question)
+        val index = state.questionIndex[callId] ?: 0
+        return placeQuestionCursor(state, callId, questions, index)
+    }
+
+    /**
+     * 把游标移到 `index` 并铺好那道题的默认草稿（越界会夹到合法范围）。
+     *
+     * 铺草稿与移动游标必须同时发生：否则用户滑到下一题、看到第一个选项已选中、直接点提交，
+     * 会因为「那道题没有草稿键」被 [unansweredCount] 判成未答而挡下来。
+     */
+    fun placeQuestionCursor(
+        state: ChatUiState,
+        callId: String,
+        questions: List<AskQuestion>,
+        index: Int,
+    ): ChatUiState {
+        if (questions.isEmpty()) return state
+        val clamped = index.coerceIn(0, questions.lastIndex)
+        val moved = if (state.questionIndex[callId] == clamped) {
+            state
+        } else {
+            state.copy(questionIndex = state.questionIndex + (callId to clamped))
         }
-        return current
+        return enterQuestion(moved, callId, questions[clamped])
+    }
+
+    /** 当前游标（没有游标时按 0 算，与 UI 的 `Question.currentIndex()` 口径一致）。 */
+    fun questionCursor(state: ChatUiState, callId: String): Int = state.questionIndex[callId] ?: 0
+
+    /**
+     * 上一题 / 下一题。
+     *
+     * 越界**会夹到合法范围**（走 [placeQuestionCursor] 的 `coerceIn`），并把夹取后的值写回游标；
+     * 只有「题组为空」或「`delta == 0`」才是真正的 no-op。调用方不要指望越界调用不产生新状态。
+     */
+    fun stepQuestion(
+        state: ChatUiState,
+        callId: String,
+        questions: List<AskQuestion>,
+        delta: Int,
+    ): ChatUiState {
+        if (questions.isEmpty() || delta == 0) return state
+        return placeQuestionCursor(state, callId, questions, questionCursor(state, callId) + delta)
     }
 
     /**
@@ -804,6 +858,23 @@ object ChatReducer {
     ): Int {
         val drafts = state.questionDrafts[callId].orEmpty()
         return questions.count { drafts[it.id]?.isAnswered != true }
+    }
+
+    /**
+     * 第一道还没有答案的题的下标；全部答完时返回 0。
+     *
+     * 存在的理由（R058 审查 P1）：游标改成显式状态之后，「第一道没有草稿的题」这个位置
+     * 不再由提问卡的 `currentIndex()` 顺带算出来。提交被挡下时必须**主动**把游标移到
+     * 这道题上，否则用户看到的是刚答完的那道，屏幕上没有任何线索指向真正缺答案的那道。
+     */
+    fun firstUnansweredIndex(
+        state: ChatUiState,
+        callId: String,
+        questions: List<AskQuestion>,
+    ): Int {
+        val drafts = state.questionDrafts[callId].orEmpty()
+        val index = questions.indexOfFirst { drafts[it.id]?.isAnswered != true }
+        return if (index < 0) 0 else index
     }
 
     /**
@@ -872,9 +943,12 @@ object ChatReducer {
         )
     }
 
-    /** 提交后丢掉整组草稿——答案已经进了服务端，草稿没有存在意义。 */
+    /** 提交后丢掉整组草稿与游标——答案已经进了服务端，草稿没有存在意义。 */
     fun clearQuestion(state: ChatUiState, callId: String): ChatUiState =
-        state.copy(questionDrafts = state.questionDrafts - callId)
+        state.copy(
+            questionDrafts = state.questionDrafts - callId,
+            questionIndex = state.questionIndex - callId,
+        )
 
     /**
      * 丢掉不再开着的提问组的草稿。
@@ -883,8 +957,17 @@ object ChatReducer {
      * 若留着，服务端一旦复用同一个 `callId`（换一组新问题），旧草稿就会套到新问题上。
      */
     fun pruneQuestionDrafts(state: ChatUiState, liveCallIds: Set<String>): ChatUiState {
-        if (state.questionDrafts.keys == liveCallIds) return state
-        return state.copy(questionDrafts = state.questionDrafts.filterKeys { it in liveCallIds })
+        // 早退判据是「没有需要剪掉的键」，不是「键集合等于 live」：游标只在用户看题时
+        // 才有键，要求两边都等于 live 会让「有草稿但还没游标」每帧都产生新实例。
+        if (state.questionDrafts.keys.all { it in liveCallIds } &&
+            state.questionIndex.keys.all { it in liveCallIds }
+        ) {
+            return state
+        }
+        return state.copy(
+            questionDrafts = state.questionDrafts.filterKeys { it in liveCallIds },
+            questionIndex = state.questionIndex.filterKeys { it in liveCallIds },
+        )
     }
 
     /**
