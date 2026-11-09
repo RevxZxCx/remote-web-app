@@ -292,8 +292,66 @@ class CapsuleContentTest {
         )
         assertNull(state.step)
         assertNull(state.progress)
-        // 没有进度、没有待处理、也没有别的会话 → 不显示胶囊。
+    }
+
+    /**
+     * R059 第三轮审查 P1 的回归。
+     *
+     * ## 这条断言原来是反的
+     * 上一版这里写的是 `assertFalse(state.visible)`，注释还理直气壮：
+     * 「没有进度、没有待处理、也没有别的会话 → 不显示胶囊」。
+     * 但**这正是最常见的主场景**——一个会话在跑、用户没打开它（所以拿不到 todo）、
+     * 也没有别的会话。按那条断言，胶囊在这种情况下永远不出现，
+     * 而胶囊存在的全部意义就是「我不在 App 里也能看见它在干活」。
+     *
+     * 断言把缺陷固化成了预期，所以连跑 2398 项全绿也发现不了。
+     */
+    @Test
+    fun `单会话在跑但拿不到 todo 时仍然要显示：这是主场景`() {
+        val state = CapsuleContent.running(
+            sessionId = "s1",
+            title = "后台会话",
+            todos = null,
+            report = "在干活",
+            action = "跑测试",
+            otherRunning = 0,
+            startedAt = 1L,
+            phase = CapsulePhase.Running,
+        )
+        assertTrue(state.visible)
+        assertEquals("执行中", state.capsuleText)
+    }
+
+    @Test
+    fun `空闲会话不显示胶囊：不是书签`() {
+        val state = CapsuleContent.running(
+            sessionId = "s1", title = "t", todos = null, report = "r",
+            action = null, otherRunning = 0, startedAt = 1L,
+            phase = CapsulePhase.Idle,
+        )
         assertFalse(state.visible)
+    }
+
+    @Test
+    fun `已完成未读也要显示：否则跑完了反而没提示`() {
+        val state = CapsuleContent.running(
+            sessionId = "s1", title = "t", todos = null, report = "r",
+            action = null, otherRunning = 0, startedAt = 1L,
+            phase = CapsulePhase.Done,
+        )
+        assertTrue(state.visible)
+        assertEquals("已完成", state.capsuleText)
+    }
+
+    @Test
+    fun `出错未读显示为出错而不是执行中`() {
+        val state = CapsuleContent.running(
+            sessionId = "s1", title = "t", todos = null, report = "r",
+            action = null, otherRunning = 0, startedAt = 1L,
+            phase = CapsulePhase.Failed,
+        )
+        assertTrue(state.visible)
+        assertEquals("出错", state.capsuleText)
     }
 
     @Test
@@ -302,6 +360,30 @@ class CapsuleContentTest {
         val state = CapsuleContent.running("s", "t", fresh, "report", null, 0, 1L)
         assertEquals(CapsuleProgress(total = 2, done = 0), state.progress)
         assertTrue(state.progress!!.drawable)
+    }
+
+    /**
+     * R059 第三轮审查 P2 的回归：步骤行整行必须装得进一行 subText。
+     *
+     * 上一版只把 `STEP_MAX_CHARS` 作用在 todo 正文上，拼上前缀后整行能到 39 字，
+     * 被系统从右边切掉——切掉的恰好是裁剪想保住的那几个字。
+     */
+    @Test
+    fun `步骤行连同前缀不超过预算`() {
+        val todos = TodoList(
+            listOf(
+                TodoItem("一", TodoStatus.COMPLETED),
+                TodoItem("这是一个特别特别长的待办事项正文用来把整行撑爆", TodoStatus.IN_PROGRESS),
+            ),
+        )
+        val state = CapsuleContent.running("s", "t", todos, "r", null, 0, 1L)
+        val step = state.step
+        assertNotNull(step)
+        assertTrue(
+            "步骤行整行 ${step!!.length} 字，超了 ${CapsuleContent.STEP_MAX_CHARS} 字预算：$step",
+            step.length <= CapsuleContent.STEP_MAX_CHARS,
+        )
+        assertTrue("正文被切了但没留省略号：$step", step.endsWith("…"))
     }
 
     @Test
@@ -315,7 +397,6 @@ class CapsuleContentTest {
         val state = CapsuleContent.running("s", "t", null, "r", null, otherRunning = 2, startedAt = 1L)
         assertTrue(state.visible)
         assertEquals("执行中 3 个", state.capsuleText)
-        assertEquals(" · 另 2 个在执行", state.othersSuffix)
     }
 
     @Test
@@ -377,7 +458,7 @@ class CapsuleContentTest {
     fun `单会话且没进度时胶囊文案就是执行中`() {
         val state = CapsuleContent.running("s", "t", null, "r", null, 0, 1L)
         assertEquals("执行中", state.capsuleText)
-        assertEquals("", state.othersSuffix)
+        assertEquals("执行中", state.capsuleText)
     }
 
     @Test

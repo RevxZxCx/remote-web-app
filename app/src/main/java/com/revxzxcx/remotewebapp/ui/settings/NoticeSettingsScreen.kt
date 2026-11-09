@@ -318,12 +318,15 @@ fun NoticeSettingsScreen(
             SectionLabel("流体云")
 
             CardGroup {
+                // 不支持时**不给可点态**（R059 第三轮审查 P3）：跳过去只会看到
+                // 一个没有「流体云显示实时活动」的应用通知页，用户会以为自己
+                // 机型本该有、只是开关藏起来了。
                 SettingRow(
                     icon = Icons.Default.Info,
                     tint = MaterialTheme.colorScheme.primary,
                     title = "状态栏实时显示",
                     detail = capsuleStatusDetail(status),
-                    onClick = onOpenCapsuleSettings,
+                    onClick = if (status.capsuleSupported) onOpenCapsuleSettings else null,
                 )
                 if (status.capsuleSupported && !status.capsulePromoted) {
                     RowDivider()
@@ -710,12 +713,19 @@ private fun SettingRow(
     tint: Color,
     title: String,
     detail: String,
-    onClick: () -> Unit,
+    /** `null` 表示这一行只是说明、不可点：不画右箭头，也不吃点击。 */
+    onClick: (() -> Unit)?,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(role = Role.Button, onClick = onClick)
+            .then(
+                if (onClick == null) {
+                    Modifier
+                } else {
+                    Modifier.clickable(role = Role.Button, onClick = onClick)
+                },
+            )
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -747,11 +757,13 @@ private fun SettingRow(
                 modifier = Modifier.padding(top = 1.dp),
             )
         }
-        Icon(
-            imageVector = Icons.Default.KeyboardArrowRight,
-            contentDescription = null,
-            modifier = Modifier.size(18.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        if (onClick != null) {
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowRight,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }

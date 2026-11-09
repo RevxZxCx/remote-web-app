@@ -41,8 +41,29 @@ internal data class CapsuleState(
     val phase: CapsulePhase = CapsulePhase.Running,
 ) {
 
-    /** 是否该显示胶囊。空闲且没有任何待处理时**不显示**（调研文档 3.4）。 */
-    val visible: Boolean get() = pending != PendingKind.None || progress != null || otherRunning > 0
+    /**
+     * 是否该显示胶囊。空闲且没有任何待处理时**不显示**（调研文档 3.4）。
+     *
+     * ## 为什么 `phase` 也算进来（R059 第三轮审查 P1）
+     * 只算 pending / progress / otherRunning 时，**最常见的那个场景反而不显示**：
+     * 一个会话在跑、用户没打开它、因此拿不到 todo → `progress == null`；
+     * 同时没有别的会话 → `otherRunning == 0`；也没有待处理。
+     * 三者全空，`visible` 为 false，`recompute()` 直接 `cancel()`，状态栏什么都没有。
+     *
+     * 而胶囊存在的意义正是「**我不在 App 里**时也能看见它在干活」。只要焦点会话
+     * 还在跑（`Running`），或者刚出错还没被看过（`Failed`），就该占着展示位——
+     * 哪怕只能说一句「执行中」、连进度都不知道。
+     *
+     * `Done` 不算：跑完且没有未读的会话不该常驻，那是书签不是提醒。
+     * 但「跑完了、我还没看过」（`completionUnread`）要显示，所以 `Done` 分支
+     * 在 [CapsuleCoordinator] 里会连同 `completionUnread` 一起判——这里只排除
+     * 纯空闲。
+     */
+    val visible: Boolean
+        get() = pending != PendingKind.None ||
+            phase != CapsulePhase.Idle ||
+            progress != null ||
+            otherRunning > 0
 
     /**
      * 状态栏胶囊条上那一行字（`setShortCriticalText`）。
@@ -69,12 +90,11 @@ internal data class CapsuleState(
             otherRunning >= 8 -> "执行中 9+ 个"
             otherRunning > 0 -> "执行中 ${otherRunning + 1} 个"
             progress != null -> "第 ${progress.safeDone} 步"
+            // Idle 走不到：`visible` 会把 Idle 挡掉。留着只是为了让 `when` 穷尽，
+            // 真出现了也宁可显示「执行中」而不是空串。
             else -> "执行中"
         }
 
-    /** 副行里「另 N 个在执行」的后缀；没有别的会话时返回空串。 */
-    val othersSuffix: String
-        get() = if (otherRunning <= 0) "" else " · 另 $otherRunning 个在执行"
 }
 
 /**
@@ -122,6 +142,12 @@ internal data class CapsuleProgress(val total: Int, val done: Int) {
 
 /** 会话此刻所处阶段，决定胶囊条短字与卡片配色。 */
 internal enum class CapsulePhase {
+    /**
+     * 不在跑、也没有未读。焦点选举正常情况下不会选出这种会话，
+     * 纯防御——但必须有：否则「已经跑完且已读」会被当成 Running。
+     */
+    Idle,
+
     /** 正在跑。 */
     Running,
 
@@ -317,6 +343,16 @@ internal object CapsuleContent {
         action: String?,
         otherRunning: Int,
         startedAt: Long,
+        /**
+         * 相位。**必须由调用方从 [com.revxzxcx.remotewebapp.core.session.SessionSummary]
+         * 的 `running` / `failureUnread` / `completionUnread` 算出来传进来**
+         * （R059 第三轮审查 P1）。
+         *
+         * 不能只靠 live 快照：后台会话根本没有 live 快照，`snapshot == null`
+         * 时旧写法一律当 `Running`，于是「已经跑完的会话」会一直显示「执行中」。
+         * 会话摘要才是这台机器上唯一知道它到底跑没跑的东西。
+         */
+        phase: CapsulePhase = CapsulePhase.Running,
     ): CapsuleState {
         val progress = todos?.let { CapsuleProgress.fromTodos(it) }
         // 步骤行优先用 todo 里那条 in_progress 的正文 —— 那是「实际在做的步骤」，
@@ -324,7 +360,12 @@ internal object CapsuleContent {
         val currentStep = todos?.items?.firstOrNull { it.status == TodoStatus.IN_PROGRESS }?.content
         val step = when {
             progress != null && currentStep != null ->
-                "第 ${progress.safeDone + 1} 步 / 共 ${progress.total} 步：${clip(currentStep, STEP_MAX_CHARS)}"
+                // 前缀「第 N 步 / 共 M 步：」本身就占 11~15 个字符，所以正文
+                // 的预算必须从整行预算里扣掉它（R059 第三轮审查 P2）。
+                // 只扣正文会让整行到 39 字，超出一行 subText，被系统从右边切掉——
+                // 切掉的恰好是这段裁剪想保住的那几个字，等于白裁。
+                "第 ${progress.safeDone + 1} 步 / 共 ${progress.total} 步：" +
+                    clip(currentStep, (STEP_MAX_CHARS - stepPrefixChars(progress)).coerceAtLeast(4))
             progress != null ->
                 "第 ${progress.safeDone} 步 / 共 ${progress.total} 步"
             // 后台会话没有 todo：只能诚实地说不知道进度，不要编一个假的 n/m。
@@ -340,6 +381,7 @@ internal object CapsuleContent {
             startedAt = startedAt,
             pending = PendingKind.None,
             otherRunning = otherRunning,
+            phase = phase,
         )
     }
 
@@ -410,6 +452,15 @@ internal object CapsuleContent {
         otherRunning = otherRunning,
     )
 }
+
+/**
+ * 步骤行前缀「第 N 步 / 共 M 步：」的字符数。
+ *
+ * 抽成函数而不是写死：`done`/`total` 的位数会变（9 → 10 位多一个字），
+ * 写死一个常量，10 步以上就又溢出。
+ */
+internal fun stepPrefixChars(progress: CapsuleProgress): Int =
+    "第 ${progress.safeDone + 1} 步 / 共 ${progress.total} 步：".length
 
 /** 这条 todo 是否「正在进行」。 */
 internal val TodoStatus.capsuleActive: Boolean

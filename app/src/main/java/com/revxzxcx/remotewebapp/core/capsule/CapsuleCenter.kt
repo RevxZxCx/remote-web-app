@@ -198,9 +198,15 @@ internal class CapsuleCenter(private val context: Context) {
             .setDeleteIntent(deleteIntent())
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            // 计时器只在 Running 相位才有意义。
+            //
+            // 一旦胶囊对 Done / Failed 也可见（第三轮修复后就是如此），无脑开计时器会出现
+            // 「已完成」旁边的时间还在 00:01、00:02 地涨，一直涨到用户点开——语义正好反了。
+            // 所以结算相位只显示一个静态时间戳（setShowWhen(true) + setWhen(startedAt)），
+            // 不再挂 chronometer。
             .setShowWhen(true)
             .setWhen(state.startedAt)
-            .setUsesChronometer(true)
+            .setUsesChronometer(state.phase == CapsulePhase.Running)
             .setCategory(Notification.CATEGORY_PROGRESS)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
 

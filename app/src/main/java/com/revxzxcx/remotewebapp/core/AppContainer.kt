@@ -267,6 +267,10 @@ class AppContainer(context: Context) {
         capsuleJobs = emptyList()
         if (client == null) {
             capsule.detach()
+            // 断连后信箱里的会话/焦点/live 都属于**上一个连接**。不清掉的话，
+            // 下次 attach 时 StateFlow 会把旧值立刻推给新连接，
+            // 焦点选举据此选出一个不存在的会话（R059 第三轮审查 P2）。
+            CapsuleBridge.reset()
             return
         }
         capsuleJobs = listOf(

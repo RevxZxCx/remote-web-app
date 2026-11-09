@@ -73,4 +73,23 @@ object CapsuleBridge {
     internal fun clearLive() {
         _live.value = null
     }
+
+    /**
+     * 换连接前把信箱清零（R059 第三轮审查 P2）。
+     *
+     * ## 为什么必须有
+     * 这是**进程级** object，三个 `StateFlow` 会在断连后保留旧值。而
+     * `StateFlow` 的语义是「新订阅者立刻拿到当前值」，所以新连接一 attach，
+     * 第一条 `collect` 就会把**上一个账号/工作区**的会话列表推进
+     * [CapsuleCoordinator.setSessions]，焦点选举据此选出一个已经不属于这台机器的
+     * 会话，胶囊标题是它、点进去跳一个不存在的 sessionId。
+     *
+     * 只在 `watchCapsule(null)`（断连）时调用，**不要**在每次 attach 前清——
+     * 那样同一账号重连会白白闪一下空状态。
+     */
+    internal fun reset() {
+        _sessions.value = emptyList()
+        _viewing.value = null
+        _live.value = null
+    }
 }

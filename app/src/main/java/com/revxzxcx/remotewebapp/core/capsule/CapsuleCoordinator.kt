@@ -166,6 +166,12 @@ internal class CapsuleCoordinator(
         detached = true
         recomputeJob?.cancel()
         recomputeJob = null
+        // `CapsuleDismissal` 是进程级单例，`detach()` 不清它就会出现
+        // 「划掉胶囊 → 断连 → 连另一台机器，那台有会话在跑」这条路径上全程静默：
+        // recompute 每次都命中 `dismissed && pending == None` 直接 cancel，
+        // 用户既看不到胶囊也不知道为什么，直到新机器冒出第一个审批/提问才恢复。
+        // 与 CapsuleBridge.reset() 是同一类残留，必须一起清。
+        CapsuleDismissal.clear()
         sessions = emptyList()
         approvals = emptyList()
         questions = emptyList()
@@ -218,7 +224,7 @@ internal class CapsuleCoordinator(
         previousSessionId = focus.sessionId
 
         val others = CapsuleFocus.countOthersRunning(sessions, focus.sessionId)
-        val state = stateFor(focus.sessionId, focus.title, others)
+        val state = stateFor(focus.sessionId, focus.title, others, phaseOf(focus))
         if (!state.visible) {
             center.cancel()
             return
@@ -259,8 +265,18 @@ internal class CapsuleCoordinator(
     private fun pendingSessionIds(): List<String> =
         capsulePendingOrder(approvals, questions)
 
-    /** 给某个会话构造卡片内容。 */
-    private fun stateFor(sessionId: String, title: String?, otherRunning: Int): CapsuleState {
+    /**
+     * 给某个会话构造卡片内容。
+     *
+     * @param phase 由 [phaseOf] 从会话摘要算出，**不要**在这里再看 live 快照判相位：
+     * 后台会话没有快照，旧写法会把「已经跑完」当成「还在跑」。
+     */
+    private fun stateFor(
+        sessionId: String,
+        title: String?,
+        otherRunning: Int,
+        phase: CapsulePhase,
+    ): CapsuleState {
         // 待处理优先：它决定按钮，也决定用户在通知栏能做的最有价值的一件事。
         approvals.firstOrNull { it.agentId == sessionId }?.let { request ->
             return CapsuleContent.approval(
@@ -290,9 +306,6 @@ internal class CapsuleCoordinator(
 
         // 没有待处理：走执行中/已完成/出错三态。
         val snapshot = live?.takeIf { it.sessionId == sessionId }
-        // 只用这一份快照判相位：`live` 会被 setLive 并发改写，重复读三次
-        // 可能落在不同版本上，那个表达式就不再是作者想要的那一个。
-        val phase = if (snapshot?.running == false) CapsulePhase.Done else CapsulePhase.Running
         return CapsuleContent.running(
             sessionId = sessionId,
             title = title,
@@ -301,7 +314,25 @@ internal class CapsuleCoordinator(
             action = snapshot?.action,
             otherRunning = otherRunning,
             startedAt = startedAt,
-        ).copy(phase = phase)
+            phase = phase,
+        )
+    }
+
+    /**
+     * 从会话摘要判断相位。
+     *
+     * 优先级：出错未读 > 在跑 > 完成未读 > 空闲。与
+     * [com.revxzxcx.remotewebapp.core.session.statusOf] 的口径一致——
+     * **两处不一致会出现「列表说完成了、胶囊说执行中」**。
+     *
+     * 为什么 `failureUnread` 排在 `running` 前面：失败也可能是「跑完了但失败」，
+     * 用户需要知道的是失败，不是「它还在动」。
+     */
+    private fun phaseOf(summary: SessionSummary): CapsulePhase = when {
+        summary.failureUnread -> CapsulePhase.Failed
+        summary.running -> CapsulePhase.Running
+        summary.completionUnread -> CapsulePhase.Done
+        else -> CapsulePhase.Idle
     }
 
     /**
