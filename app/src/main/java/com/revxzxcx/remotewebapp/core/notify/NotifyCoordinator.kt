@@ -56,6 +56,18 @@ class NotifyCoordinator(
      * 首版完全一致（只按 running 翻转发「任务结束」）。
      */
     private val fetchLastTurn: (suspend (String) -> TurnProbe?)? = null,
+    /**
+     * 子代理登记表（R059-B011）。
+     *
+     * 判定子代理靠 `SessionSummary.origin == "subagent"`，而 `origin` **只在
+     * `added` 帧与全量列表里出现**，`status` / `error` 帧只有 id。
+     * 不记这张表，子代理跑完与主会话跑完在事件层完全同形，通知层无从分辨。
+     *
+     * 做成参数而不是内部 new 一个：`AppContainer` 需要把同一份登记表
+     * 也给胶囊协调器用，两处判据必须同源，否则会出现「通知说完成了、
+     * 胶囊说还在跑」这种自相矛盾。
+     */
+    private val subagents: SubagentRegistry = SubagentRegistry(),
 ) {
 
     /**
@@ -166,6 +178,9 @@ class NotifyCoordinator(
         link.reset()
         // 账号是**每台桌面端机器各自的**：切过去之后那台的账号可能是好的。
         accounts.reset()
+        // 子代理登记表同理：不同主机上同一个 sessionId 完全可能是另一条会话，
+        // 留着旧结论会让新连接上的主会话被误判成子代理而静默不提醒。
+        subagents.clear()
         if (client == null) return
 
         linkJob = scope.launch {
@@ -355,6 +370,9 @@ class NotifyCoordinator(
                 // 这里**不**判完成边沿：added 表示「刚出现」，不可能是「刚跑完」。
                 // 但仍然要把它喂给 edge 记账，否则下一帧 status(false) 会因为
                 // previous == null 被判成「第一次见」而漏掉一次完成。
+                // 顺手把「是不是子代理」记下来：`status`/`error` 帧不带 origin，
+                // 只有这里能拿到（R059-B011）。
+                summary?.let { subagents.remember(it) }
                 summary?.let { edge.observe(it.sessionId, it.running) }
             }
 
@@ -365,6 +383,7 @@ class NotifyCoordinator(
                 edge.forget(notification.sessionId)
                 names.forget(notification.sessionId)
                 outcomes.forget(notification.sessionId)
+                subagents.forget(notification.sessionId)
                 // 审批通知不在这里撤：`eventId` 与 `sessionId` 没有稳定映射，
                 // 硬要按会话找会误撤别人的。它们会在 `syncApprovals` 下一次对账时
                 // 因「不在 approvals 列表里」被统一撤掉。
@@ -372,6 +391,12 @@ class NotifyCoordinator(
 
             is SessionNotification.Status -> {
                 val edgeHit = edge.observe(notification.sessionId, notification.running)
+                // 子代理跑完不发「任务结束」（R059-B011）。
+                //
+                // 为什么仍然喂 `edge`：边沿账必须跟真实状态同步，否则子代理的
+                // running 翻转会在账里留一条永不过期的 `true`，将来这个 id 若被
+                // 复用就会漏掉一次真正的完成。
+                if (subagents.isSubagent(notification.sessionId)) return
                 if (edgeHit == true) {
                     // 不再直接发「任务结束」：先查这一轮的结局。查不到才退回旧口径
                     // （会话确实停了，只是我们看不到它是怎么停的）。
@@ -385,6 +410,9 @@ class NotifyCoordinator(
                 // 不依赖边沿——但会顺手把 edge 标成不在跑，避免紧随其后的
                 // status(false) 再发一条「任务结束」（同一件事响两次）。
                 edge.observe(notification.sessionId, false)
+                // 子代理失败同样不通知（R059-B011）：主会话那一轮会把失败
+                // 一并报出来，两处都弹就是一次故障响两次。
+                if (subagents.isSubagent(notification.sessionId)) return
                 // 仍然交给结局查询：若这一轮有 `turn/end` 且带具体错误（429 之类），
                 // 用它比用 error 帧的一句话更准；查不到才用 error 帧的原文。
                 launchOutcome(notification.sessionId, errorMessage = notification.message)

@@ -1,5 +1,6 @@
 package com.revxzxcx.remotewebapp.core.capsule
 
+import com.revxzxcx.remotewebapp.R
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.session.TodoList
 import com.revxzxcx.remotewebapp.core.session.TodoStatus
@@ -138,6 +139,29 @@ internal data class CapsuleProgress(val total: Int, val done: Int) {
         fun fromTodos(todos: TodoList): CapsuleProgress? =
             if (todos.total <= 0) null else CapsuleProgress(total = todos.total, done = todos.done)
     }
+}
+
+/**
+ * 胶囊条上的状态图标（R059-B016）。
+ *
+ * ## 为什么必须按状态分开
+ * 之前所有状态共用 `ic_capsule`（三条横线）。用户在原型里看到的勾、手、问号、
+ * 叹号一个都没出现——**而且这比「没有图标」更糟**：图标的位置本身在向用户承诺
+ * 「你能从图标看出状态」，实际看不出来就等于每个状态都在骗人。
+ *
+ * ## 取值顺序与 [CapsuleState.capsuleText] 完全一致
+ * 胶囊条上图标与文字并排显示，两者必须说同一件事。任何一处改了顺序，
+ * 就会出现「手 + 执行中」这种自相矛盾的组合。所以本函数与 `capsuleText`
+ * 的 `when` 分支顺序**逐条对应**，改一处必须改另一处。
+ *
+ * 都是纯白剪影（会被系统染色），形状取自原型 `ICO` 表。
+ */
+internal fun CapsuleState.iconRes(): Int = when {
+    pending == PendingKind.Approval -> R.drawable.ic_capsule_wait
+    pending == PendingKind.Question -> R.drawable.ic_capsule_question
+    phase == CapsulePhase.Failed -> R.drawable.ic_capsule_failed
+    phase == CapsulePhase.Done -> R.drawable.ic_capsule_done
+    else -> R.drawable.ic_capsule_running
 }
 
 /** 会话此刻所处阶段，决定胶囊条短字与卡片配色。 */

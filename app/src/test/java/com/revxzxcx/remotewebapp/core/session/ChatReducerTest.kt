@@ -1791,4 +1791,120 @@ class ChatReducerTest {
         assertTrue(next.ready)
         assertFalse(next.loading)
     }
+
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // B014：上一轮的任务清单不能在下一轮继续挂
+    //
+    // 用户 m04765 报的是「上一轮 todo 全做完了，发下一条消息，任务面板还显示那份
+    // 已完成的清单，流体云一直停在 5/5」。根因是 `todos` 只由 `todo/write` 改写，
+    // 而服务端**不会**在轮次边界重发它——所以那份清单会一直留到模型下次想起来写 todo。
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private fun turnStart(seq: Long): ChatFrame.Event =
+        parse("""{"type":"turn/start","seq":$seq,"time":${seq * 1000},"data":{"turn":0}}""")
+
+    private fun turnEnd(seq: Long): ChatFrame.Event =
+        parse(
+            """{"type":"turn/end","seq":$seq,"time":${seq * 1000},""" +
+                """"data":{"turn":0,"reason":"completed"}}""",
+        )
+
+    private fun todoWrite(seq: Long, vararg items: String): ChatFrame.Event {
+        val body = items.joinToString(",")
+        return parse(
+            """{"type":"todo/write","seq":$seq,"time":${seq * 1000},""" +
+                """"data":{"todos":[$body]}}""",
+        )
+    }
+
+    private fun todoItem(content: String, status: String) =
+        """{"content":"$content","status":"$status"}"""
+
+    @Test
+    fun `上一轮全做完之后 新一轮开始要把清单清空`() {
+        // 这就是用户报的那条：不跑一次真实会话也能钉住——只要事件序列对。
+        var state = ChatUiState()
+        state = ChatReducer.reduce(
+            state,
+            todoWrite(
+                1L,
+                todoItem("勘查", "completed"),
+                todoItem("实现", "completed"),
+            ),
+        )
+        assertEquals(2, state.todos.total)
+        assertTrue("前提：这一轮确实做完了", state.todos.allDone)
+
+        // 一轮跑完 → 生成状态归零
+        state = ChatReducer.reduce(state, turnStart(2L))
+        state = ChatReducer.reduce(state, turnEnd(3L))
+        assertFalse(state.generating)
+
+        // 用户发下一条消息，服务端开新一轮
+        state = ChatReducer.reduce(state, turnStart(4L))
+
+        assertEquals("上一轮的清单不能带进这一轮", 0, state.todos.total)
+        assertFalse("清空后不能再显示「已完成」", state.todos.allDone)
+    }
+
+    @Test
+    fun `上一轮没做完时 新一轮开始要保留清单`() {
+        // 反面：`turn/end` 之后 `todo/write` 未必紧跟着来，模型可能还在同一批任务上
+        // 继续干活。无条件清空会让面板先闪一次空列表、再被下一帧填回来，
+        // 中途用户看到的「任务没了」是假的。
+        var state = ChatUiState()
+        state = ChatReducer.reduce(
+            state,
+            todoWrite(
+                1L,
+                todoItem("勘查", "completed"),
+                todoItem("实现", "in_progress"),
+            ),
+        )
+        assertFalse("前提：这一轮没做完", state.todos.allDone)
+
+        state = ChatReducer.reduce(state, turnStart(2L))
+        state = ChatReducer.reduce(state, turnEnd(3L))
+        state = ChatReducer.reduce(state, turnStart(4L))
+
+        assertEquals("没做完的任务属于这一轮，不能清", 2, state.todos.total)
+        assertEquals(1, state.todos.done)
+    }
+
+    @Test
+    fun `断线重连重放 turn start 时不再清一次 否则会把刚写回来的清单抹掉`() {
+        // `attach` 之后服务端会重放快照与进行中的帧。重放时 `generating` 已经是 true，
+        // 这时再清一次，会把 `todo/write` 刚刚写回来的清单抹掉，
+        // 且下一帧 `todo/write` 可能很久才来——任务面板空白一片。
+        var state = ChatUiState()
+        // 这一轮已经在跑
+        state = ChatReducer.reduce(state, turnStart(1L))
+        assertTrue(state.generating)
+        state = ChatReducer.reduce(
+            state,
+            todoWrite(2L, todoItem("勘查", "completed")),
+        )
+        assertTrue("前提：全做完", state.todos.allDone)
+
+        // 重放：generating 已经是 true（同一次 turn/start 的第二份）
+        state = ChatReducer.reduce(state, turnStart(3L))
+        assertTrue(state.generating)
+
+        assertEquals("重放的 turn/start 不能再清一次", 1, state.todos.total)
+    }
+
+    @Test
+    fun `新一轮里模型写入新清单时照常覆盖`() {
+        // 清空不是必须的——模型也可能直接写一份新的。这条钉「清空没有打断正常写入」。
+        var state = ChatUiState()
+        state = ChatReducer.reduce(state, todoWrite(1L, todoItem("旧任务", "completed")))
+        state = ChatReducer.reduce(state, turnStart(2L))
+        state = ChatReducer.reduce(state, turnEnd(3L))
+        state = ChatReducer.reduce(state, turnStart(4L))
+        state = ChatReducer.reduce(state, todoWrite(5L, todoItem("新任务", "pending")))
+
+        assertEquals(1, state.todos.total)
+        assertEquals("新任务", state.todos.items.single().content)
+    }
 }

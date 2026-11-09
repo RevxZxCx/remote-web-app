@@ -190,7 +190,11 @@ internal class CapsuleCenter(private val context: Context) {
         }
 
         val builder = Notification.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_capsule)
+            // 图标必须跟着状态走（R059-B016）：之前这里固定 `ic_capsule`，
+            // 于是「执行中 / 待批准 / 待回答 / 已完成 / 出错」在状态栏上是同一个
+            // 三条横线，用户在原型里看到的勾、手、问号、叹号一个都没出现。
+            // 真机上这比「没图标」更糟：图标承诺了「能看出状态」，实际却看不出来。
+            .setSmallIcon(state.iconRes())
             .setContentTitle(title)
             // 胶囊条上那行字（见类 KDoc 第 5 条）。不设它，状态栏上只有一个图标。
             .setShortCriticalText(state.capsuleText)
@@ -217,10 +221,19 @@ internal class CapsuleCenter(private val context: Context) {
         val progress = state.progress
         if (progress != null && progress.drawable) {
             val style = Notification.ProgressStyle().setStyledByProgress(false)
-            repeat(progress.total) {
-                style.addProgressSegment(Notification.ProgressStyle.Segment(1))
-            }
             val done = progress.safeDone
+            // 每段显式配色（R059-B013）。
+            //
+            // 不设 `setColor` 时颜色完全由系统主题决定：真机上「已完成」的段落
+            // 与「未完成」的段落是同一个灰，进度条看上去整条不动——用户说
+            // 「已经完成的任务进度条不会变成绿色」就是这个。
+            // 颜色必须是**每段各自设**，`ProgressStyle` 没有全局前景色入口。
+            repeat(progress.total) { index ->
+                style.addProgressSegment(
+                    Notification.ProgressStyle.Segment(1)
+                        .setColor(if (index < done) SEGMENT_DONE_COLOR else SEGMENT_TODO_COLOR),
+                )
+            }
             style.setProgress(done)
             builder.setStyle(style)
             builder.setProgress(progress.total, done, false)
@@ -347,6 +360,29 @@ internal class CapsuleCenter(private val context: Context) {
          * 编译期 Unresolved），只能写字面量。真机 dumpsys 已证实这是系统读的 key。
          */
         internal const val KEY_REQUEST_PROMOTED_ONGOING: String = "android.requestPromotedOngoing"
+
+        /**
+         * 已完成段的颜色（R059-B013）。
+         *
+         * 与原型 `docs/R059-流体云原型.html` 的 `--running` 同值。**必须显式给**：
+         * 不设时完全由系统主题决定，真机上已完成段与未完成段同为灰色，
+         * 进度条看上去整条不动——用户报的「已完成的进度条不会变成绿色」。
+         */
+        private val SEGMENT_DONE_COLOR: Int = 0xFF4ADE80.toInt()
+
+        /**
+         * 未完成段的颜色（R059-B013）。
+         *
+         * ## 为什么不用原型那个 `rgba(255,255,255,.22)`
+         * 半透明白只在**深色**底上成立。`ProgressStyle.Segment.setColor` 的颜色由系统
+         * 直接绘制，不保证叠在深色底上：系统切浅色主题时通知底板是白的，
+         * 22% 白叠白等于与背景同色，未完成段整段消失，只剩一条短绿——
+         * 那比「整条不变绿」更难理解（用户会以为总数变成了 2）。
+         *
+         * 所以取一个**不透明**的中性灰：它在深色底上看得见（比底色亮），
+         * 在浅色底上也看得见（比底色深）。代价是不如半透明白那样贴合主题。
+         */
+        private val SEGMENT_TODO_COLOR: Int = 0xFF5A6472.toInt()
 
         internal const val TAG = "DshCapsule"
     }

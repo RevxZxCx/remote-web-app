@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    流体云：待批准（B016）。
+
+    与原型 `ICO.hand` 同形：一只抬起的手 —— 「停一下，等你」。
+    刻意**不用**对勾：胶囊条上的图标是**状态**，不是按钮。用勾会让用户
+    以为「点一下就能批准」，而胶囊本身点开是展开卡片。
+
+    ⚠️ 必须是纯白剪影（会被系统染色），只画 path。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M13,2c-1.1,0 -2,0.9 -2,2v8h-1V4c0,-1.1 -0.9,-2 -2,-2S6,2.9 6,4v10.5l-1.5,-2.1c-0.6,-0.85 -1.78,-1.05 -2.63,-0.45c-0.85,0.6 -1.05,1.78 -0.45,2.63l4.4,6.2C4.7,21.7 6.5,22 8,22h6.5c2.5,0 4.5,-2 4.5,-4.5V9c0,-1.1 -0.9,-2 -2,-2s-2,0.9 -2,2V8c0,-1.1 -0.9,-2 -2,-2s-2,0.9 -2,2V4c0,-1.1 -0.9,-2 -2,-2z" />
+</vector>

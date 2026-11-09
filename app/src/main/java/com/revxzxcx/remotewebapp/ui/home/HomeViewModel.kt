@@ -586,6 +586,25 @@ class HomeViewModel(
         // 否则用户每看到一次绿点亮起，洞察抽屉里的总额就会归零一次。
         // 新增的会话在下次全量刷新时补进来（`loadSessions` 是权威来源）。
         val result = SessionListResult(items = items, usages = current.sessions.usages)
+        // 发布**必须在相等短路之前**（审查 P1）。
+        //
+        // 相等意味着 `_state` 不用改，但胶囊层的快照未必是最新的：进程内可能刚经历过
+        // 一次 `CapsuleBridge.reset()`（断连）、或者胶囊协调器刚被重建。此时「内容没变」
+        // 不等于「对面已经知道了」。多发一次的代价是一次 300ms 去抖内的重算，
+        // 漏发的代价是胶囊停在空状态或旧状态，直到下一次内容真的变化。
+        //
+        // ## 这是本方法**唯一**的发布点（R059-B017）
+        // 早先只有一个发布点：`loadSessions()` 拿到全量之后。于是 `api-session/status`
+        // 把某条会话翻成 `running = false` 时，胶囊层的 `sessions` 还是上一次全量的快照
+        // ——`phaseOf` 永远算出 `Running`，`setUsesChronometer(true)` 就一直挂着，
+        // 用户看到的是「任务已经完了，计时器还在 00:12、00:13 地涨」。
+        //
+        // 放在这里而不是各个 `applyXxx` 里：这四个入口（added / status / error / removed）
+        // 全部汇流到本方法，多点发布只会漏掉第五个入口。
+        //
+        // ⚠ 不要在短路之后**再**发一次：同一份 `items` 发两次，第二次必然被
+        // `MutableStateFlow` 的相等去重吞掉，功能上零收益，却让读者以为有两个发布点。
+        CapsuleBridge.publishSessions(items)
         if (result == current.sessions) return
         _state.value = current
             .copy(sessions = result, sessionsError = null)
@@ -823,6 +842,16 @@ class HomeViewModel(
                 // R059：流体云胶囊读**同一份**列表做焦点选举。不在这里再拉一次
                 // `session/list` 的理由见 `CapsuleBridge` 的 KDoc——两份数据必然对不上，
                 // 表现是「列表里有红点、胶囊却是绿的」。
+                //
+                // ## 这里必须单独发布，不能只靠 `applySessions`（审查 P1）
+                // 本方法是**唯一**写入权威全量的路径，而它直接写 `_state`，
+                // 根本不经过 `applySessions`。早先把这行删掉、只留 `applySessions` 里的
+                // 发布，结果两条路同时失效：
+                // - 冷启动 `start()` → `loadSessions()` 之后胶囊层拿到的还是 `emptyList()`，
+                //   要等第一条真正改变列表的增量帧才出现；
+                // - 下拉刷新拿到的全量（含未读标记、标题）也不会推过去。
+                // 而 `applySessions` 内部有 `if (result == current.sessions) return` 的相等短路，
+                // 恰好在「增量内容与已有相同」时也不发布——两条路一起把全量堵死了。
                 CapsuleBridge.publishSessions(result.items)
                 // 会话列表是权威全量（实测无游标、limit 被忽略），直接整表覆盖。
                 cache?.let { store ->

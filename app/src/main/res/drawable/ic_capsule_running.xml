@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    流体云：执行中（B016）。
+
+    与原型 `docs/R059-流体云原型.html` 的 `ICO.dl` 同形：向下箭头 + 底线。
+    语义是「往里收 / 正在处理」。
+
+    ⚠️ 必须是**纯白剪影**：状态栏与流体云胶囊会对图标做纯色染色，
+    带自己颜色的图标会被涂成一坨。所以只画 path，不写任何 fillColor 之外的属性。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M11,4h2v9.17l3.59,-3.58L18,11l-6,6l-6,-6l1.41,-1.41L11,13.17V4zM5,19h14v2H5V19z" />
+</vector>

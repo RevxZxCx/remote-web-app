@@ -2,6 +2,7 @@ package com.revxzxcx.remotewebapp.core.capsule
 
 import android.util.Log
 import com.revxzxcx.remotewebapp.core.events.ApprovalRequest
+import com.revxzxcx.remotewebapp.core.notify.SubagentRegistry
 import com.revxzxcx.remotewebapp.core.events.RemoteEvents
 import com.revxzxcx.remotewebapp.core.events.QuestionRequest
 import com.revxzxcx.remotewebapp.core.session.AskQuestion
@@ -36,6 +37,16 @@ import kotlinx.coroutines.launch
 internal class CapsuleCoordinator(
     private val scope: CoroutineScope,
     private val center: CapsuleCenter,
+    /**
+     * 子代理登记表（R059-B012）。
+     *
+     * 与通知层**共用同一份实例**（见 `AppContainer.subagentRegistry`）：
+     * 两处各记一本的话，会出现「通知说这是子代理、胶囊却把它当选民」这种
+     * 自相矛盾，而那种矛盾在真机上表现为「有时多出一个会话、有时不多」。
+     *
+     * 默认 `null` 便于单测：绝大多数用例只关心焦点选举，不关心子代理。
+     */
+    private val subagents: SubagentRegistry? = null,
 ) {
 
     /** 全量会话摘要，由首页在每次 `session/list` 落地后推进来。 */
@@ -88,6 +99,9 @@ internal class CapsuleCoordinator(
     /** 保护 [viewingSessionId] 与 [live] 这对必须同时成立的状态（R059 审查 P3-9）。 */
     private val stateLock = Any()
 
+    /** 上一次发布是否成功。把「发不出」的日志从每次降级成每状态转换一次。 */
+    private var lastPostOk: Boolean = true
+
     /**
      * 推入全量会话摘要。
      *
@@ -97,7 +111,33 @@ internal class CapsuleCoordinator(
      */
     fun setSessions(items: List<SessionSummary>) {
         detached = false
-        sessions = items
+        // 子代理不是会话（R059-B012）。
+        //
+        // `session/list` 是**全量**，里面既有主会话也有它们派生的子代理
+        // （`origin == "subagent"`，实测一份列表里 47 条有 20 条是子代理）。
+        // 不滤掉的话，「一个对话 + 它的子代理一起跑」会显示成「执行中 2 个」，
+        // 而且子代理跑完还会让胶囊切到另一个会话——用户会以为多出了一个任务。
+        //
+        // 在**入口**过滤而不是在选举里过滤：`sessions` 同时被焦点选举和
+        // `countOthersRunning` 用，只在一处过滤就会漏掉另一处的计数。
+        // 两道判据：摘要自带 `origin`（`session/list` 全量与 `added` 帧都有），
+        // 以及旁路登记表（缓存里流出来的条目可能丢了 origin 字段，见 SubagentRegistry KDoc）。
+        //
+        // ## 唯一例外：正在等用户处理的那几个必须留下（第三轮审查 P3-2）
+        //
+        // 子代理会向用户发起审批与提问（实测：那三个选项的提问就是从子代理那条路上来的）。
+        // 如果把它们一并滤掉，`CapsuleFocus.elect` 的第一层 `byId[id]?.let { ... }`
+        // 找不到人就直接落到下一层——**卡片既不显示这条待处理，也不提示任何异常**。
+        // 用户被一条永远不会出现的确认卡住，任务就那么停着，谁都不知道为什么。
+        //
+        // 这不是「极端场景」：只要那次会话派生了子代理、并让子代理去申请权限，就 100% 复现。
+        // 而它恰好落在本轮要修的同一类问题上（子代理数据混进主会话口径），
+        // 只是方向相反——前面是「不该显示的显示了」，这里是「该显示的没显示」。
+        val waiting = pendingSessionIds().toSet()
+        sessions = items.filterNot { summary ->
+            val sub = summary.isSubagent || subagents?.isSubagent(summary.sessionId) == true
+            sub && summary.sessionId !in waiting
+        }
         scheduleRecompute()
     }
 
@@ -240,12 +280,20 @@ internal class CapsuleCoordinator(
         // 发布失败不能静默（R059 审查 P3-8）：CapsuleCenter.post 明确约定
         // 「返回 false 时调用方不该认为已经在显示了」，而这里原本把布尔值丢了。
         // 真机上表现为「胶囊该出现却没出现」，没有任何线索可查。
-        if (!center.post(state, actionsFor(focus.sessionId))) {
+        // 只在「从能发变成发不出」时打一条（第三轮审查 P3-1）。
+        //
+        // `recompute()` 由 300ms 去抖驱动，todo 流式更新会频繁触发；而 `post()`
+        // 在用户没开「流体云显示实时活动」时恒返回 false——那是个**长期**状态。
+        // 无条件打日志的话，一次长任务能刷出几百行一模一样的内容，
+        // 把真正有用的线索冲掉，而用户根本不会去看 logcat。
+        val posted = center.post(state, actionsFor(focus.sessionId))
+        if (!posted && lastPostOk) {
             Log.w(
                 CapsuleCenter.TAG,
                 "capsule post failed: session=${focus.sessionId} pending=${state.pending}",
             )
         }
+        lastPostOk = posted
     }
 
     /**

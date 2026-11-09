@@ -435,6 +435,26 @@ object ChatReducer {
             val parsed = GoalTodoParser.parseTodos(frame.envelope?.get("data") as? JsonObject)
             // 空数组是合法值（模型清空任务列表），照收；只有 data 解析不出对象时才保留原值。
             if (frame.envelope?.get("data") is JsonObject) parsed else state.todos
+        } else if (type == "turn/start" && !state.generating && state.todos.allDone) {
+            // 新一轮开始，上一轮的任务清单已经全部完成 → 它是**遗留**，不能带进来（B014）。
+            //
+            // ## 为什么这里只能靠「新一轮 + 全完成」这个组合判，不能无条件清
+            // `todos` 的唯一权威来源是 `todo/write`：服务端**不会**在轮次边界重发它。
+            // 所以：
+            // - 上一轮没做完就中断了（有 pending/in_progress）→ 那确实还是这一轮的活，
+            //   清掉会让用户以为任务凭空消失。保留。
+            // - 上一轮全做完了 → 这些条目对当前这一轮**没有意义**。不清的话，
+            //   用户发下一条消息后，任务面板与流体云会一直挂着一份「5/5 已完成」，
+            //   看上去像当前任务已经跑完了（用户 m04765 报的就是这个）。
+            //
+            // `!state.generating` 是「这一轮在此之前没在跑」，用来区分真正的轮次边界：
+            // 多步轮次里 `turn/start` 只会出现一次，但断线重连后可能重放，
+            // 那时 `generating` 已经是 true，不该再清一次。
+            //
+            // ## 为什么不改成「turn/start 一律清空」
+            // 那会把没做完的任务一并抹掉，且下一帧 `todo/write` 到来前，UI 会先闪一次
+            // 空列表——比残留更难理解。`allDone` 这个前置条件正是「清空不会丢信息」的保证。
+            TodoList()
         } else {
             state.todos
         }

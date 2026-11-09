@@ -22,6 +22,7 @@ import com.revxzxcx.remotewebapp.core.notify.NoticeIntents
 import com.revxzxcx.remotewebapp.core.notify.NoticeSettings
 import com.revxzxcx.remotewebapp.core.notify.NoticeStatus
 import com.revxzxcx.remotewebapp.core.notify.NotifyCoordinator
+import com.revxzxcx.remotewebapp.core.notify.SubagentRegistry
 import com.revxzxcx.remotewebapp.core.capsule.CapsuleBridge
 import com.revxzxcx.remotewebapp.core.capsule.CapsuleCenter
 import com.revxzxcx.remotewebapp.core.capsule.CapsuleCoordinator
@@ -201,12 +202,22 @@ class AppContainer(context: Context) {
      * 只要进程还在，事件就该继续变成通知。这也是 Q1「只做事件→通知」的边界——
      * **进程被系统回收之后什么都收不到**，那种情况由设置页的提示来兜。
      */
+    /**
+     * 「这个 session 是子代理吗」的旁路登记表（R059-B011 / B012）。
+     *
+     * **必须由通知层与胶囊层共用同一份**：`origin` 只出现在 `added` 帧与全量列表里，
+     * `status` / `error` 帧只有 id。两处各记一本会出现
+     * 「通知说主会话完成了、胶囊却把它滤掉」这种自相矛盾。
+     */
+    private val subagentRegistry = SubagentRegistry()
+
     val notifier: NotifyCoordinator = NotifyCoordinator(
         scope = appScope,
         center = notificationCenter,
         settings = noticeSettings,
         names = SessionNameTable(),
         fetchLastTurn = { sessionId -> fetchLastTurnEnd(sessionId) },
+        subagents = subagentRegistry,
     )
 
     /**
@@ -247,6 +258,8 @@ class AppContainer(context: Context) {
     internal val capsule: CapsuleCoordinator = CapsuleCoordinator(
         scope = appScope,
         center = capsuleCenter,
+        // 与通知层共用同一份登记表（见 [subagentRegistry]）。
+        subagents = subagentRegistry,
     )
 
     /** 胶囊订阅事件流的作业（换连接时取消重建）。 */
