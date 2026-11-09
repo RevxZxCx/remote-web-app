@@ -530,6 +530,40 @@ class ChatReducerTest {
     }
 
     /**
+     * 切到别的题再切回来，用户写的自定义答案必须还在（B010 验收项四）。
+     *
+     * 这条验证的是「切题不丢草稿」里最容易坏的那一半：选项由 `toggleOption` 写、
+     * 自定义答案由 `setCustomAnswer` 写，而 `placeQuestionCursor` 每次切题都会对
+     * 目标题调一次 `enterQuestion`。`enterQuestion` 对已有草稿的题是 no-op，
+     * 所以草稿不会被重铺冲掉——但这是**实现细节**，不是从接口能看出来的保证，
+     * 需要一条用例钉住：切走再切回，`custom` 与 `selected` 都保持用户留下的样子。
+     *
+     * 单选下写自定义答案会清掉 `selected`（用户明确表达了「不用预设选项」），
+     * 切题不能把预设选项又铺回来。
+     */
+    @Test
+    fun `切到别的题再切回来时自定义答案还在`() {
+        val questions = listOf(
+            AskQuestion("q1", "第一题", options = listOf(AskOption("继续"), AskOption("停止"))),
+            AskQuestion("q2", "第二题", options = listOf(AskOption("红"), AskOption("蓝"))),
+        )
+        var state = ChatReducer.seedQuestionDefaults(ChatUiState(), "call-a", questions)
+        state = ChatReducer.setCustomAnswer(state, "call-a", questions[0], "我自己写的答案")
+
+        val forward = ChatReducer.stepQuestion(state, "call-a", questions, 1)
+        assertEquals(1, ChatReducer.questionCursor(forward, "call-a"))
+        assertEquals(setOf("红"), forward.questionDrafts["call-a"]?.get("q2")?.selected)
+
+        val back = ChatReducer.stepQuestion(forward, "call-a", questions, -1)
+
+        assertEquals(0, ChatReducer.questionCursor(back, "call-a"))
+        val draft = back.questionDrafts["call-a"]?.get("q1")
+        assertEquals("我自己写的答案", draft?.custom)
+        assertEquals(emptySet<String>(), draft?.selected)
+        assertTrue(draft?.isAnswered == true)
+    }
+
+    /**
      * 提交被挡下时，游标要回到**第一道没有答案**的题上。
      *
      * 这是显式游标带来的新义务（R058 审查 P1）：旧实现里 `currentIndex()` 用
