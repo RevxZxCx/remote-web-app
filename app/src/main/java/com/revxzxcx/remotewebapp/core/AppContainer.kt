@@ -22,6 +22,9 @@ import com.revxzxcx.remotewebapp.core.notify.NoticeIntents
 import com.revxzxcx.remotewebapp.core.notify.NoticeSettings
 import com.revxzxcx.remotewebapp.core.notify.NoticeStatus
 import com.revxzxcx.remotewebapp.core.notify.NotifyCoordinator
+import com.revxzxcx.remotewebapp.core.capsule.CapsuleBridge
+import com.revxzxcx.remotewebapp.core.capsule.CapsuleCenter
+import com.revxzxcx.remotewebapp.core.capsule.CapsuleCoordinator
 import com.revxzxcx.remotewebapp.core.notify.NotificationCenter
 import com.revxzxcx.remotewebapp.core.notify.SessionNameTable
 import com.revxzxcx.remotewebapp.core.pairing.PairingApi
@@ -35,6 +38,7 @@ import com.revxzxcx.remotewebapp.core.service.ServicePreferences
 import com.revxzxcx.remotewebapp.core.service.ServiceStatus
 import com.revxzxcx.remotewebapp.core.protocol.DshJson
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
+import com.revxzxcx.remotewebapp.core.session.AskAnswer
 import com.revxzxcx.remotewebapp.core.session.ChatFrame
 import com.revxzxcx.remotewebapp.core.session.ChatRepository
 import com.revxzxcx.remotewebapp.core.session.TurnProbe
@@ -225,6 +229,84 @@ class AppContainer(context: Context) {
     )
 
     /**
+     * 流体云胶囊的发布器（R059）。
+     *
+     * 单独一个而不是塞进 [NotificationCenter]：胶囊用的是 **Android 16 的 promoted
+     * ongoing notification**，与现有的 `NotificationCompat` 那套（频道 ask/done/service）
+     * 走的是两条不同的构造路径——胶囊要求 `ProgressStyle`、`setShortCriticalText`、
+     * `android.requestPromotedOngoing` 这些 API 36 才有的东西，硬并进去会让
+     * `NotificationCenter` 里每个方法都要先判一次 SDK_INT。
+     */
+    internal val capsuleCenter: CapsuleCenter = CapsuleCenter(appContext)
+
+    /**
+     * 把三路数据合成一条胶囊（R059）。
+     *
+     * 与 [notifier] 同级同作用域：胶囊是「我不在 App 里」的替代品，必须活过任何界面。
+     */
+    internal val capsule: CapsuleCoordinator = CapsuleCoordinator(
+        scope = appScope,
+        center = capsuleCenter,
+    )
+
+    /** 胶囊订阅事件流的作业（换连接时取消重建）。 */
+    private var capsuleJobs: List<Job> = emptyList()
+
+    /**
+     * 把胶囊挂到某条连接上（R059）。传 `null` = 断开。
+     *
+     * ## 为什么胶囊自己订 `approvals` / `questions`，不借 `NotifyCoordinator`
+     * `NotifyCoordinator` 订这两条流是为了**逐条发通知**（审批一条一个通知、提问一条
+     * 一个通知）。胶囊要的是**当前全集**做焦点选举。两件事生命周期相同但语义不同，
+     * 让前者转发后者会多一层「什么时候该转」的判断，而且转发必然晚一帧。
+     *
+     * `StateFlow` 的初值会在订阅瞬间立刻推一次，所以这里不需要额外拉一次现状。
+     */
+    private fun watchCapsule(client: com.revxzxcx.remotewebapp.core.events.RemoteEventsClient?) {
+        capsuleJobs.forEach { it.cancel() }
+        capsuleJobs = emptyList()
+        if (client == null) {
+            capsule.detach()
+            return
+        }
+        capsuleJobs = listOf(
+            appScope.launch { client.approvals.collect { capsule.setApprovals(it) } },
+            appScope.launch { client.questions.collect { capsule.setQuestions(it) } },
+            // 界面那三路走信箱（`ChatViewModel` 拿不到容器）。订阅一次就够：
+            // 信箱是进程级 `StateFlow`，换连接不会换掉它，但旧连接期间收到的
+            // 会话列表属于上一台机器，所以开关胶囊功能时仍然跟着 `watchCapsule` 走。
+            appScope.launch { CapsuleBridge.sessions.collect { capsule.setSessions(it) } },
+            appScope.launch { CapsuleBridge.viewing.collect { capsule.setViewingSession(it) } },
+            appScope.launch { CapsuleBridge.live.collect { capsule.setLive(it) } },
+        )
+    }
+
+    /**
+     * 首页把权威会话列表推进来（R059）。
+     *
+     * 胶囊与列表红点必须读**同一份**数据，否则会出现「列表显示有待批注意味着红点、
+     * 胶囊却是绿的」这种自相矛盾。所以不在这里自己拉 `session/list`。
+     */
+    fun publishSessionsForCapsule(items: List<com.revxzxcx.remotewebapp.core.session.SessionSummary>) {
+        capsule.setSessions(items)
+    }
+
+    /** 用户进/出某条会话（R059）：胶囊据此把焦点让给正在看的会话。 */
+    fun publishViewingSessionForCapsule(sessionId: String?) {
+        capsule.setViewingSession(sessionId)
+    }
+
+    /**
+     * 正在看的会话的实时快照（R059）：todo 进度与汇报正文。
+     *
+     * 只有这条会话有这些数据（`session/list` 里没有 todo），所以后台会话选成焦点时
+     * 卡片没有进度条——那是诚实的降级，不是 bug。
+     */
+    internal fun publishLiveForCapsule(snapshot: CapsuleCoordinator.LiveSnapshot?) {
+        capsule.setLive(snapshot)
+    }
+
+    /**
      * 查一个会话窗口内最后一条 `turn/end`（R056 缺口 5）。
      *
      * 只在「检测到这一轮结束了」时调一次，拿到就取消订阅——**不常驻**。
@@ -357,6 +439,70 @@ class AppContainer(context: Context) {
                 throw e
             } catch (e: Exception) {
                 notificationCenter.postAskFailed(eventId, describeAnswerFailure(e))
+            }
+        }
+    }
+
+    /**
+     * 用户在流体云卡片上点了一个选项（R059）。
+     *
+     * ## 为什么先查 `questions` 再发
+     * 卡片可能已经挂了几分钟，期间用户完全可能在桌面端答过同一道题。
+     * 不查就发的话，服务端会回「这组问题已经不在等待回答」之类的错误，
+     * 而卡片上那个按钮**看起来还能点**——用户会反复点、反复沉默。
+     * 查过之后若确实不在等了，走与审批相同的「写回卡片」通路，把原因摆在明面上。
+     *
+     * 只提交**这一道题**：`answers` 数组只有一项。其余题目保持未答，
+     * 服务端那边这组问题仍然处于等待状态——这与用户在 App 里逐题作答的语义一致
+     * （多选题必须进 App，卡片上只放前两个选项，见 `CapsuleCoordinator`）。
+     */
+    fun answerQuestionOptionFromCapsule(
+        eventId: String,
+        callId: String,
+        questionId: String,
+        label: String,
+    ) {
+        appScope.launch {
+            val client = linkStore.current().connection?.remoteEvents
+            // 失败原因要写回**原来那条提问通知**，而它的 id 由 eventId 决定。
+            // 用 callId 会落到审批段、凭空多一张孤儿卡片，且原提问卡片仍可点
+            // （R059 审查 P2-2）。所以这里一律走 postQuestionFailed。
+            // 胶囊传来的 id 可能是合成 id（`waterfall:<eventId>`，见
+            // `QuestionRequest.capsuleCallId`），所以先剥前缀再比对 eventId，
+            // 否则「有几个选项却找不到这个组」，失败原因会指错方向。
+            val rawId = callId.removePrefix(com.revxzxcx.remotewebapp.core.events.RemoteEvents.WATERFALL_PREFIX)
+            val waiting = client?.questions?.value?.firstOrNull {
+                it.callId == callId || it.eventId == rawId || it.eventId == callId
+            }
+            val options = waiting?.questions?.firstOrNull { it.id == questionId }
+                ?.options.orEmpty()
+            fun fail(reason: String) {
+                notificationCenter.postQuestionFailed(
+                    eventId = eventId,
+                    sessionId = waiting?.agentId,
+                    questionId = questionId,
+                    callId = callId,
+                    options = options,
+                    reason = reason,
+                )
+            }
+            if (client == null) {
+                fail(DISCONNECTED_HINT)
+                return@launch
+            }
+            if (waiting == null || waiting.questions.none { it.id == questionId }) {
+                fail("这组问题已经不在等待回答了（可能已在桌面端答过）。")
+                return@launch
+            }
+            try {
+                client.answerQuestions(
+                    callId = callId,
+                    answers = listOf(AskAnswer(id = questionId, selected = listOf(label))),
+                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                fail(describeAnswerFailure(e))
             }
         }
     }
@@ -517,6 +663,13 @@ class AppContainer(context: Context) {
         doneChannelEnabled = notificationCenter.isChannelEnabled(NoticeChannels.DONE),
         // 「后台连接」频道 App 内没有开关（不在 USER_TOGGLES 里），只能报它的系统状态。
         serviceChannelEnabled = notificationCenter.isChannelEnabled(NoticeChannels.SERVICE),
+        // 流体云是**第五层**，与上面四层独立：它是 `prot=normal` 的普通权限，
+        // 不弹运行时授权框，但对应的 AppOp 默认为 `ignore`，只能由用户手动开。
+        capsuleSupported = capsuleCenter.supported(),
+        capsulePromoted = capsuleCenter.promotedAllowed(),
+        // 频道被单独关掉时 notify 会被系统静默丢弃，而 AppOp 仍是 allow，
+        // 不查这一层设置页就会一直说「会在状态栏实时显示」（R059 审查 P2-3）。
+        capsuleChannelEnabled = notificationCenter.isChannelEnabled(CapsuleCenter.CHANNEL_ID),
     )
 
     /**
@@ -567,6 +720,8 @@ class AppContainer(context: Context) {
     fun onNoticePermissionResult(granted: Boolean) {
         if (!granted) return
         notificationCenter.ensureChannels()
+        // R059：胶囊频道同一条理由——授权之后可能才第一次真正能发通知。
+        capsuleCenter.ensureChannel()
         linkService.ensureRunning()
     }
 
@@ -675,6 +830,9 @@ class AppContainer(context: Context) {
         // 系统直接丢弃且不抛异常（`NO_CHANNEL` 只会打个日志）。放在 bootstrap 里而不是
         // 构造里，是因为建频道要碰系统服务，而本类的构造被承诺不碰磁盘/系统（见类 KDoc）。
         notificationCenter.ensureChannels()
+        // R059：胶囊自己的频道（重要性 LOW，与 ask/done/service 三个都不同：
+        // 频道重要性创建后**不可改**，所以只能另建一个）。
+        capsuleCenter.ensureChannel()
         // 已在运行中且簿没变：复用现有连接（配置变更会重跑 bootstrap，见 installConnection）。
         val loaded = credentialStore.loadBook()
         val active = loaded.active?.takeIf { it.isUsable }
@@ -921,6 +1079,7 @@ class AppContainer(context: Context) {
                 // 通知订阅跟着连接走。复用分支里 `attach` 收到的是同一个实例，
                 // 它会立刻返回（不改订阅）——配置变更重跑 bootstrap 时不会重复订一遍。
                 notifier.attach(plan.connection.remoteEvents)
+                watchCapsule(plan.connection.remoteEvents)
                 watchCarrier(plan.connection)
                 // 换主机之后按**新主机**的开关重新对账（第七轮审查 P2）。
                 reconcileService()
@@ -937,6 +1096,7 @@ class AppContainer(context: Context) {
                 // 先退订再关连接：反过来的话，`RemoteEventsClient` 已经随连接一起死了，
                 // 协调器手里那个引用指向一条不再发事件的流，重连后也不会自己好。
                 notifier.attach(null)
+                watchCapsule(null)
                 watchCarrier(null)
                 // 退配对 = 这台设备不再属于任何主机：通知栏里那些条目全是上一台机器的，
                 // 留着只会让用户点进一个空 App。待打开的会话 id 同理。
@@ -991,6 +1151,7 @@ class AppContainer(context: Context) {
         // 换主机就换了一个 `RemoteEventsClient`，旧引用指向一条已死的流，
         // 而那种「静默不再响」最难被发现（用户只会觉得「最近怎么不提醒了」）。
         notifier.attach(rebuilt.remoteEvents)
+        watchCapsule(rebuilt.remoteEvents)
         watchCarrier(rebuilt)
         // B004 的关键一行：新簿与新连接在**同一次**赋值里换掉。放到这里（而不是更早）是因为
         // 上面每个挂起点之后都不该让观察者看到半新半旧的一份。

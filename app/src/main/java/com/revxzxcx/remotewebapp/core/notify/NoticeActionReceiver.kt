@@ -44,6 +44,33 @@ class NoticeActionReceiver : BroadcastReceiver() {
             return
         }
 
+        // 胶囊卡片上「选这个选项」（R059）：载荷是 callId + questionId + 选项标签。
+        // 与审批那条分开判断——两者虽然都带 eventId，但回答的内容形状完全不同。
+        if (intent.action == NotificationCenter.ACTION_CAPSULE_OPTION) {
+            val eventId = intent.getStringExtra(NotificationCenter.EXTRA_EVENT_ID)
+            val callId = intent.getStringExtra(NotificationCenter.EXTRA_CALL_ID)
+            val questionId = intent.getStringExtra(NotificationCenter.EXTRA_QUESTION_ID)
+            val label = intent.getStringExtra(NotificationCenter.EXTRA_OPTION_LABEL)
+            // 四样缺一不可：少 eventId 就没法把失败写回**原来那条**提问通知
+            // （通知 id 由 eventId 决定，用 callId 会写到审批段去，见 P2-2）；
+            // 少其余三样则组不出 `{answers:[{id, selected}]}`。
+            // 与其发一条会被服务端 schema 拒绝的请求，不如什么都不做让用户进 App。
+            if (eventId.isNullOrBlank() || callId.isNullOrBlank() ||
+                questionId.isNullOrBlank() || label.isNullOrBlank()
+            ) {
+                return
+            }
+            val host = context.applicationContext as? NoticeActionHost ?: run {
+                // 与审批分支对齐（P3-10）：宿主不对时撤掉那条通知，
+                // 否则用户点着一个永远没反应的按钮反复尝试。
+                context.getSystemService(NotificationManager::class.java)
+                    ?.cancel(intent.getIntExtra(NotificationCenter.EXTRA_NOTICE_ID, -1))
+                return
+            }
+            host.answerQuestionOptionFromCapsule(eventId, callId, questionId, label)
+            return
+        }
+
         if (intent.action != NotificationCenter.ACTION_ANSWER) return
         val eventId = intent.getStringExtra(NotificationCenter.EXTRA_EVENT_ID)
         if (eventId.isNullOrBlank()) return
@@ -85,6 +112,20 @@ interface NoticeActionHost {
     fun answerFromNotification(eventId: String, allow: Boolean)
 
     /**
+     * 用户在流体云卡片上点了一个选项（R059）。
+     *
+     * `eventId` 是必须的：回答失败时要把原因写回**原来那条提问通知**，
+     * 而通知 id 由 `eventId` 决定。只给 `callId` 会写到审批段，凭空多出一条孤儿卡片
+     * （R059 审查 P2-2）。
+     */
+    fun answerQuestionOptionFromCapsule(
+        eventId: String,
+        callId: String,
+        questionId: String,
+        label: String,
+    )
+
+    /**
      * 用户在常驻通知里点了「退出」（R057）。
      *
      * 语义是「这一次不要了」：停服务、撤通知、把「本次已退出」标记置上让自动恢复
@@ -92,4 +133,16 @@ interface NoticeActionHost {
      * 后续启动还是会启动前台服务」。
      */
     fun exitServiceFromNotification()
+
+    /**
+     * 实现方要**先校验「这道题还在等」**：通知栏里那条卡片可能已经挂了几分钟，
+     * 期间用户可能在桌面端答过了。此时不该静默——失败原因要能写回卡片，
+     * 与审批走同一条「没送出」通路，而且要用 `eventId` 定位**原来那条**提问通知
+     * （`questionId(eventId)` 段），不是审批段。
+     *
+     * @param eventId 这条提问事件的 id，决定通知 id，失败时必须靠它写回。
+     * @param callId 题组的 callId。
+     * @param questionId 单题的 id（`AskQuestion.id`）。
+     * @param label 被选中的选项原文（`AskOption.label`）。
+     */
 }

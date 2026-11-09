@@ -64,6 +64,7 @@ import com.revxzxcx.remotewebapp.core.notify.NoticeFix
 import com.revxzxcx.remotewebapp.core.notify.NoticeStatus
 import com.revxzxcx.remotewebapp.core.notify.noticeFixLocation
 import com.revxzxcx.remotewebapp.core.notify.OemGuideSteps
+import com.revxzxcx.remotewebapp.core.notify.capsuleStatusDetail
 import com.revxzxcx.remotewebapp.core.notify.noticeStatusDetail
 import com.revxzxcx.remotewebapp.core.notify.shouldGuideToSystemSettings
 import com.revxzxcx.remotewebapp.core.notify.shouldRequestPermission
@@ -113,6 +114,18 @@ fun NoticeSettingsScreen(
     onPermissionAsked: () -> Unit,
     onPermissionResult: (Boolean) -> Unit,
     onOpenSystemSettings: () -> Unit,
+    /**
+     * 跳去流体云开关那一页（R059）。
+     *
+     * 与 [onOpenSystemSettings] 分开：这一个是**唯一**能打开流体云 AppOp 的入口。
+     * 真机实测（OnePlus PKG110 / ColorOS 17 / API 37）AOSP 的
+     * `MANAGE_APP_PROMOTED_NOTIFICATIONS` 设置页不存在（`query-activities` 返回
+     * No activities found），而 `APP_NOTIFICATION_SETTINGS` 会落到 ColorOS 自己的
+     * `com.oplus.notificationmanager/.AppNotificationSettingsActivity`，那里才有
+     * 「流体云显示实时活动」开关。两者在部分 ROM 上是同一个 Intent，
+     * 但**不该合并**：将来若某台机器真的暴露了 AOSP 页面，这里可以直连它。
+     */
+    onOpenCapsuleSettings: () -> Unit = {},
     /**
      * 「后台连接」那一段的全部数据（R057）。
      *
@@ -296,6 +309,34 @@ fun NoticeSettingsScreen(
                     checked = status.lockScreenDetail,
                     onCheckedChange = onToggleLockScreenDetail,
                 )
+            }
+
+            // R059：流体云。**没有 App 内开关**，因为它不是我们说了算的——
+            // 权限是 `prot=normal`（不弹框），对应的 AppOp 默认 `ignore`，
+            // 只能由用户到系统设置里打开，而且每个 ROM 的位置都不一样。
+            // 所以这一行只做两件事：说清当前状态、给一个能到那一页的按钮。
+            SectionLabel("流体云")
+
+            CardGroup {
+                SettingRow(
+                    icon = Icons.Default.Info,
+                    tint = MaterialTheme.colorScheme.primary,
+                    title = "状态栏实时显示",
+                    detail = capsuleStatusDetail(status),
+                    onClick = onOpenCapsuleSettings,
+                )
+                if (status.capsuleSupported && !status.capsulePromoted) {
+                    RowDivider()
+                    // 说明为什么「开关明明开着」还是看不到胶囊。这句必须写清楚：
+                    // 用户在系统设置里看到「允许通知」是开的，会以为已经好了。
+                    Text(
+                        text = "需要系统里的「流体云显示实时活动」开关。它在「设置 → 通知与状态栏 → " +
+                            "流体云 → 应用提醒」里，与本页的开关互不影响。",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 50.dp, end = 12.dp, bottom = 8.dp),
+                    )
+                }
             }
 
             SectionLabel("后台连接")

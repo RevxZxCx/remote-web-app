@@ -21,6 +21,7 @@ import com.revxzxcx.remotewebapp.core.session.SessionListParser
 import com.revxzxcx.remotewebapp.core.session.SessionListResult
 import com.revxzxcx.remotewebapp.core.session.SessionListUpdates
 import com.revxzxcx.remotewebapp.core.session.SessionRepository
+import com.revxzxcx.remotewebapp.core.capsule.CapsuleBridge
 import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.workspace.Workspace
 import com.revxzxcx.remotewebapp.core.workspace.WorkspaceRepository
@@ -819,6 +820,10 @@ class HomeViewModel(
                         sessionsError = null,
                     )
                     .withDerived(_state.value.snapshot, result)
+                // R059：流体云胶囊读**同一份**列表做焦点选举。不在这里再拉一次
+                // `session/list` 的理由见 `CapsuleBridge` 的 KDoc——两份数据必然对不上，
+                // 表现是「列表里有红点、胶囊却是绿的」。
+                CapsuleBridge.publishSessions(result.items)
                 // 会话列表是权威全量（实测无游标、limit 被忽略），直接整表覆盖。
                 cache?.let { store ->
                     viewModelScope.launch { store.writeSessions(ownerId, result.items) }

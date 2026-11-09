@@ -13,7 +13,9 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.revxzxcx.remotewebapp.MainActivity
 import com.revxzxcx.remotewebapp.R
+import com.revxzxcx.remotewebapp.core.capsule.CapsuleActionIntents
 import com.revxzxcx.remotewebapp.core.events.ApprovalRequest
+import com.revxzxcx.remotewebapp.core.session.AskOption
 import com.revxzxcx.remotewebapp.core.session.AskQuestion
 
 /**
@@ -382,6 +384,64 @@ class NotificationCenter(
      *
      * @param reason 给用户看的失败原因（已由调用方译成中文），空串时用兜底文案。
      */
+    /**
+     * 提问的回答没能送出去：把**那条提问通知**换成失败说明，并保留选项按钮。
+     *
+     * ## 为什么不能复用 [postAskFailed]（R059 审查 P2-2）
+     * `postAskFailed` 内部用 `askId(eventId)` 算通知 id，而提问卡片走的是
+     * `questionId(eventId)`（`QUESTION_ID_BASE` 段）。从流体云卡片点选项失败时
+     * 若调它，会：① 在审批段凭空造出一条孤儿通知；② `postedAsks[eventId]` 查不到
+     * 原请求（那个 map 只记审批），于是走不到「保留按钮 + 原地重绘」分支；
+     * ③ 原来那张提问卡片既没更新也没撤销，仍然摆着能点的选项。
+     * 用户在通知栏会同时看到两张卡片，点旧的那张还是同一句沉默。
+     *
+     * 所以这里单独寻址、单独重绘，语义与审批那条一致：**同一 id 原地替换**。
+     *
+     * @param eventId waterfall 事件 id（决定通知 id）。
+     * @param options 原提问的选项标签，用于重建按钮；为空时不放按钮，只留正文。
+     */
+    fun postQuestionFailed(
+        eventId: String,
+        sessionId: String?,
+        questionId: String,
+        callId: String?,
+        options: List<AskOption>,
+        reason: String,
+    ) {
+        val nm = manager ?: return
+        val id = questionId(eventId)
+        val text = reason.ifBlank { ASK_FAILED_FALLBACK }
+        val builder = NotificationCompat.Builder(context, NoticeChannels.ASK)
+            .setSmallIcon(R.drawable.ic_notice_ask)
+            .setColor(ACCENT_COLOR)
+            .setContentTitle(ASK_FAILED_TITLE)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentIntent(openSessionIntent(sessionId))
+            .setAutoCancel(false)
+            .setCategory(Notification.CATEGORY_MESSAGE)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(lockScreenVisibility())
+            // 失败更新不该再响一次——用户刚刚就在看这条通知。
+            .setOnlyAlertOnce(true)
+        // 按钮保留：连接恢复后再点一次是有效动作。复用胶囊那套 PendingIntent 构造，
+        // 保证「通知栏这条」与「胶囊上那个」按下去是同一个动作。
+        options.take(CAPSULE_OPTION_ACTIONS).forEach { option ->
+            builder.addAction(
+                0,
+                option.label,
+                CapsuleActionIntents.answerOption(
+                    context = context,
+                    eventId = eventId,
+                    callId = callId.orEmpty(),
+                    questionId = questionId,
+                    label = option.label,
+                ),
+            )
+        }
+        nm.notify(id, builder.build())
+    }
+
     fun postAskFailed(eventId: String, reason: String) {
         val nm = manager ?: return
         val id = askId(eventId)
@@ -597,7 +657,7 @@ class NotificationCenter(
 
     /** 撤掉账号提醒（用户已经处理掉了，或者我们确认它不再成立）。 */
     /** 一条审批通知的 id。用 `eventId` 的稳定哈希——同一条请求重发也落在同一格。 */
-    private fun askId(eventId: String): Int = ASK_ID_BASE + (eventId.hashCode() and ASK_ID_MASK)
+    private fun askId(eventId: String): Int = askNoticeId(eventId)
 
     /**
      * 点通知主体 → 打开那个会话。
@@ -695,7 +755,35 @@ class NotificationCenter(
         /** 同时最多记多少条会话的完成通知。超出的按 LRU 淘汰。 */
         const val ID_CAPACITY = 32
 
+        /**
+         * 流体云打开会话用的 requestCode。
+         *
+         * 不能直接用 `151_080`（R059 审查 P2-6）：`requestCodeFor` 算出的会话码是
+         * `sessionId.hashCode() and 0x7FFF`（0–32767），而 `151_080 and 0x7FFF == 20_008`
+         * 正好落在这个值域里；两处 `PendingIntent.getActivity` 的 Intent 结构又完全一致
+         * （同 action / 同组件 / 同 flags，`filterEquals` 不看 extras），配合
+         * `FLAG_UPDATE_CURRENT` 就会互相覆盖。后果是点胶囊跳错会话——概率约 1/32768，
+         * 正因为罕见才更难查。
+         *
+         * 这里取 0x9000，与已有的 `REQUEST_CODE_SETTINGS=0x8001` / `REQUEST_CODE_HOME=0x8002`
+         * 同属高位保留区，而 `0x7FFF` 掩码永远到不了这里。
+         */
+        const val CAPSULE_REQUEST_CODE_OPEN = 0x9000
+
+        /** 流体云卡片上最多放几个选项按钮（第三个位置留给「进 App」）。 */
+        const val CAPSULE_OPTION_ACTIONS = 2
+
         /** 审批通知 id 的起点。 */
+        /**
+         * 某条审批通知的 id（纯函数，实例与外部共用）。
+         *
+         * 胶囊上那个勾/叉必须用与通知栏**完全相同**的 requestCode
+         * （`noticeId * 2 + allow`）与同一份 PendingIntent，否则两处各持一份，
+         * 回答完之后另一份还挂着能点（R059 审查 P2-4）。
+         */
+        fun askNoticeId(eventId: String): Int =
+            ASK_ID_BASE + (eventId.hashCode() and ASK_ID_MASK)
+
         const val ASK_ID_BASE = 20_000
 
         /**
@@ -800,6 +888,36 @@ class NotificationCenter(
          * 「有没有 eventId」变成决定行为的分叉，读起来极易看错。
          */
         const val ACTION_EXIT_SERVICE = "com.revxzxcx.remotewebapp.notify.EXIT_SERVICE"
+
+        /**
+         * 胶囊卡片「选这个选项」按钮的广播 action（R059）。
+         *
+         * 与 [ACTION_ANSWER] 分开而不是复用：审批的回答是「允许/拒绝」二值，
+         * 拾取靠 `EXTRA_ALLOW`；提问的回答是业务值 `{answers:[{id, selected}]}`，
+         * 需要 callId + questionId + 选项标签三样。塞进同一个 action 会让接收器里
+         * 「带没带 ALLOW」变成决定走审批还是走提问的分叉，而这两个分支的失败处理完全不同。
+         */
+        const val ACTION_CAPSULE_OPTION =
+            "com.revxzxcx.remotewebapp.notify.CAPSULE_OPTION"
+
+        /** 胶囊选项广播里带题组 `callId` 的键。 */
+        const val EXTRA_CALL_ID = "com.revxzxcx.remotewebapp.extra.CALL_ID"
+
+        /** 胶囊选项广播里带单题 `questionId` 的键。 */
+        const val EXTRA_QUESTION_ID = "com.revxzxcx.remotewebapp.extra.QUESTION_ID"
+
+        /** 胶囊选项广播里带被选中的选项原文的键。 */
+        const val EXTRA_OPTION_LABEL = "com.revxzxcx.remotewebapp.extra.OPTION_LABEL"
+
+        /**
+         * 胶囊选项按钮 requestCode 的高位标记。
+         *
+         * 与审批用的低位码段错开，否则「同一条请求上的第一个选项」和
+         * 「这条请求的批准按钮」会算出同一个码——`PendingIntent` 按
+         * `(requestCode, filterEquals)` 判身份，撞码且 Intent 恰好等价时后建的
+         * 会顶掉先建的，表现为「点了选项，结果批准了」。
+         */
+        const val CAPSULE_OPTION_CODE_BIT = 0x4000
 
         /** 同 id 原地重绘时最多记多少条原请求。 */
         private const val ASK_TRACK_CAPACITY = 32

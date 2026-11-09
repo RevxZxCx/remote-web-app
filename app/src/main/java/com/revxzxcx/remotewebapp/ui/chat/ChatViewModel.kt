@@ -64,6 +64,9 @@ import com.revxzxcx.remotewebapp.core.session.validateImage
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.FlowPreview
+import com.revxzxcx.remotewebapp.core.capsule.CapsuleBridge
+import com.revxzxcx.remotewebapp.core.capsule.capsuleActive
+import com.revxzxcx.remotewebapp.core.capsule.clipForCapsule
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -689,6 +692,67 @@ class ChatViewModel(
         start()
         watchChanges()
         watchQuestions()
+        watchCapsule()
+    }
+
+    /**
+     * R059：把这一轮的 todo 进度与当前动作推给流体云胶囊。
+     *
+     * ## 为什么用 `distinctUntilChanged` 折出来的元组做键
+     * `_state` 在 assistant-stream 期间每个 token 都变一次。直接订阅会在一次回复里
+     * 触发上千次胶囊重算——而 ColorOS 的「轻打扰」恰恰会把频繁变动的胶囊缩成气泡，
+     * 且气泡不会自动展开。这里只关心四样东西：todo、正在跑的那一步、当前动作、
+     * 是否还在跑。它们不变就不推。
+     *
+     * ## 为什么不推 `live.text` 全文
+     * 卡片上能显示的文字只有三层（标题 2 行 + 计时器 + subText），真机实测
+     * 塞不下正文流。推全文只会让每一帧 hash 都不同、白白重算。
+     *
+     * 只有「用户正看着这条会话」时才会真正落到胶囊上（判断在 `CapsuleBridge.publishLive`）。
+     */
+    private fun watchCapsule() {
+        viewModelScope.launch {
+            _state
+                .map { ui ->
+                    val todos = ui.todos
+                    val running = ui.live
+                    // 优先用正在生成的那条的动作，没有就退回最后一条助手消息。
+                    val action = running?.toolNames?.values?.lastOrNull()
+                        ?: running?.text?.takeIf { it.isNotBlank() }?.lineSequence()?.lastOrNull { it.isNotBlank() }
+                    CapsuleFingerprint(
+                        total = todos.total,
+                        done = todos.done,
+                        active = todos.items.firstOrNull { it.status.capsuleActive }?.content,
+                        action = action,
+                        running = running != null,
+                    )
+                }
+                .distinctUntilChanged()
+                .collect { fp ->
+                    CapsuleBridge.publishLive(
+                        sessionId = sessionId,
+                        todos = _state.value.todos,
+                        report = fp.report,
+                        action = fp.action?.let { clipForCapsule(it) },
+                        running = fp.running,
+                    )
+                }
+        }
+    }
+
+    /**
+     * 推给胶囊的判重指纹。
+     *
+     * 刻意**不含**正文：正文每个 token 都变，含进去等于没判重。
+     */
+    private data class CapsuleFingerprint(
+        val total: Int,
+        val done: Int,
+        val active: String?,
+        val action: String?,
+        val running: Boolean,
+    ) {
+        val report: String? get() = active
     }
 
     /**

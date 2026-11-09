@@ -1,0 +1,416 @@
+package com.revxzxcx.remotewebapp.core.capsule
+
+import com.revxzxcx.remotewebapp.core.session.SessionSummary
+import com.revxzxcx.remotewebapp.core.session.TodoList
+import com.revxzxcx.remotewebapp.core.session.TodoStatus
+import com.revxzxcx.remotewebapp.core.session.statusOf
+import com.revxzxcx.remotewebapp.core.session.unreadRank
+
+/**
+ * 胶囊展示的那一个会话的完整快照（R059）。
+ *
+ * ## 为什么是一个扁平快照而不是直接引用 `ChatUiState`
+ * 胶囊跑在 `appScope` 上，它的数据来自两处**不同粒度**的源：
+ * - 正在看的会话：`ChatUiState`（有 `todos`、有流式正文）
+ * - 后台会话：只有 `SessionSummary`（没有 `todos`，见调研文档 3.7-G）
+ *
+ * 若直接吃 `ChatUiState`，后台会话就永远构不出胶囊。所以先归一化成这个快照，
+ * 「谁有什么」由上游 [CapsuleContent] 负责填，本类只描述「要显示成什么样」。
+ *
+ * @param sessionId 会话 id（点卡片时用来跳转，也是焦点选举的去重键）。
+ * @param title 会话标题，可空（`session/list` 还没刷到时会没有）。
+ */
+internal data class CapsuleState(
+    val sessionId: String,
+    val title: String?,
+    /** 顶部汇报行（`setContentTitle` 第 1 行）。 */
+    val report: String,
+    /** 当前动作行（`setContentTitle` 第 2 行，前面由构建方加 `▸ `）。 */
+    val action: String?,
+    /** 步骤说明（`setSubText`）。 */
+    val step: String?,
+    /** 分段进度：总段数与已完成段数。`null` 表示不画进度条。 */
+    val progress: CapsuleProgress?,
+    /** 起算时刻（`setWhen`），驱动卡片上的 SystemUI 计时器。 */
+    val startedAt: Long,
+    /** 待处理事项数量（审批 + 提问），决定卡片上挂哪组按钮。 */
+    val pending: PendingKind,
+    /** 除自己以外还有几个会话在跑。0 表示只有一个。 */
+    val otherRunning: Int,
+    /** 会话此刻处在哪个阶段。只影响胶囊条那行短字，不影响卡片正文。 */
+    val phase: CapsulePhase = CapsulePhase.Running,
+) {
+
+    /** 是否该显示胶囊。空闲且没有任何待处理时**不显示**（调研文档 3.4）。 */
+    val visible: Boolean get() = pending != PendingKind.None || progress != null || otherRunning > 0
+
+    /**
+     * 状态栏胶囊条上那一行字（`setShortCriticalText`）。
+     *
+     * ## 为什么必须单独给一个短字段
+     * 真机实测：胶囊条上显示的**不是** `contentTitle`，而是 `shortCriticalText`。
+     * 不设它，状态栏上只有一个孤零零的图标，用户看不出在干什么（调研文档 3.7-B）。
+     *
+     * ## 为什么控制在 7 个字以内
+     * 官方文档：状态栏标签宽度上限 96dp，**7 个字符以内不截断**。超出的部分会被
+     * 系统自己截，且截断位置不可控（可能把「待批准」截成「待批」）。
+     * 宁可自己写得短，也不要让系统截。
+     */
+    val capsuleText: String
+        get() = when {
+            pending == PendingKind.Approval -> "待批准"
+            pending == PendingKind.Question -> "待回答"
+            phase == CapsulePhase.Failed -> "出错"
+            phase == CapsulePhase.Done -> "已完成"
+            // 多会话时把个数带上：+1 是因为 otherRunning 不含自己。
+            otherRunning > 0 -> "执行中 ${otherRunning + 1} 个"
+            progress != null -> "第 ${progress.safeDone} 步"
+            else -> "执行中"
+        }
+
+    /** 副行里「另 N 个在执行」的后缀；没有别的会话时返回空串。 */
+    val othersSuffix: String
+        get() = if (otherRunning <= 0) "" else " · 另 $otherRunning 个在执行"
+}
+
+/**
+ * 分段进度。
+ *
+ * ## 每段长度必须是 1（这是 R059 最贵的一条教训）
+ * `Notification.ProgressStyle.Segment(length)` 的参数**不是「这一段占多长」的比例**，
+ * 而是「这一段代表多少个进度单位」。真机实测的公式是：
+ * - 圆点位置 = `done / Σ(所有 Segment 的 length)`
+ * - 绿色填充 = `已完成段数 / 总段数`
+ *
+ * 按「段长 = 总步数」写时，5 段的总长度是 25，圆点按 `2/25 = 8%` 画，
+ * 而绿条按 `2/5 = 40%` 画 —— **分母不同，必然错位**。用户就是这么发现的（m01450）。
+ *
+ * 所以这里把「段长恒为 1」编码进类型：不提供自定义长度的入口，
+ * 调用方只能给 [total]，构建通知时一律 `Segment(1)`。
+ *
+ * @param total 总段数（= todo 条目数，见 [fromTodos]）。
+ * @param done 已完成段数，会被夹到 `0..total`。
+ */
+internal data class CapsuleProgress(val total: Int, val done: Int) {
+
+    init {
+        require(total >= 0) { "total must not be negative: $total" }
+    }
+
+    /** 夹紧后的已完成段数。上游给负数或超过总数时不会画出界。 */
+    val safeDone: Int get() = done.coerceIn(0, total)
+
+    /** 进度条是否该画。0 段不画（`ProgressStyle` 收到空列表没有意义）。 */
+    val drawable: Boolean get() = total > 0
+
+    companion object {
+
+        /**
+         * 从 todo 列表构造分段进度。
+         *
+         * **一条 todo 一段**（用户 m01212 拍板）。空列表返回 `null` 而不是 0 段，
+         * 让调用方用 `?.` 直接把「没有任务」和「有任务但还没开始」区分开。
+         */
+        fun fromTodos(todos: TodoList): CapsuleProgress? =
+            if (todos.total <= 0) null else CapsuleProgress(total = todos.total, done = todos.done)
+    }
+}
+
+/** 会话此刻所处阶段，决定胶囊条短字与卡片配色。 */
+internal enum class CapsulePhase {
+    /** 正在跑。 */
+    Running,
+
+    /** 这一轮跑完了，但用户还没看。 */
+    Done,
+
+    /** 这一轮跑挂了。 */
+    Failed,
+}
+
+/** 卡片上要挂哪一组动作按钮。 */
+internal enum class PendingKind {
+    /** 没有待处理。卡片上只有「⋯」或什么都不挂。 */
+    None,
+
+    /** 有待批准的审批请求。挂勾/叉两个图标按钮。 */
+    Approval,
+
+    /** 有待回答的提问。挂前两个选项的文字按钮。 */
+    Question,
+}
+
+/**
+ * 焦点会话选举（R059）。
+ *
+ * ## 为什么需要它
+ * 真机实测（调研文档 3.7-A）：**多条 promoted 通知不等于多个胶囊**。
+ * 系统只给一个展示位，多条时轮播。所以必须自己决定「此刻展示谁」，
+ * 否则用户看到的是几个会话随机闪烁。
+ *
+ * ## 四层刚性顺序（不是可调参数）
+ * 1. **有待处理**（审批 / 提问）——层内 FIFO 防饥饿。
+ *    不能用 `running` 判断：挂起等回答时 `running` 仍是 true。
+ * 2. **用户正在看**——胶囊是「我不在 App 里」的替代品，我在看时不必抢镜。
+ * 3. **粘滞保持**——上一轮焦点仍在跑就不换。这是**硬约束**：
+ *    ColorOS 轻打扰会把频繁变动的胶囊缩成气泡，且气泡不会自动展开。
+ * 4. **重新选举**——`unreadRank` 降序 → `updatedAt` 降序 → `sessionId` 字典序。
+ *
+ * 第三段（`sessionId`）不能省：同样输入两次必须算出同一个焦点，
+ * 否则画面会闪，且单测无法断言。
+ *
+ * ## 为什么复用 `SessionActivity` 而不是自己再写一套排序
+ * 会话列表上的红点用的是 `core/session/SessionActivity.kt` 里的 `unreadRank` / `statusOf`。
+ * 若胶囊自己定一套优先级，就会出现「列表是红点、胶囊是绿点」的自相矛盾。
+ */
+internal object CapsuleFocus {
+
+    /**
+     * 选出本轮焦点。
+     *
+     * @param candidates 全部会话摘要（通常就是 `session/list` 那份）。
+     * @param pendingSessionIds 有待处理事项的会话 id，**按到达先后排列**（FIFO）。
+     * @param viewingSessionId 用户正看着的会话（`CompletionLedger.currentSessionId`）。
+     * @param previousSessionId 上一轮的焦点，用于粘滞。
+     * @return 焦点会话；没有可展示的就返回 `null`。
+     */
+    fun elect(
+        candidates: List<SessionSummary>,
+        pendingSessionIds: List<String> = emptyList(),
+        viewingSessionId: String? = null,
+        previousSessionId: String? = null,
+    ): SessionSummary? {
+        if (candidates.isEmpty()) return null
+        val byId = candidates.associateBy { it.sessionId }
+
+        // ── 第 1 层：有待处理的最先。FIFO：列表顺序即到达顺序，取第一个还在的。
+        //
+        // 不做迟滞：用户被一条请求卡住时，胶囊必须立刻反映出来。
+        for (id in pendingSessionIds) {
+            byId[id]?.let { return it }
+        }
+
+        // ── 第 2 层：用户正看着的那个。
+        //
+        // 仍然要求它「值得展示」（在跑或有未读）——否则用户盯着一个已经跑完、
+        // 也看过的会话时，胶囊会一直挂着一条没信息量的东西。
+        viewingSessionId?.let { id ->
+            val viewed = byId[id]
+            if (viewed != null && isWorthShowing(viewed)) return viewed
+        }
+
+        // ── 第 3 层：粘滞。上一轮焦点仍在跑就不换。
+        previousSessionId?.let { id ->
+            val previous = byId[id]
+            if (previous != null && previous.running) return previous
+        }
+
+        // ── 第 4 层：重新选举。三段排序，最后一段保证确定性。
+        return candidates
+            .filter { isWorthShowing(it) }
+            .maxWithOrNull(COMPARATOR)
+    }
+
+    /**
+     * 三条排序键，从强到弱。
+     *
+     * 用 `compareBy` 而不是手写比较：三段都参与，少写一段编译器不会提醒，
+     * 表现为「偶尔闪一下」这种最难查的 bug。
+     */
+    private val COMPARATOR: Comparator<SessionSummary> = compareBy<SessionSummary> {
+        unreadRank(statusOf(it))
+    }.thenBy {
+        it.updatedAt
+    }.thenBy {
+        // 字典序**降序**：让 id 大的在前，只是个稳定的 tie-break，
+        // 关键在它必须确定 —— 同样是「选一个」，两次输入不能给出不同答案。
+        it.sessionId
+    }
+
+    /**
+     * 这个会话值不值得占用胶囊展示位。
+     *
+     * 判据复用会话列表的红点口径：在跑、有待处理、有未读的完成/失败。
+     * **已读且空闲的会话不该占位**——胶囊是提醒，不是书签。
+     */
+    fun isWorthShowing(summary: SessionSummary): Boolean =
+        summary.running ||
+            summary.awaitingAttention ||
+            summary.completionUnread ||
+            summary.failureUnread
+
+    /**
+     * 统计「除焦点以外还有几个会话在跑」。
+     *
+     * 用于副行「另 N 个在执行」。**只算在跑的**，不算有未读的：
+     * 用户关心的是「还有活在干」，不是「还有几条消息没看」。
+     */
+    fun countOthersRunning(candidates: List<SessionSummary>, focusId: String?): Int =
+        candidates.count { it.sessionId != focusId && it.running }
+}
+
+/**
+ * 把原始数据归一化成 [CapsuleState]（R059）。
+ *
+ * 这一层只做「拼字符串 + 决定显不显示」，不含任何 Android 依赖，
+ * 因此焦点选举、截断规则、降级判定都能在 JVM 单测里穷举。
+ */
+internal object CapsuleContent {
+
+    /**
+     * 汇报行（title 第 1 行）的最大字数。
+     *
+     * ## 为什么是 22
+     * 真机实测（调研文档 3.7-H）：`setContentTitle` 是 **2 行硬上限**，
+     * 第 1 行过长会自己折行占满两行，把第 2 行的动作行整体挤掉。
+     * 卡片可用宽度约 300dp，14sp 中文字符约 13dp 一个，一行约 23 个汉字。
+     * 留一个字的余量取 22。
+     *
+     * 注意这是**保守值**：不同 ROM 的字号设置会改变实际容量，
+     * 超出的部分由 [clip] 用省略号收尾，而不是让系统自己截。
+     */
+    const val REPORT_MAX_CHARS: Int = 22
+
+    /** 动作行（title 第 2 行）的最大字数。前缀 `▸ ` 占 2 个字符宽度，已从这里扣。 */
+    const val ACTION_MAX_CHARS: Int = 20
+
+    /** 步骤行（subText）的最大字数。subText 只有 1 行且字号更小，能多放一点。 */
+    const val STEP_MAX_CHARS: Int = 24
+
+    /**
+     * 超出长度就截断并加省略号。
+     *
+     * ## 为什么不交给系统截
+     * 真机实测系统截断是在**渲染层**做的，且对 title 的第 1 行与第 2 行
+     * 处理不一致（第 2 行被挤掉而不是截断）。自己截能保证两行都完整可见。
+     *
+     * 用 `codePointCount` 而不是 `length`：一个 emoji 或生僻字在 UTF-16 里是
+     * 两个 char，按 `length` 截会把它劈成半个字符，渲染成方块。
+     */
+    fun clip(text: String, max: Int): String {
+        if (max <= 0) return ""
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return ""
+        val codePoints = trimmed.codePointCount(0, trimmed.length)
+        if (codePoints <= max) return trimmed
+        // 留 1 个位置给省略号，保证总宽不超。
+        val end = trimmed.offsetByCodePoints(0, max - 1)
+        return trimmed.substring(0, end).trimEnd() + "…"
+    }
+
+    /**
+     * 构造「执行中」的胶囊内容。
+     *
+     * @param todos 该会话的任务列表；后台会话拿不到时传 `null`（见调研文档 3.7-G）。
+     * @param report 最近一次汇报（agent 每轮输出的进度说明）。
+     * @param action 当前正在做的事。
+     */
+    fun running(
+        sessionId: String,
+        title: String?,
+        todos: TodoList?,
+        report: String?,
+        action: String?,
+        otherRunning: Int,
+        startedAt: Long,
+    ): CapsuleState {
+        val progress = todos?.let { CapsuleProgress.fromTodos(it) }
+        // 步骤行优先用 todo 里那条 in_progress 的正文 —— 那是「实际在做的步骤」，
+        // 比任何自己编的措辞都准（用户 m01212 要的就是这个）。
+        val currentStep = todos?.items?.firstOrNull { it.status == TodoStatus.IN_PROGRESS }?.content
+        val step = when {
+            progress != null && currentStep != null ->
+                "第 ${progress.safeDone + 1} 步 / 共 ${progress.total} 步：${clip(currentStep, STEP_MAX_CHARS)}"
+            progress != null ->
+                "第 ${progress.safeDone} 步 / 共 ${progress.total} 步"
+            // 后台会话没有 todo：只能诚实地说不知道进度，不要编一个假的 n/m。
+            else -> null
+        }
+        return CapsuleState(
+            sessionId = sessionId,
+            title = title,
+            report = clip(report.orEmpty().ifEmpty { title.orEmpty() }, REPORT_MAX_CHARS),
+            action = action?.takeIf { it.isNotBlank() }?.let { clip(it, ACTION_MAX_CHARS) },
+            step = step,
+            progress = progress,
+            startedAt = startedAt,
+            pending = PendingKind.None,
+            otherRunning = otherRunning,
+        )
+    }
+
+    /**
+     * 构造「待批准」的胶囊内容。
+     *
+     * 副行**必须写明作用对象**（多会话时）：否则用户以为自己批的是另一个会话。
+     */
+    fun approval(
+        sessionId: String,
+        title: String?,
+        toolName: String?,
+        report: String?,
+        otherRunning: Int,
+        startedAt: Long,
+    ): CapsuleState = CapsuleState(
+        sessionId = sessionId,
+        title = title,
+        // 汇报行说清「谁需要你」；动作行给出被拦下的具体工具 —— 那是用户下判断的唯一依据。
+        report = clip(
+            "需要你批准才能继续" + if (!title.isNullOrBlank()) "：$title" else "",
+            REPORT_MAX_CHARS,
+        ),
+        action = toolName?.takeIf { it.isNotBlank() }?.let { clip(it, ACTION_MAX_CHARS) },
+        step = null,
+        progress = null,
+        startedAt = startedAt,
+        pending = PendingKind.Approval,
+        otherRunning = otherRunning,
+    )
+
+    /**
+     * 构造「待回答」的胶囊内容。
+     *
+     * @param firstQuestion 第一个问题的题干（显示在动作行）。
+     * @param count 一共几题。
+     */
+    fun question(
+        sessionId: String,
+        title: String?,
+        firstQuestion: String?,
+        count: Int,
+        otherRunning: Int,
+        startedAt: Long,
+    ): CapsuleState = CapsuleState(
+        sessionId = sessionId,
+        title = title,
+        report = clip(
+            "有 $count 个问题需要你回答" + if (!title.isNullOrBlank()) "：$title" else "",
+            REPORT_MAX_CHARS,
+        ),
+        action = firstQuestion?.takeIf { it.isNotBlank() }?.let { clip(it, ACTION_MAX_CHARS) },
+        // 不写「问题 i / 共 n」：这个计数是**这道题在组里的序号**，而卡片上只放
+        // 当前这一道，用户答完一道后服务端推来剩下几道，序号会重新从 1 开始——
+        // 真机上就出现过「已经答过一道，它还写问题 1」。写「本组共 N 道」只陈述
+        // 这一组的题数（`request.questions.size` 是服务端给的实数），不声称位置，
+        // 因此不会谎报。宁可少说也不编。
+        step = if (count > 1) "本组共 $count 道：选择一项即可" else "选择一项即可",
+        progress = null,
+        startedAt = startedAt,
+        pending = PendingKind.Question,
+        otherRunning = otherRunning,
+    )
+}
+
+/** 这条 todo 是否「正在进行」。 */
+internal val TodoStatus.capsuleActive: Boolean
+    get() = this == TodoStatus.IN_PROGRESS
+
+/**
+ * 给胶囊用的短文案裁剪（进程内工具函数）。
+ *
+ * 与 [CapsuleContent.clip] 同一套逻辑，单独暴露是因为调用方（`ChatViewModel`）
+ * 需要在**判重指纹**里就用裁剪后的值——用原值判重会让「同一句话末尾多一个字」
+ * 也算新指纹，于是每条流式 token 都触发一次胶囊重算。
+ */
+internal fun clipForCapsule(text: String, max: Int = CapsuleContent.ACTION_MAX_CHARS): String =
+    CapsuleContent.clip(text, max)

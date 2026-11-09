@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>R059 原型 · 流体云实时状态（ColorOS Live Update）</title>
+<style>
+:root{
+  --primary:#5AA2FF; --onPrimary:#04121F;
+  --background:#0B1420; --onBackground:#E6EFFA;
+  --surface:#111C2B; --onSurface:#E6EFFA;
+  --surfaceVariant:#1A2942; --onSurfaceVariant:#9BB0C8;
+  --outline:#31485F; --outlineVariant:#22334A;
+  --tertiary:#F2C14E; --running:#4ADE80; --error:#FF8A80;
+  --r-xs:6px; --r-sm:10px; --r-md:14px; --r-lg:20px; --r-xl:28px; --r-pill:999px;
+  --t-fast:140ms; --t-med:240ms; --t-slow:360ms;
+  --ease:cubic-bezier(.2,0,0,1);
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#060B12;color:var(--onBackground);
+  font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:13px;line-height:1.6;padding:28px 24px 80px}
+.wrap{max-width:1640px;margin:0 auto}
+h1{font-size:19px;font-weight:600;letter-spacing:.2px}
+.sub{color:var(--onSurfaceVariant);font-size:12px;margin-top:6px;line-height:1.85}
+.sub b{color:var(--onSurface)}
+.sub code{font-family:var(--mono);font-size:11px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+section{margin-top:40px}
+h2{font-size:14px;font-weight:600;color:var(--primary);display:flex;align-items:center;gap:8px}
+h2 .n{width:20px;height:20px;border-radius:50%;background:rgba(90,162,255,.14);
+  border:1px solid rgba(90,162,255,.4);font-size:11px;display:flex;
+  align-items:center;justify-content:center;color:var(--primary);flex:0 0 20px}
+.note{color:var(--onSurfaceVariant);font-size:11.5px;line-height:1.85;margin-top:8px}
+.note b{color:var(--onSurface);font-weight:600}
+.note code{font-family:var(--mono);font-size:10.5px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+.row{display:flex;gap:26px;align-items:flex-start;flex-wrap:wrap;margin-top:16px}
+.warnbox{background:rgba(255,138,128,.08);border-left:2px solid rgba(255,138,128,.55);
+  padding:9px 12px;border-radius:0 var(--r-sm) var(--r-sm) 0;margin-top:10px;
+  font-size:11.5px;line-height:1.85;color:var(--onSurfaceVariant)}
+.warnbox b{color:var(--error);font-weight:600}
+.okbox{background:rgba(74,222,128,.07);border-left:2px solid rgba(74,222,128,.5);
+  padding:9px 12px;border-radius:0 var(--r-sm) var(--r-sm) 0;margin-top:10px;
+  font-size:11.5px;line-height:1.85;color:var(--onSurfaceVariant)}
+.okbox b{color:var(--running);font-weight:600}
+.tipbox{background:rgba(90,162,255,.07);border-left:2px solid rgba(90,162,255,.5);
+  padding:9px 12px;border-radius:0 var(--r-sm) var(--r-sm) 0;margin-top:10px;
+  font-size:11.5px;line-height:1.85;color:var(--onSurfaceVariant)}
+.tipbox b{color:var(--primary);font-weight:600}
+
+/* ── 手机外壳 ─────────────────────────────────────────── */
+.phone{width:390px;flex:0 0 390px;background:#0A0E14;
+  border-radius:26px;border:1px solid var(--outlineVariant);
+  overflow:hidden;box-shadow:0 22px 60px rgba(0,0,0,.65);
+  display:flex;flex-direction:column;height:724px;position:relative}
+.cap{font-size:10.5px;color:var(--onSurfaceVariant);margin-top:7px;text-align:center;
+  width:390px;flex:0 0 390px;line-height:1.6}
+.cap b{color:var(--primary);font-weight:600}
+
+/* 壁纸 */
+.wall{position:absolute;inset:0;
+  background:
+    radial-gradient(120% 70% at 50% 8%, #4A6480 0%, #2C3E54 38%, #16202E 68%, #0A0E14 100%),
+    linear-gradient(180deg,#1B2A3C,#0A0E14);
+  z-index:0}
+.wall::after{content:"";position:absolute;inset:0;
+  background:
+    radial-gradient(60% 30% at 20% 78%, rgba(120,160,200,.10), transparent 70%),
+    radial-gradient(50% 26% at 78% 84%, rgba(120,160,200,.08), transparent 70%)}
+
+/* 状态栏 */
+.statusbar{position:relative;z-index:3;height:44px;display:flex;align-items:center;
+  padding:0 16px 0 20px;gap:8px}
+.sb-time{font-size:13.5px;font-weight:600;letter-spacing:0;flex:0 0 auto;
+  font-variant-numeric:tabular-nums}
+.sb-right{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11px;
+  color:rgba(230,239,250,.9);font-variant-numeric:tabular-nums}
+.sb-right .bar{width:22px;height:10px;border-radius:2px;border:1px solid rgba(230,239,250,.7);
+  position:relative;overflow:hidden}
+.sb-right .bar i{position:absolute;inset:1px;right:6px;background:#E6EFFA;border-radius:1px}
+.sb-right .sig{display:flex;align-items:flex-end;gap:1.5px;height:10px}
+.sb-right .sig i{width:2.5px;background:rgba(230,239,250,.85);border-radius:1px}
+
+/* ── 流体云胶囊 ───────────────────────────────────────── */
+.capsule{position:absolute;z-index:4;left:70px;top:9px;height:26px;
+  display:flex;align-items:center;gap:5px;padding:0 11px 0 8px;
+  background:#05070A;border-radius:var(--r-pill);
+  box-shadow:0 2px 10px rgba(0,0,0,.5),inset 0 0 0 .5px rgba(255,255,255,.1);
+  color:#E9EFF6;font-size:11.5px;font-weight:500;white-space:nowrap;
+  cursor:pointer;transition:all var(--t-med) var(--ease);
+  max-width:150px;overflow:hidden}
+.capsule:hover{transform:scale(1.02)}
+.capsule .cic{width:13px;height:13px;flex:0 0 13px;display:flex;align-items:center;
+  justify-content:center;font-size:10px;color:var(--primary)}
+.capsule .ctxt{letter-spacing:.2px;overflow:hidden;text-overflow:ellipsis}
+.capsule.wait .cic{color:var(--tertiary)}
+.capsule.wait{box-shadow:0 2px 10px rgba(0,0,0,.5),inset 0 0 0 .5px rgba(242,193,78,.4)}
+.capsule.done .cic{color:var(--running)}
+.capsule.bad .cic{color:var(--error)}
+.capsule.bad{box-shadow:0 2px 10px rgba(0,0,0,.5),inset 0 0 0 .5px rgba(255,138,128,.4)}
+.capsule .pulse{position:absolute;left:8px;top:50%;width:13px;height:13px;margin-top:-6.5px;
+  border-radius:50%;background:rgba(90,162,255,.35);animation:pulse 1.8s infinite}
+@keyframes pulse{0%{transform:scale(.6);opacity:.7}70%{transform:scale(1.6);opacity:0}100%{opacity:0}}
+.capsule.hide{opacity:0;transform:translateY(-6px) scale(.9);pointer-events:none}
+/* 卡片展开时胶囊让位（真机行为：胶囊本身淡出，由卡片接管） */
+.capsule.sup{opacity:0;transform:translateY(-4px) scale(.96);pointer-events:none}
+
+/* ── 展开卡片 ─────────────────────────────────────────── */
+.card{position:absolute;z-index:5;left:24px;right:24px;top:52px;
+  background:rgba(14,17,22,.96);
+  -webkit-backdrop-filter:blur(22px);backdrop-filter:blur(22px);
+  border-radius:22px;padding:16px 16px 14px;
+  box-shadow:0 26px 64px rgba(0,0,0,.72),inset 0 0 0 .5px rgba(255,255,255,.09);
+  transform-origin:top center;
+  transition:opacity var(--t-med) var(--ease),transform var(--t-med) var(--ease);
+  opacity:0;transform:translateY(-10px) scale(.94);pointer-events:none}
+.card.open{opacity:1;transform:none;pointer-events:auto}
+.card .ch{display:flex;align-items:flex-start;gap:10px}
+.card .ctitle{flex:1;min-width:0;font-size:17px;font-weight:600;line-height:1.35;
+  color:#F0F4F8;letter-spacing:.2px}
+.card .cbtn{width:26px;height:26px;flex:0 0 26px;border-radius:50%;display:flex;
+  align-items:center;justify-content:center;font-size:12px;color:rgba(240,244,248,.55);
+  background:rgba(255,255,255,.06);cursor:pointer}
+.card .ctitle{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  overflow:hidden}
+/* v3：分段进度条（对应 todo list 的 N 个步骤） */
+.card .cseg{height:18px;margin-top:13px;display:flex;align-items:center;position:relative}
+.card .cseg .seg{position:absolute;left:0;right:0;height:4px;display:flex;gap:3px}
+.card .cseg .seg i{position:relative;flex:1;border-radius:2px;background:rgba(255,255,255,.22);
+  transition:background var(--t-med) var(--ease)}
+.card .cseg .seg i.done{background:var(--running)}
+.card .cseg .knob2{position:absolute;width:13px;height:13px;border-radius:50%;
+  background:#F0F4F8;box-shadow:0 1px 5px rgba(0,0,0,.6);
+  right:-6.5px;transition:right var(--t-slow) var(--ease)}
+/* v3：正文只 1 行 —— 当前正在做的事 */
+.card .cstep{font-size:13px;color:#E9EFF6;margin-top:7px;line-height:1.45;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* v4：计时器行——真机实测 setUsesChronometer 占的就是 contentText 那一行 */
+.card .ctimer{font-size:13px;color:rgba(230,239,250,.72);margin-top:6px;
+  font-variant-numeric:tabular-nums;letter-spacing:.3px;line-height:1.4}
+/* v4：标题第二行（当前动作）——真机靠换行符强制，字号略小 */
+.card .ctitle .cact2{font-size:14px;color:#E9EFF6;font-weight:400}
+/* v3：subText 行 —— 进度条下方的步骤说明 */
+.card .csub2{font-size:11.5px;color:rgba(230,239,250,.55);margin-top:7px;line-height:1.4;                          white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .cacts{display:flex;gap:10px;margin-top:16px}
+.card .cact{flex:1;height:38px;border-radius:var(--r-pill);
+  background:rgba(255,255,255,.10);color:#EFF4F9;font-size:13px;font-weight:500;
+  display:flex;align-items:center;justify-content:center;cursor:pointer;
+  transition:background var(--t-fast);white-space:nowrap;overflow:hidden}
+.card .cact:hover{background:rgba(255,255,255,.17)}
+.card .cact.acc{background:rgba(90,162,255,.24);color:#BBD8FF}
+.card .cact.acc:hover{background:rgba(90,162,255,.34)}
+.card .cact.dgr{background:rgba(255,255,255,.10);color:rgba(255,180,175,.95)}
+/* 文字选项按钮：真机是瘦高胶囊，字号略小，超长单行截断 */
+.card .cact.txt{font-size:12.5px;padding:0 10px;text-overflow:ellipsis}
+.card .cacts.two .cact{flex:1}
+.card .cacts.one .cact{flex:1}
+
+
+/* 图标按钮：圆角胶囊 + 居中图标，无文字 */
+.card .cact{gap:0}
+.card .cact svg{width:19px;height:19px;display:block;stroke-width:2}
+
+/* 桌面图标区 */
+.home{position:relative;z-index:1;flex:1;padding:150px 22px 0;
+  display:flex;flex-direction:column;gap:22px}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:20px 14px}
+.app{display:flex;flex-direction:column;align-items:center;gap:6px}
+.app .ico{width:46px;height:46px;border-radius:13px;display:flex;align-items:center;
+  justify-content:center;font-size:20px;box-shadow:0 4px 12px rgba(0,0,0,.35);position:relative}
+.app .lb{font-size:10px;color:rgba(235,242,250,.92);text-shadow:0 1px 3px rgba(0,0,0,.6)}
+.badge{position:absolute;top:-4px;right:-4px;min-width:17px;height:17px;border-radius:9px;
+  background:#F2534D;color:#fff;font-size:10px;font-weight:600;display:flex;
+  align-items:center;justify-content:center;padding:0 4px;
+  box-shadow:0 1px 4px rgba(0,0,0,.4)}
+.dock{position:absolute;bottom:22px;left:22px;right:22px;display:flex;
+  justify-content:space-around;background:rgba(255,255,255,.07);
+  border-radius:24px;padding:10px 8px;-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
+.dock .app .ico{width:44px;height:44px;font-size:19px}
+
+/* ── 控制条 ───────────────────────────────────────────── */
+.ctl{display:flex;flex-direction:column;gap:10px;flex:1;min-width:320px;max-width:520px}
+.ctl .grp{background:var(--surface);border:1px solid var(--outlineVariant);
+  border-radius:var(--r-md);padding:12px 14px}
+.ctl .grp pre{font-family:var(--mono);font-size:10.5px;line-height:1.9;
+  color:var(--onSurfaceVariant);white-space:pre-wrap;word-break:break-word;
+  margin:0;overflow-wrap:anywhere}
+.ctl .gt{font-size:10px;letter-spacing:.7px;color:var(--primary);font-weight:600;
+  margin-bottom:9px}
+.stbtns{display:flex;gap:7px;flex-wrap:wrap}
+.stbtn{font-size:11.5px;padding:6px 12px;border-radius:var(--r-pill);
+  border:1px solid var(--outline);color:var(--onSurfaceVariant);cursor:pointer;
+  transition:all var(--t-fast);user-select:none}
+.stbtn:hover{border-color:rgba(90,162,255,.5);color:var(--onSurface)}
+.stbtn.on{background:rgba(90,162,255,.16);border-color:rgba(90,162,255,.6);
+  color:var(--primary);font-weight:600}
+.stbtn .k{font-family:var(--mono);font-size:9px;opacity:.6;margin-left:4px}
+
+/* ── 状态总览条 ───────────────────────────────────────── */
+.caprow{display:flex;gap:16px;flex-wrap:wrap;margin-top:18px}
+.capitem{flex:0 0 auto}
+.capsim{height:30px;display:inline-flex;align-items:center;gap:6px;padding:0 13px 0 10px;
+  background:#05070A;border-radius:var(--r-pill);color:#E9EFF6;font-size:12.5px;
+  box-shadow:0 2px 10px rgba(0,0,0,.5),inset 0 0 0 .5px rgba(255,255,255,.1);
+  white-space:nowrap}
+.capsim .cic{width:15px;height:15px;display:flex;align-items:center;justify-content:center;
+  font-size:11px;color:var(--primary)}
+.capsim .cic svg,.capsule .cic svg{width:13px;height:13px;stroke-width:2.1;display:block}
+.capsim.wait .cic{color:var(--tertiary)}
+.capsim.done .cic{color:var(--running)}
+.capsim.bad .cic{color:var(--error)}
+.capitem .cl{font-size:10px;color:var(--onSurfaceVariant);margin-top:7px;text-align:center}
+.capitem .cl b{color:var(--onSurface)}
+
+/* ── 设置页 ───────────────────────────────────────────── */
+.topbar{height:50px;display:flex;align-items:center;gap:4px;padding:0 10px 0 8px;
+  border-bottom:1px solid var(--outlineVariant);flex:0 0 auto;z-index:3;position:relative}
+.tb-btn{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;color:var(--onSurface);font-size:15px;flex:0 0 34px}
+.tb-t1{font-size:14px;font-weight:600}
+.body-scroll{flex:1;overflow:hidden;padding:10px 14px 14px;display:flex;flex-direction:column;
+  gap:9px;position:relative;z-index:2;background:var(--background)}
+.seclbl{font-size:9px;letter-spacing:.7px;color:var(--primary);font-weight:600;
+  margin:9px 3px -3px}
+.cardgrp{background:var(--surface);border:1px solid var(--outlineVariant);
+  border-radius:var(--r-md);overflow:hidden}
+.srow{display:flex;align-items:center;gap:10px;padding:11px 13px;min-height:48px}
+.srow+.srow{border-top:1px solid var(--outlineVariant)}
+.srow .st{flex:1;min-width:0}
+.st1{font-size:12.5px;display:flex;align-items:center;gap:6px}
+.st2{font-size:10px;color:var(--onSurfaceVariant);margin-top:2px;line-height:1.55}
+.sw{width:36px;height:21px;border-radius:var(--r-pill);background:var(--surfaceVariant);
+  border:1px solid var(--outline);position:relative;flex:0 0 36px}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;
+  border-radius:50%;background:var(--onSurfaceVariant);transition:all var(--t-fast)}
+.sw.on{background:rgba(90,162,255,.28);border-color:rgba(90,162,255,.6)}
+.sw.on::after{left:17px;background:var(--primary)}
+.pill{font-size:9px;padding:2px 7px;border-radius:var(--r-pill);
+  background:rgba(74,222,128,.13);color:var(--running);
+  border:1px solid rgba(74,222,128,.32);white-space:nowrap}
+.pill.w{background:rgba(242,193,78,.13);color:var(--tertiary);
+  border-color:rgba(242,193,78,.32)}
+.pill.b{background:rgba(255,138,128,.13);color:var(--error);
+  border-color:rgba(255,138,128,.32)}
+.chev{font-size:10px;color:var(--onSurfaceVariant);flex:0 0 auto}
+.banner{display:flex;gap:9px;align-items:flex-start;padding:10px 12px;
+  border-radius:var(--r-sm);font-size:10.5px;line-height:1.7;
+  background:rgba(242,193,78,.08);border:1px solid rgba(242,193,78,.28);
+  color:var(--onSurfaceVariant)}
+.banner b{color:var(--tertiary);font-weight:600}
+.banner.err{background:rgba(255,138,128,.08);border-color:rgba(255,138,128,.28)}
+.banner.err b{color:var(--error)}
+.banner.ok{background:rgba(74,222,128,.07);border-color:rgba(74,222,128,.26)}
+.banner.ok b{color:var(--running)}
+.btnp{display:inline-flex;align-items:center;justify-content:center;
+  font-size:11.5px;font-weight:500;padding:8px 14px;border-radius:var(--r-pill);
+  background:rgba(90,162,255,.18);color:var(--primary);
+  border:1px solid rgba(90,162,255,.42);cursor:pointer;white-space:nowrap}
+.btnghost{background:transparent;border:1px solid var(--outline);
+  color:var(--onSurfaceVariant)}
+
+/* ── 系统设置页（ColorOS 流体云） ─────────────────────── */
+.sysrow{display:flex;align-items:center;gap:11px;padding:12px 14px;min-height:52px}
+.sysrow+.sysrow{border-top:1px solid var(--outlineVariant)}
+.sysico{width:34px;height:34px;border-radius:9px;flex:0 0 34px;display:flex;
+  align-items:center;justify-content:center;font-size:16px}
+.sysrow .st{flex:1;min-width:0}
+.sysrow .st1{font-size:12.5px}
+.sysrow .st2{font-size:9.5px;color:var(--onSurfaceVariant);margin-top:1px;line-height:1.5}
+
+/* ── 表格 ─────────────────────────────────────────────── */
+table.t{width:100%;border-collapse:collapse;margin-top:12px;font-size:11.5px}
+table.t th{text-align:left;padding:8px 10px;background:var(--surfaceVariant);
+  color:var(--onSurface);font-size:10.5px;font-weight:600;
+  border-bottom:1px solid var(--outlineVariant)}
+table.t td{padding:8px 10px;border-bottom:1px solid var(--outlineVariant);
+  color:var(--onSurfaceVariant);line-height:1.75;vertical-align:top}
+table.t td b{color:var(--onSurface);font-weight:600}
+table.t td code{font-family:var(--mono);font-size:10px;background:var(--surfaceVariant);
+  padding:1px 4px;border-radius:3px;color:var(--primary)}
+table.t tr:last-child td{border-bottom:none}
+.badge2{display:inline-block;font-size:9px;padding:1px 6px;border-radius:var(--r-pill);
+  background:rgba(90,162,255,.14);color:var(--primary);border:1px solid rgba(90,162,255,.32);
+  white-space:nowrap}
+.badge2.ok{background:rgba(74,222,128,.12);color:var(--running);border-color:rgba(74,222,128,.34)}
+.badge2.warn{background:rgba(242,193,78,.12);color:var(--tertiary);border-color:rgba(242,193,78,.32)}
+.badge2.bad{background:rgba(255,138,128,.12);color:var(--error);border-color:rgba(255,138,128,.32)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>R059 原型 · 流体云实时状态</h1>
+<div class="sub">
+  目标：<b>把「AI 正在干什么」放到状态栏一眼可见；需要你批准或回答时，直接在那张卡片上操作。</b>
+  <br>底层是 <code>Notification.ProgressStyle</code> + <code>POST_PROMOTED_NOTIFICATIONS</code>（Android 16 / ColorOS 17 官方能力），已在真机上逐项验证通过。
+  <br>下面的手机外壳是<b>可交互的</b>：点左边的状态按钮切换，点胶囊展开/收起卡片。
+</div>
+
+<section>
+  <h2><span class="n">1</span>交互演示</h2>
+  <div class="row">
+
+    <div>
+      <div class="phone" id="phone">
+        <div class="wall"></div>
+
+        <!-- 状态栏 -->
+        <div class="statusbar">
+          <div class="sb-time">14:43</div>
+          <div class="capsule hide" id="capsule">
+            <div class="cic" id="capsuleIcon">↓</div>
+            <div class="ctxt" id="capsuleText">执行中</div>
+          </div>
+          <div class="sb-right">
+            <span style="font-size:9px">5G</span>
+            <div class="sig"><i style="height:4px"></i><i style="height:6px"></i><i style="height:8px"></i><i style="height:10px"></i></div>
+            <div class="bar"><i></i></div>
+            <span>91</span>
+          </div>
+        </div>
+
+        <!-- 展开卡片（v3：按真机实测布局） -->
+        <div class="card" id="card">
+          <div class="ch">
+            <div class="ctitle" id="cardTitle">真机实测完毕，两条关键结论已写入文档</div>
+            <div class="cbtn" id="cardClose">✕</div>
+          </div>
+          <div class="ctimer" id="cardTimer">08:07</div>
+          <!-- 真机顺序：subText 在进度条上方 -->
+          <div class="csub2" id="cardSub">第 3 步 / 共 5 步：搜索调用点</div>
+          <div class="cseg" id="cardTrack">
+            <div class="seg" id="segRow"></div>
+            <div class="knob2" id="cardKnob"></div>
+          </div>
+          <div class="cacts" id="cardActs"></div>
+        </div>
+
+        <!-- 桌面 -->
+        <div class="home" id="home">
+          <div class="grid" id="appGrid"></div>
+        </div>
+        <div class="dock" id="dock"></div>
+      </div>
+      <div class="cap">点状胶囊可展开 · 卡片最多 <b>3</b> 个按钮</div>
+    </div>
+
+    <div class="ctl">
+      <div class="grp">
+        <div class="gt">切换状态</div>
+        <div class="stbtns" id="stbtns"></div>
+      </div>
+      <div class="grp">
+        <div class="gt">这一屏在说什么</div>
+        <div class="note" id="explain"></div>
+      </div>
+      <div class="grp">
+        <div class="gt">对应的通知构造</div>
+        <pre id="code"></pre>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">2</span>五种胶囊形态（状态栏宽度实况）</h2>
+  <div class="note">
+    胶囊文字用 <code>setShortCriticalText</code>，实测宽度上限约 <b>96dp</b>，<b>7 个汉字以内不截断</b>。
+    所以文案必须压到 2–3 个字：状态靠图标 + 字色区分，不靠长句。
+  </div>
+  <div class="caprow">
+    <div class="capitem">
+      <div class="capsim"><div class="cic">↓</div>执行中</div>
+      <div class="cl"><b>工具执行</b><br>蓝色箭头</div>
+    </div>
+    <div class="capitem">
+      <div class="capsim wait"><div class="cic">◔</div>待批准</div>
+      <div class="cl"><b>等你批准</b><br>黄色，带呼吸</div>
+    </div>
+    <div class="capitem">
+      <div class="capsim wait"><div class="cic">?</div>待回答</div>
+      <div class="cl"><b>等你回答</b><br>黄色</div>
+    </div>
+    <div class="capitem">
+      <div class="capsim done"><div class="cic">✓</div>已完成</div>
+      <div class="cl"><b>任务结束</b><br>绿色</div>
+    </div>
+    <div class="capitem">
+      <div class="capsim bad"><div class="cic">!</div>出错</div>
+      <div class="cl"><b>执行失败</b><br>红色</div>
+    </div>
+  </div>
+  <div class="warnbox">
+    <b>尺寸是硬约束。</b>实测胶囊只有约 28dp 高、96dp 宽可用。文案换成「正在执行命令」「等待你的批准」这类
+    6 字以上的写法会被省略号截断——而且 ColorOS 的截断是直接吃掉尾部，不会缩字号。
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">3</span>设置页：告知 + 一键去开</h2>
+  <div class="note">
+    这是<b>整个功能能不能用起来的关键</b>：该能力默认是关的（AppOp 默认 <code>ignore</code>），
+    用户不去系统里手动打开就永远看不到胶囊。App 内必须有一行明确的状态 + 直达按钮。
+  </div>
+  <div class="row">
+
+    <div>
+      <div class="phone" style="height:640px">
+        <div class="topbar">
+          <div class="tb-btn">‹</div>
+          <div class="tb-t1">通知</div>
+        </div>
+        <div class="body-scroll">
+          <div class="banner">
+            <span>◔</span>
+            <div><b>流体云还没开</b><br>系统默认关闭。打开后，任务执行中会在状态栏显示实时胶囊。</div>
+          </div>
+          <div class="seclbl">实时状态</div>
+          <div class="cardgrp">
+            <div class="srow">
+              <div class="st">
+                <div class="st1">流体云实时状态 <span class="pill w">未开启</span></div>
+                <div class="st2">ColorOS「流体云显示实时活动」</div>
+              </div>
+              <div class="btnp" style="font-size:10.5px;padding:6px 11px">去开启</div>
+            </div>
+            <div class="srow">
+              <div class="st">
+                <div class="st1">任务执行中显示进度</div>
+                <div class="st2">多步任务时在卡片上显示第几步</div>
+              </div>
+              <div class="sw on"></div>
+            </div>
+            <div class="srow">
+              <div class="st">
+                <div class="st1">需要批准时提醒我</div>
+                <div class="st2">胶囊变黄并轻微呼吸</div>
+              </div>
+              <div class="sw on"></div>
+            </div>
+            <div class="srow">
+              <div class="st">
+                <div class="st1">任务结束后保留</div>
+                <div class="st2">完成后胶囊停留 3 秒再消失</div>
+              </div>
+              <div class="sw on"></div>
+            </div>
+          </div>
+
+          <div class="seclbl">其他通知</div>
+          <div class="cardgrp">
+            <div class="srow">
+              <div class="st"><div class="st1">后台连接</div>
+                <div class="st2">常驻通知，保持连接不断</div></div>
+              <span class="chev">›</span>
+            </div>
+            <div class="srow">
+              <div class="st"><div class="st1">对话完成</div>
+                <div class="st2">助手回复完成时提醒</div></div>
+              <span class="chev">›</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="cap">未开启：<b>顶部黄条 + 去开启按钮</b></div>
+    </div>
+
+    <div>
+      <div class="phone" style="height:640px">
+        <div class="topbar">
+          <div class="tb-btn">‹</div>
+          <div class="tb-t1">流体云</div>
+        </div>
+        <div class="body-scroll">
+          <div class="note" style="margin:0 0 4px;font-size:10.5px">
+            设置 › 通知与状态栏 › 流体云 › 应用提醒
+          </div>
+          <div class="cardgrp">
+            <div class="sysrow">
+              <div class="sysico" style="background:rgba(90,162,255,.16)">◈</div>
+              <div class="st">
+                <div class="st1">Remote Web</div>
+                <div class="st2">更多支持的应用</div>
+              </div>
+              <span class="chev">›</span>
+            </div>
+            <div class="sysrow">
+              <div class="sysico" style="background:rgba(242,193,78,.16)">☁</div>
+              <div class="st">
+                <div class="st1">天气</div>
+                <div class="st2">系统</div>
+              </div>
+              <span class="chev">›</span>
+            </div>
+          </div>
+
+          <div class="seclbl">Remote Web</div>
+          <div class="cardgrp">
+            <div class="srow">
+              <div class="st">
+                <div class="st1">流体云显示实时活动</div>
+                <div class="st2">实时活动会以流体云展示，不受通知设置的影响</div>
+              </div>
+              <div class="sw on"></div>
+            </div>
+            <div class="srow">
+              <div class="st">
+                <div class="st1">允许通知</div>
+                <div class="st2">普通通知开关（与本功能独立）</div>
+              </div>
+              <div class="sw on"></div>
+            </div>
+          </div>
+
+          <div class="okbox" style="margin-top:12px">
+            <b>开关一打开就生效</b>，不用重启 App。这个开关背后就是
+            <code>POST_PROMOTED_NOTIFICATIONS</code> 的 AppOp，开完 <code>canPostPromotedNotifications()</code>
+            立刻变成 <code>true</code>。
+          </div>
+        </div>
+      </div>
+      <div class="cap">系统侧：App 出现在<b>「更多支持的应用」</b>里</div>
+    </div>
+
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">4</span>规则与边界</h2>
+
+  <table class="t">
+    <tr>
+      <th style="width:170px">规则</th><th style="width:110px">来源</th><th>说明</th>
+    </tr>
+    <tr>
+      <td><b>卡片最多 3 个按钮</b></td>
+      <td><span class="badge2 bad">实测</span></td>
+      <td>加到第 4 个直接被系统吞掉，不报错、不换行。所以多选题超过 3 项的，卡片只放
+        <code>选项A / 选项B / 更多</code>，详细选项回 App 里选。</td>
+    </tr>
+    <tr>
+      <td><b>必须 ongoing</b></td>
+      <td><span class="badge2 ok">官方</span></td>
+      <td><code>setOngoing(true)</code>。这也是为什么它天然适合「正在执行」而<b>不适合</b>「收到一条消息」。</td>
+    </tr>
+    <tr>
+      <td><b>不能自定义布局</b></td>
+      <td><span class="badge2 ok">官方</span></td>
+      <td>不支持 <code>customContentView</code>。卡片的排版由系统决定，我们只能填标题/副标题/进度/按钮。</td>
+    </tr>
+    <tr>
+      <td><b>渠道不能是 IMPORTANCE_MIN</b></td>
+      <td><span class="badge2 ok">官方</span></td>
+      <td>项目现有 <code>SERVICE</code> 频道正是 MIN，且<b>频道建好后不可改重要性</b>——必须新建频道。</td>
+    </tr>
+    <tr>
+      <td><b>不合并前台服务通知</b></td>
+      <td><span class="badge2 warn">设计</span></td>
+      <td>两条通知职责不同：<code>SERVICE</code>(MIN) 只为满足前台服务硬要求；流体云只管任务进度。
+        合并会让用户切到任何 App 时状态栏都挂着胶囊，很快被反感后一关就永久失效。</td>
+    </tr>
+    <tr>
+      <td><b>不用于「聊天消息」</b></td>
+      <td><span class="badge2 warn">合规</span></td>
+      <td>官方明确把聊天消息列为不适用场景。我们只用它表示<b>进行中的工具执行 / 等待用户输入</b>，
+        不用来提示「助手回了新消息」。</td>
+    </tr>
+    <tr>
+      <td><b>默认关闭</b></td>
+      <td><span class="badge2 bad">实测</span></td>
+      <td>AppOp 默认 <code>ignore</code>，且零售机上 <code>pm grant</code> / <code>cmd appops set</code>
+        会被 SecurityException 拒绝——<b>只能引导用户手点</b>，无法程序代劳。</td>
+    </tr>
+  </table>
+
+  <div class="tipbox">
+    <b>降级路径</b>：<code>canPostPromotedNotifications()</code> 为 <code>false</code>（用户没开、或系统低于
+    Android 16）时，所有状态照常走<b>现有普通通知</b>，功能一个都不少，只是没有状态栏胶囊。
+    这意味着这部分实现不会让老设备变差。
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">5</span>待你拍板的三件事</h2>
+  <table class="t">
+    <tr><th style="width:220px">问题</th><th>我的建议</th></tr>
+    <tr>
+      <td><b>胶囊常驻到什么时候？</b></td>
+      <td>建议：任务结束立即消失；出错保留到用户点掉。<b>不要</b>「连接着就一直挂」。</td>
+    </tr>
+    <tr>
+      <td><b>批复类要不要在卡片上直接做？</b></td>
+      <td>建议：批准/拒绝提供「只批这一次」的按钮；带「记住」的选项一律回 App 里，避免误点。</td>
+    </tr>
+    <tr>
+      <td><b>回答类做几个选项？</b></td>
+      <td>建议：卡片只放前 2 个 + 「更多」。选项超过 3 个时，卡片上文字会挤成省略号，体验反而差。</td>
+    </tr>
+  </table>
+</section>
+
+</div>
+
+<script>
+const APPS = [
+  {ic:'◫', bg:'linear-gradient(135deg,#4A90D9,#2C5F91)', lb:'购物', b:3},
+  {ic:'⚙', bg:'linear-gradient(135deg,#5A6474,#333B47)', lb:'工具', b:12},
+  {ic:'✉', bg:'linear-gradient(135deg,#E8B44A,#C08A20)', lb:'信息', b:0},
+  {ic:'♪', bg:'linear-gradient(135deg,#2B2B2B,#111)', lb:'音乐', b:0},
+  {ic:'▤', bg:'linear-gradient(135deg,#E8C24A,#B89320)', lb:'文件', b:0},
+  {ic:'◑', bg:'linear-gradient(135deg,#4A4A4A,#222)', lb:'设置', b:0},
+  {ic:'◆', bg:'linear-gradient(135deg,#4A90D9,#2C5F91)', lb:'QQ', b:0},
+  {ic:'✚', bg:'linear-gradient(135deg,#3AB5A0,#1E8A78)', lb:'健康', b:0},
+  {ic:'◈', bg:'linear-gradient(135deg,#5AA2FF,#2F5F9E)', lb:'Remote', b:0},
+  {ic:'✎', bg:'linear-gradient(135deg,#F27B9B,#C24A6A)', lb:'笔记', b:0},
+  {ic:'⌂', bg:'linear-gradient(135deg,#6A8AB5,#3C5A7A)', lb:'遥控', b:0},
+  {ic:'◉', bg:'linear-gradient(135deg,#8A6AD9,#5A3C9E)', lb:'相机', b:0}
+];
+const DOCK = [
+  {ic:'✆', bg:'linear-gradient(135deg,#4ADE80,#22A55A)'},
+  {ic:'✉', bg:'linear-gradient(135deg,#7AA8D9,#4A78A9)'},
+  {ic:'◍', bg:'linear-gradient(135deg,#4ADE80,#22A55A)'}
+];
+
+function renderIcons(){
+  document.getElementById('appGrid').innerHTML = APPS.map(a=>`
+    <div class="app">
+      <div class="ico" style="background:${a.bg}">
+        ${a.ic}${a.b?`<span class="badge">${a.b}</span>`:''}
+      </div>
+      <div class="lb">${a.lb}</div>
+    </div>`).join('');
+  document.getElementById('dock').innerHTML = DOCK.map(a=>`
+    <div class="app"><div class="ico" style="background:${a.bg}">${a.ic}</div></div>`).join('');
+}
+renderIcons();
+
+/* 纯图标 action：Material Symbols 标准 24dp 路径（真机实测渲染清晰） */
+const ICO = {
+  check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg>',
+  close:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  dl:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/></svg>',
+  hand:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11V5.5a1.5 1.5 0 1 1 3 0V11"/><path d="M12 10V4.5a1.5 1.5 0 1 1 3 0V11"/><path d="M15 11V6.5a1.5 1.5 0 1 1 3 0V14a7 7 0 0 1-7 7h-1a7 7 0 0 1-6-3.5L3 14"/></svg>',
+  ask:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.4 2.3c-.55.25-.9.8-.9 1.4V14"/><circle cx="12" cy="17.2" r=".6" fill="currentColor" stroke="none"/></svg>',
+  warn:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l9 16.5H3z"/><path d="M12 9.5v5"/><circle cx="12" cy="17.4" r=".7" fill="currentColor" stroke="none"/></svg>',
+  more:'<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>',
+  open:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>',
+  retry:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.5-5.8"/><path d="M20 4v5h-5"/></svg>',
+  stop:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>',
+};
+
+const STATES = {
+  idle: {
+    label:'无任务', k:'idle',
+    capsule:null, title:null, step:null, sub:null, segs:0, done:0,
+    explain:'没有进行中的任务时，<b>不显示任何胶囊</b>。流体云是「进行中」的语义，空闲时挂个胶囊会很快被用户关掉，一关就永久失效。',
+    code:'// 无任务时不发布通知\nnotificationManager.cancel(CAPSULE_ID)'
+  },
+  running: {
+    label:'执行中', k:'run',
+    capsule:{text:'执行中', icon:'dl', cls:''},
+    title:'两条关键结论已写入文档',
+    step:'▸ 正在搜索 seedQuestionDefaults 的全部调用点',
+    sub:'第 3 步 / 共 5 步：搜索调用点',
+    segs:5, done:2,
+    acts:[{ic:'stop', cls:''},{ic:'open', cls:'acc'}],
+    timer:'08:07',
+    explain:'<b>标题（最多 2 行）= 最新一次汇报</b>，每汇报一次就原地刷新。<b>正文 1 行 = 当前正在做的事</b>。<b>副行 = 第几步 / 共几步 + 步骤名</b>。<b>分段进度条 = todo list 的 N 个条目</b>，绿色是已完成、半绿是进行中。',
+    code:'// 真机实测：这四层可以同时存在\n// ProgressStyle 与 BigTextStyle 互斥，\n// 用 ProgressStyle 时正文只有 1 行\nsetContentTitle(reportLine)        // 汇报，最多 2 行\nsetContentText("▸ 正在搜索调用点")  // 当前动作\nsetSubText("第 3 步 / 共 5 步：搜索调用点")\nsetStyle(ProgressStyle()\n  .setStyledByProgress(false)\n  .setProgress(3)\n  .setProgressSegments(todoSegs))\nsetProgress(5, 2, false)\nsetShortCriticalText("执行中")'
+  },
+  multi: {
+    label:'多会话', k:'run',
+    capsule:{text:'执行中 3 个', icon:'dl', cls:''},
+    title:'[R059] 两条关键结论已写入文档',
+    step:'▸ 正在搜索 seedQuestionDefaults 的全部调用点',
+    sub:'第 3 步 / 共 5 步 · 另 2 个在执行',
+    timer:'12:34',
+    segs:5, done:2,
+    acts:[{ic:'stop', cls:''},{ic:'more', cls:''},{ic:'open', cls:'acc'}],
+    explain:'胶囊只能有一条，所以它是<b>焦点会话的聚光灯</b>，不是多会话面板。<b>焦点名字放标题方括号里</b>（真机标题就是一个字符串，只能这样区分），<b>其余会话只在副行留个数</b>。进度条<b>只画焦点的</b>——把三个会话的进度混到一起没有意义。<br><br><b>焦点判定四层刚性顺序</b>：① 有待处理（审批/提问，FIFO 取最早、防饥饿）→ ② 用户正在看的那个 → ③ 上一轮焦点还在跑就粘滞不换 → ④ 重新选举（<code>unreadRank</code> 降序 → <code>updatedAt</code> 降序 → <code>sessionId</code> 字典序）。<br><br>③ 不是偏好而是硬约束：ColorOS 的轻打扰会把频繁变动的胶囊缩成气泡，而<b>气泡不会自动展开</b>，焦点来回跳几轮用户就再也看不到实时状态了。<br><br>要看另外两个会话，只能点 <b>⋯ → 会话列表</b>：通知展开态没有多余的位置。',
+    code:'// 焦点会话的挑选（纯函数，可单测）\nfun pickFocus(\n  sessions: List<SessionSummary>,\n  approvals: List<ApprovalRequest>,\n  questions: List<QuestionRequest>,\n  viewing: String?,\n  last: String?,      // 上一轮焦点\n): String? {\n  // 1 有待处理：FIFO，最早在等的先上\n  val blocked = (approvals.mapNotNull{it.agentId} +\n                 questions.mapNotNull{it.agentId}).toSet()\n  blocked.minByOrNull { firstSeenAt[it] ?: Long.MAX_VALUE }\n    ?.let { return it }\n  // 2 正在看的\n  viewing?.let { return it }\n  // 3 粘滞：上一轮焦点还在跑就不换\n  last?.let { id ->\n    sessions.firstOrNull{it.sessionId==id}\n      ?.takeIf{ statusOf(it) == SessionStatus.Ongoing }\n      ?.let { return it }\n  }\n  // 4 重新选举\n  return sessions.minWithOrNull(\n    compareByDescending<SessionSummary>{ unreadRank(statusOf(it)) }\n      .thenByDescending{ it.updatedAt }\n      .thenBy{ it.sessionId })    // tie-break 保证幂等\n    ?.sessionId\n}\n\n// 发布（同一个 CAPSULE_ID，原地更新）\nsetContentTitle("[R059] $reportLine")   // 名字进方括号\nsetContentText("\u25b8 $currentAction")\nsetSubText("第 3 步 / 共 5 步 \u00b7 另 2 个在执行")\nsetStyle(ProgressStyle().setProgress(done)\n  .setProgressSegments(List(5){ Segment(1) }))\nsetProgress(5, 2, false)   // 只给焦点的\nsetShortCriticalText("执行中 3 个")  // 6 字，96dp 内不截断\n// 后台会话拿不到 todo（follow 只订阅当前会话），\n// 焦点在后台时改用 setProgressIndeterminate(true)'
+  },
+  mixed: {
+    label:'混合(待处理+在跑)', k:'wait',
+    capsule:{text:'待处理 1', icon:'hand', cls:'wait'},
+    title:'[R058] 需要你批准才能继续',
+    step:'▸ npx vitest run --coverage',
+    sub:'另 2 个在执行 · 点卡片进入处理',
+    timer:'06:12',
+    segs:3, done:1,
+    acts:[{ic:'check', cls:'acc'},{ic:'close', cls:'dgr'},{ic:'more', cls:''}],
+    explain:'多会话里<b>只要有一个在等你处理，焦点必须是它</b>——它是唯一真正卡住用户的。此时胶囊文案换成语义最强的那句「待处理 1」，执行中的数量退到副行。<br><br><b>一键三用</b>：这三个按钮只作用于焦点会话。多会话时<b>副行必须写明作用对象</b>，否则用户以为批准的是 A、实际批了 B，这是安全问题而不是信息缺失。<br><br>层内用 <b>FIFO</b>：卡片一次只能放一个会话的按钮，按重要度排会让次要会话永远等不到（饥饿）。',
+    code:'// 有任何待处理 → 焦点强制切过去\nif (blocked.isNotEmpty()) {\n  focus = blocked.minBy { firstSeenAt[it]!! }\n  core  = "待处理 ${blocked.size}"\n}\n\nsetContentTitle("[R058] 需要你批准才能继续")\nsetContentText("\u25b8 npx vitest run --coverage")\nsetSubText("另 2 个在执行 \u00b7 点卡片进入处理")\nsetShortCriticalText("待处理 1")\n// 三个图标只作用于焦点的 eventId\naddAction(icon(R.drawable.ic_check, approve(eventId)))\naddAction(icon(R.drawable.ic_close, deny(eventId)))\naddAction(icon(R.drawable.ic_more,  openSession(focus)))\n\n// 处理完一个，焦点自动落到下一个在等的\n// FIFO 保证每个最多等 N 个处理周期'
+  },
+  approve: {
+    label:'待批准', k:'wait',
+    capsule:{text:'待批准', icon:'hand', cls:'wait'},
+    title:'需要你批准才能继续',
+    step:'▸ npx vitest run --coverage',
+    sub:'请选择如何处理这条命令',
+    timer:'00:41',
+    segs:5, done:1,
+    acts:[{ic:'check', cls:'acc'},{ic:'close', cls:'dgr'},{ic:'more', cls:''}],
+    explain:'<b>最有价值的一屏</b>：不用打开 App 就能批复。标题说要你批准，正文显示<b>被拦截的具体命令</b>，副行提示要做什么。三个纯图标按钮正好用满上限：<b>✓ 批准 / ✕ 拒绝 / ⋯ 详情</b>。',
+    code:'// 真机实测：title 传空串 + 只给 Icon = 纯图标按钮\nfun icon(res: Int, pi: PendingIntent) =\n  Notification.Action.Builder(\n    Icon.createWithResource(ctx, res), "", pi).build()\n\nsetContentTitle("需要你批准才能继续")\nsetContentText("▸ npx vitest run --coverage")\nsetSubText("请选择如何处理这条命令")\nsetShortCriticalText("待批准")\naddAction(icon(R.drawable.ic_check, approvePi))  // 0\naddAction(icon(R.drawable.ic_close, denyPi))     // 1\naddAction(icon(R.drawable.ic_more,  openPi))     // 2 ← 上限'
+  },
+  answer: {
+    label:'待回答', k:'wait',
+    capsule:{text:'待回答', icon:'ask', cls:'wait'},
+    title:'有 3 个问题需要你回答',
+    step:'▸ 重建索引要包含哪些目录？',
+    sub:'问题 1 / 共 3：选择一项即可',
+    timer:'02:18',
+    segs:3, done:1,
+    acts:[{t:'仅 src/', cls:'acc'},{t:'src/ 和 docs/', cls:''},{ic:'more', cls:''}],
+    explain:'选项类问题<b>直接把前两个选项做成长条文字按钮</b>——真机实测 <code>Action.Builder(null, "仅 src/", pi)</code> 会渲染成文字胶囊，中英文都不截断，比图标直观得多。action 上限 3 个，所以是 <b>选项1 / 选项2 / ⋯</b>，第三个选项及以后跳回 App 里选。',
+    code:'setContentTitle("有 3 个问题需要你回答")\nsetContentText("▸ 重建索引要包含哪些目录？")\nsetSubText("问题 1 / 共 3：选择一项即可")\nsetShortCriticalText("待回答")\naddAction(text("仅 src/",        aPi))  // 选项 1\naddAction(text("src/ 和 docs/", bPi))  // 选项 2\naddAction(icon(R.drawable.ic_more,      // 更多\n                morePi))\n// 注意：Segment 的长度必须是 1，详见文档 D 节'
+  },
+  done: {
+    label:'已完成', k:'done',
+    capsule:{text:'已完成', icon:'check', cls:'done'},
+    title:'任务已完成：测试通过 2314 项，APK 已产出',
+    step:'✓ 全部 5 个步骤已完成',
+    sub:'第 5 步 / 共 5 步：归档文档',
+    timer:'14:52',
+    segs:5, done:5,
+    acts:[{ic:'open', cls:'acc'}],
+    explain:'完成后胶囊变绿并<b>停留约 3 秒自动消失</b>。分段进度条全部变绿。标题放结果摘要，正文说明状态。按钮只留 <b>› 打开</b>。',
+    code:'setContentTitle("任务已完成：测试通过 2314 项")\nsetContentText("✓ 全部 5 个步骤已完成")\nsetSubText("第 5 步 / 共 5 步：归档文档")\nsetStyle(ProgressStyle().setProgress(5)\n  .setProgressSegments(allGreen))\nsetProgress(5, 5, false)\nsetShortCriticalText("已完成")\naddAction(icon(R.drawable.ic_open, openPi))\n// 3 秒后 cancel(CAPSULE_ID)'
+  },
+  error: {
+    label:'出错', k:'bad',
+    capsule:{text:'出错', icon:'warn', cls:'bad'},
+    title:'执行出错：权限不足，无法写入 /etc/hosts',
+    step:'✕ 写入失败：EACCES',
+    sub:'第 2 步 / 共 5 步：写入配置',
+    timer:'09:26',
+    segs:5, done:1,
+    acts:[{ic:'more', cls:'acc'},{ic:'retry', cls:''}],
+    explain:'出错时胶囊变红。标题写清楚<b>失败原因</b>，正文是具体错误码。这种状态<b>不要自动消失</b>——失败了却静默消失，用户会以为事情做成了。按钮是 <b>⋯ 详情 / ↻ 重试</b>。',
+    code:'setContentTitle("执行出错：权限不足，无法写入 /etc/hosts")\nsetContentText("✕ 写入失败：EACCES")\nsetSubText("第 2 步 / 共 5 步：写入配置")\nsetShortCriticalText("出错")\naddAction(icon(R.drawable.ic_more,  logPi))\naddAction(icon(R.drawable.ic_retry, retryPi))\n// 不自动 cancel，等用户处理'
+  }
+};
+
+let cur = 'running';
+let open = false;
+
+function setState(key){
+  cur = key;
+  const s = STATES[key];
+  document.querySelectorAll('.stbtn').forEach(b=>{
+    b.classList.toggle('on', b.dataset.key === key);
+  });
+  document.getElementById('explain').innerHTML = s.explain;
+  document.getElementById('code').textContent = s.code;
+
+  const capsule = document.getElementById('capsule');
+  if(!s.capsule){
+    capsule.classList.add('hide');
+    closeCard();
+  } else {
+    capsule.className = 'capsule ' + s.capsule.cls;
+    if(!open) capsule.classList.remove('hide');
+    document.getElementById('capsuleText').textContent = s.capsule.text;
+    document.getElementById('capsuleIcon').innerHTML = ICO[s.capsule.icon] || '';
+  }
+  renderCard(s);
+}
+
+function escapeHtml(t){
+  return String(t).replace(/[&<>]/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];
+  });
+}
+
+function renderCard(s){
+  // v4：标题第 1 行是汇报、第 2 行是当前动作。
+  const elTitle = document.getElementById('cardTitle');
+  if (s.title) {
+    elTitle.innerHTML = s.step
+      ? (escapeHtml(s.title) + '<br><span class="cact2">' + escapeHtml(s.step) + '</span>')
+      : escapeHtml(s.title);
+  } else { elTitle.textContent = ''; }
+  const elTimer = document.getElementById('cardTimer');
+  if (s.timer) { elTimer.style.display = ''; elTimer.textContent = s.timer; }
+  else { elTimer.style.display = 'none'; }
+  document.getElementById('cardSub').textContent = s.sub || '';
+
+  const row = document.getElementById('segRow');
+  const knob = document.getElementById('cardKnob');
+  if(!s.segs){
+    document.getElementById('cardTrack').style.display = 'none';
+  } else {
+    document.getElementById('cardTrack').style.display = 'flex';
+    const done = Math.max(0, Math.min(s.done, s.segs));
+    row.innerHTML = Array.from({length:s.segs}, (_,i)=>
+      `<i class="${i < done ? 'done' : ''}"></i>`).join('');
+    // 圆点直接挂进「第 done 段」这个 i 元素，用 right:-6.5px 贴住它的右边界。
+    // 不在 JS 里算任何坐标，因此不存在坐标系不一致导致的偏移。
+    const cells = Array.from(row.children);
+    if (cells.length) {
+      const k = Math.min(Math.max(done, 1), cells.length) - 1;
+      cells[k].appendChild(knob);
+    }
+
+  }
+
+  const acts = document.getElementById('cardActs');
+  acts.className = 'cacts' + (s.acts.length === 1 ? ' one' : s.acts.length === 2 ? ' two' : '');
+  acts.innerHTML = s.acts.map(a=>
+    `<div class="cact ${a.cls||''}${a.t?' txt':''}" title="${a.tip || ''}">${
+      a.t ? a.t : (ICO[a.ic] || '')
+    }</div>`).join('');
+}
+
+function openCard(){
+  if(!STATES[cur].capsule) return;
+  open = true;
+  document.getElementById('card').classList.add('open');
+  document.getElementById('capsule').classList.add('sup');
+}
+function closeCard(){
+  open = false;
+  document.getElementById('card').classList.remove('open');
+  document.getElementById('capsule').classList.remove('sup');
+}
+
+document.getElementById('capsule').addEventListener('click', ()=>{
+  open ? closeCard() : openCard();
+});
+document.getElementById('cardClose').addEventListener('click', closeCard);
+
+const btns = document.getElementById('stbtns');
+btns.innerHTML = Object.entries(STATES).map(([k,s])=>
+  `<div class="stbtn" data-key="${k}">${s.label}</div>`).join('');
+btns.addEventListener('click', e=>{
+  const b = e.target.closest('.stbtn');
+  if(!b) return;
+  setState(b.dataset.key);
+  closeCard();
+});
+
+const q = new URLSearchParams(location.search);
+// 截图用：关闭一切过渡/动画，避免把动画中间帧拍进去
+if(q.get('still') === '1'){
+  const st = document.createElement('style');
+  st.textContent = '*{transition:none!important;animation:none!important}';
+  document.head.appendChild(st);
+}
+const init = q.get('s') && STATES[q.get('s')] ? q.get('s') : 'running';
+setState(init);
+if(q.get('open') !== '0'){ setTimeout(openCard, 300); }
+</script>
+</body>
+</html>

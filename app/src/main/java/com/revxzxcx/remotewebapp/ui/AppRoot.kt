@@ -36,6 +36,7 @@ import com.revxzxcx.remotewebapp.core.AppContainer
 import com.revxzxcx.remotewebapp.core.AppState
 import com.revxzxcx.remotewebapp.core.credentials.DeviceCredential
 import com.revxzxcx.remotewebapp.core.notify.NoticeChannels
+import com.revxzxcx.remotewebapp.core.capsule.CapsuleBridge
 import com.revxzxcx.remotewebapp.core.notify.NoticeIntents
 import com.revxzxcx.remotewebapp.core.notify.NoticeStatus
 import com.revxzxcx.remotewebapp.core.notify.noticeStatusDetail
@@ -60,6 +61,7 @@ import com.revxzxcx.remotewebapp.ui.pair.PairScreen
 import com.revxzxcx.remotewebapp.ui.pair.PairViewModel
 import com.revxzxcx.remotewebapp.ui.settings.NoticeSettingsScreen
 import com.revxzxcx.remotewebapp.ui.settings.SettingsScreen
+import com.revxzxcx.remotewebapp.ui.settings.openCapsuleSettings
 import com.revxzxcx.remotewebapp.ui.settings.openNoticeSystemSettings
 import com.revxzxcx.remotewebapp.ui.theme.Motion
 import kotlinx.coroutines.launch
@@ -434,6 +436,9 @@ fun AppRoot(container: AppContainer) {
                         } else {
                             notifier.onSessionOpened(session.sessionId)
                         }
+                        // R059：胶囊要知道用户正看着哪条会话——那是「我不在 App 里」
+                        // 的替代品，用户眼睛就在上面时不该抢通知栏。
+                        CapsuleBridge.publishViewing(session?.sessionId)
                     }
 
                     // R056：点通知进来要落到那条会话。
@@ -656,6 +661,7 @@ fun AppRoot(container: AppContainer) {
                                         noticeStatus = container.noticeStatus()
                                     },
                                     onOpenSystemSettings = { uiContext.openNoticeSystemSettings() },
+                                    onOpenCapsuleSettings = { uiContext.openCapsuleSettings() },
                                     linkService = linkUi,
                                     // 这四处不再需要手动递增任何计数：写盘路径统一经
                                     // `writePrefs`，`servicePrefsRevision` 会自己推高，

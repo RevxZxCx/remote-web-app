@@ -80,6 +80,22 @@ class DshApplication : Application(), NoticeActionHost {
         container.exitLinkService()
     }
 
+    /**
+     * 用户在流体云卡片上点了一个选项（R059）。
+     *
+     * 与上面两个 override 同理，**这一跳不能少**：少了它，接收器 `as? NoticeActionHost`
+     * 拿不到宿主就直接 return，用户点选项毫无反应，而卡片还挂在那里显示「待回答」。
+     * R056 已经踩过一次同样的坑（单测只测容器、从不经过 Application 这一跳）。
+     */
+    override fun answerQuestionOptionFromCapsule(
+        eventId: String,
+        callId: String,
+        questionId: String,
+        label: String,
+    ) {
+        container.answerQuestionOptionFromCapsule(eventId, callId, questionId, label)
+    }
+
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  R059：流体云卡片上的「批准」图标按钮。
+
+  为什么必须自带图标而不是用 `android.R.drawable`：真机实测（调研文档 3.5）
+  `android.R.drawable` 公开的 139 个 id 里**没有干净的勾/叉配对**，
+  只有复选框方块、菜单叉、垃圾桶。`android.R.drawable.ic_check_24dp` 之类
+  根本不在公开 API，编译期就 Unresolved reference。
+
+  Material 标准 check 24dp path，与 ic_capsule 同样纯白剪影。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M9,16.17L4.83,12l-1.42,1.41L9,19 21,7l-1.41,-1.41z" />
+</vector>

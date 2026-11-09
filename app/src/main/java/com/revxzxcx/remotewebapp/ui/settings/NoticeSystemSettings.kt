@@ -1,6 +1,7 @@
 package com.revxzxcx.remotewebapp.ui.settings
 
 import android.content.ActivityNotFoundException
+import android.os.Build
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -77,3 +78,56 @@ fun Context.openNoticeSystemSettings() {
  */
 fun Context.notificationsBlockedBySystem(): Boolean =
     !NotificationManagerCompat.from(this).areNotificationsEnabled()
+
+/**
+ * 跳到流体云开关那一页（R059）。
+ *
+ * ## 为什么不直接用 `Settings.ACTION_MANAGE_APP_PROMOTED_NOTIFICATIONS`
+ * 那是 AOSP 为 Android 16 的 Live Updates 提供的标准入口，但**厂商可以完全不实现**。
+ * 真机实测（OnePlus PKG110 / ColorOS 17 / API 37）：
+ * `cmd package query-activities -a android.settings.MANAGE_APP_PROMOTED_NOTIFICATIONS`
+ * 返回 `No activities found`——这台机器上那个设置页根本不存在，
+ * 而 `ACTION_APP_NOTIFICATION_SETTINGS` 会落到
+ * `com.oplus.notificationmanager/.AppNotificationSettingsActivity`，
+ * 「流体云显示实时活动」开关就在那一页上（实测打开后 AppOp 从 `ignore` 变 `allow`）。
+ *
+ * 所以顺序是「先试标准入口，落了空再退到应用通知页」：别的 ROM 将来实现了标准入口时，
+ * 这里能自动用上更精确的那一个，不必再改代码。
+ *
+ * ## 为什么不做 `resolveActivity` 预检
+ * 与 [openNoticeSystemSettings] 同一个理由（API 30+ 包可见性会让预检给出假阴性）。
+ */
+fun Context.openCapsuleSettings() {
+    val candidates = buildList {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+            // 字符串常量而不是 `Settings.ACTION_MANAGE_APP_PROMOTED_NOTIFICATIONS`：
+            // 后者在 compileSdk 36 上存在，但写成常量能让 `minSdk 26` 的调用点
+            // 不必整段包 `@RequiresApi`——这个 Intent 在任何版本上都可以安全构造。
+            add(Intent(ACTION_MANAGE_APP_PROMOTED_NOTIFICATIONS))
+        }
+        add(
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                .putExtra("android.provider.extra.APP_PACKAGE", packageName),
+        )
+        add(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(Uri.fromParts("package", packageName, null)))
+        add(Intent(Settings.ACTION_SETTINGS))
+    }
+
+    for (intent in candidates) {
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            startActivity(intent)
+            return
+        } catch (_: ActivityNotFoundException) {
+            continue
+        } catch (_: SecurityException) {
+            continue
+        }
+    }
+    Toast.makeText(this, "没能打开系统设置，请手动到「设置 → 通知与状态栏 → 流体云」里打开", Toast.LENGTH_LONG).show()
+}
+
+/** `Settings.ACTION_MANAGE_APP_PROMOTED_NOTIFICATIONS` 的字面值（API 36 才有这个常量）。 */
+private const val ACTION_MANAGE_APP_PROMOTED_NOTIFICATIONS =
+    "android.settings.MANAGE_APP_PROMOTED_NOTIFICATIONS"

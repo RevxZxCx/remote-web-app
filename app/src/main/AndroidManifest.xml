@@ -9,6 +9,16 @@
          自己记账「问过没有」，否则用户每次冷启动都会被弹一次。 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- R059：流体云胶囊（Android 16 的 promoted ongoing notification）。
+         这是 `prot=normal` 的普通权限，**不需要运行时弹窗**，但系统默认给的是
+         AppOp `ignore`——真正要用户在「设置 → 通知与状态栏 → 流体云 → 应用提醒」
+         里手动打开「流体云显示实时活动」。真机实测（OnePlus PKG110 / ColorOS 17 /
+         API 37）：AOSP 的 `MANAGE_APP_PROMOTED_NOTIFICATIONS` 设置页在这台机器上
+         **不存在**（`query-activities` 返回 No activities found），只能靠
+         `APP_NOTIFICATION_SETTINGS` 深链落到 ColorOS 自己的那个页面。
+         不声明这条权限时 `canPostPromotedNotifications()` 恒为 false，胶囊永远出不来。 -->
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+
     <!-- 扫码配对需要相机；声明为可选，平板/无相机设备仍可粘贴链接。 -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature
@@ -61,6 +71,16 @@
              R057 起它还承接常驻通知的「退出」按钮（同一个接收器、另一个 action）。 -->
         <receiver
             android:name=".core.notify.NoticeActionReceiver"
+            android:exported="false" />
+
+        <!-- R059：流体云胶囊被系统划掉时的通知。
+             用户在状态栏把胶囊滑走（真机实测：向左滑到尽头会**整体隐藏**胶囊），
+             `deleteIntent` 会发这条广播，我们记一笔「本次已隐藏」——但**新的待处理
+             事项到来时必须重新显示**，否则一次误划会让后续所有审批静默。
+             与上面那个接收器分成两个：那个要回答请求、这个只记一个标记，
+             混在一起会让 `onReceive` 里的分叉判断变成「看 action 猜意图」。 -->
+        <receiver
+            android:name=".core.capsule.CapsuleDismissReceiver"
             android:exported="false" />
 
         <!-- R057：保持后台连接的前台服务。

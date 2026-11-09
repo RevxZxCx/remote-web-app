@@ -135,10 +135,29 @@ class NoticeActionWiringTest {
     /** 记录「有没有被叫到」的宿主替身。 */
     private class SpyHost : NoticeActionHost {
         val answers = mutableListOf<Pair<String, Boolean>>()
+
+        /** eventId / callId / questionId / label —— 四样都要，少一样就写不回原通知。 */
+        data class Quad(
+            val eventId: String,
+            val callId: String,
+            val questionId: String,
+            val label: String,
+        )
+
+        val options = mutableListOf<Quad>()
         var exits = 0
 
         override fun answerFromNotification(eventId: String, allow: Boolean) {
             answers += eventId to allow
+        }
+
+        override fun answerQuestionOptionFromCapsule(
+            eventId: String,
+            callId: String,
+            questionId: String,
+            label: String,
+        ) {
+            options += Quad(eventId, callId, questionId, label)
         }
 
         override fun exitServiceFromNotification() {
@@ -158,6 +177,15 @@ class NoticeActionWiringTest {
 
         override fun answerFromNotification(eventId: String, allow: Boolean) {
             host.answerFromNotification(eventId, allow)
+        }
+
+        override fun answerQuestionOptionFromCapsule(
+            eventId: String,
+            callId: String,
+            questionId: String,
+            label: String,
+        ) {
+            host.answerQuestionOptionFromCapsule(eventId, callId, questionId, label)
         }
 
         override fun exitServiceFromNotification() {

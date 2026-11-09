@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  R059：流体云胶囊的小图标。
+
+  与 ic_notice_done / ic_notice_ask 同一套约束（纯白剪影 + 透明背景 + 24dp + 留边）。
+
+  为什么不能复用现有两个：胶囊在状态栏里只有十几像素宽，且**与那两个通知同时存在**
+  （胶囊是「实时状态」，通知是「跑完提醒」）。若共用同一个图标，用户在状态栏上
+  分不清哪个是正在跑的胶囊、哪个是刚跑完的通知。
+
+  图形用三道横向的进度短线（像正在跑的任务队列），与对勾、感叹号在形状上
+  都拉开了距离。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4,7H20V9H4V7ZM4,11H14V13H4V11ZM4,15H10V17H4V15Z" />
+</vector>

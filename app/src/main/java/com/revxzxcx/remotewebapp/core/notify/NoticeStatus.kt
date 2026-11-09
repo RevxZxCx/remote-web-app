@@ -27,6 +27,17 @@ package com.revxzxcx.remotewebapp.core.notify
  * @param askChannelEnabled 「需要确认」这个系统频道是否还被允许。
  * @param doneChannelEnabled 「任务结束」这个系统频道是否还被允许。
  * @param serviceChannelEnabled 「后台连接」这个系统频道是否还被允许。
+ * @param capsuleSupported 这台机器的 Android 版本够不够（真机实测：ColorOS 17 / API 37
+ *   才有 `POST_PROMOTED_NOTIFICATIONS`；API 36 以下连构造 promoted 通知的 API 都没有）。
+ * @param capsulePromoted 流体云（promoted ongoing）的 AppOp 是否被用户打开了。
+ *   **这是第五层，与上面四层完全独立**：真机上它默认是 `ignore`，要用户到
+ *   「设置 → 通知与状态栏 → 流体云 → 应用提醒 → <App>」里单独打开；
+ *   而且 AOSP 的 `MANAGE_APP_PROMOTED_NOTIFICATIONS` 设置页在 ColorOS 上
+ *   根本不存在，所以没有任何办法替用户开。
+ * @param capsuleChannelEnabled 流体云自己那个系统频道（`CapsuleCenter.CHANNEL_ID`）
+ *   是否还被允许。它独立于上面三个频道，但**不能省**：频道被关掉后
+ *   `NotificationManager.notify` 会静默丢弃，而 AppOp 仍是 `allow`，
+ *   于是设置页会一直说「任务进行中会在状态栏实时显示」（R059 审查 P2-3）。
  */
 data class NoticeStatus(
     val systemEnabled: Boolean = true,
@@ -38,6 +49,9 @@ data class NoticeStatus(
     val askChannelEnabled: Boolean = true,
     val doneChannelEnabled: Boolean = true,
     val serviceChannelEnabled: Boolean = true,
+    val capsuleSupported: Boolean = false,
+    val capsulePromoted: Boolean = false,
+    val capsuleChannelEnabled: Boolean = true,
 ) {
 
     /** 此刻是否真的能收到「任务结束」通知（四层全通）。 */
@@ -50,6 +64,33 @@ data class NoticeStatus(
 
     /** 任意一类能收到就算「通知是通的」。 */
     val anyUsable: Boolean get() = doneUsable || askUsable
+
+    /**
+     * 流体云此刻是否能真的显示。
+     *
+     * 胶囊走的是独立频道（`CapsuleCenter.CHANNEL_ID`），不受 `askEnabled` /
+     * `doneEnabled` 影响；但它仍然要求 `permissionGranted`、`systemEnabled`，
+     * 以及**自己那个频道**没被关掉——胶囊本质仍是一条通知，频道被关掉后
+     * `notify` 会被系统静默丢弃，而 AppOp 仍是 `allow`（R059 审查 P2-3）。
+     */
+    val capsuleUsable: Boolean
+        get() = capsuleSupported && systemEnabled && permissionGranted &&
+            capsuleChannelEnabled && capsulePromoted
+}
+
+/**
+ * 设置页「流体云」一行右侧的说明。
+ *
+ * 与 [noticeStatusDetail] 同一个原则：只说**最该先解决的那一层**。
+ * 用户在这一行上唯一能做的就是「去系统设置」，所以文案要写成命令句。
+ */
+fun capsuleStatusDetail(status: NoticeStatus): String = when {
+    !status.capsuleSupported -> "这台机器的系统版本不支持"
+    !status.permissionGranted -> "先开启通知权限"
+    !status.systemEnabled -> "系统里通知被关掉了"
+    !status.capsuleChannelEnabled -> "「流体云状态」这个通知类别被关掉了"
+    !status.capsulePromoted -> "还没开启，点这里去打开"
+    else -> "任务进行中会在状态栏实时显示"
 }
 
 /**
@@ -69,7 +110,7 @@ fun noticeStatusDetail(status: NoticeStatus): String = when {
     !status.askEnabled -> "「需要确认」被你关掉了，任务会一直等你"
     !status.doneEnabled -> "「任务结束」被你关掉了"
     else -> "任务跑完、需要你确认时提醒"
-};
+}
 
 /**
  * 现在该不该弹系统的权限请求框。
