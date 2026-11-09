@@ -51,6 +51,18 @@ internal class CapsuleCoordinator(
     private var questions: List<QuestionRequest> = emptyList()
 
     /** 用户正看着的会话（胶囊是「我不在 App 里」的替代品，看着时不抢镜）。 */
+    /**
+     * 已经 [detach]。去抖任务醒来时必须先看这个标志。
+     *
+     * 反例：`detach()` 里 `recomputeJob?.cancel()` 只能取消**已经排队**的那一个，
+     * 而 `scheduleRecompute()` 在 `delay(300)` 之后无条件调 `recompute()`。
+     * 只要 UI 在 detach 之后又发来一次 `setSessions`/`setLive`（`CapsuleBridge`
+     * 的 StateFlow 订阅就会这么做），胶囊就会被重新发出来——
+     * 用户明明已经断开连接，状态栏却还挂着一条。
+     */
+    @Volatile
+    private var detached = false
+
     @Volatile
     private var viewingSessionId: String? = null
 
@@ -84,6 +96,7 @@ internal class CapsuleCoordinator(
      * 「列表红、胶囊绿」的自相矛盾。
      */
     fun setSessions(items: List<SessionSummary>) {
+        detached = false
         sessions = items
         scheduleRecompute()
     }
@@ -150,11 +163,14 @@ internal class CapsuleCoordinator(
 
     /** 连接断开 / 关闭胶囊功能时撤掉并清状态。 */
     fun detach() {
+        detached = true
         recomputeJob?.cancel()
+        recomputeJob = null
         sessions = emptyList()
         approvals = emptyList()
         questions = emptyList()
         live = null
+        viewingSessionId = null
         previousSessionId = null
         startedForSession = null
         center.cancel()
@@ -168,6 +184,7 @@ internal class CapsuleCoordinator(
      * 用户晚 300ms 看到是可以接受的，晚 3 秒就可能已经超时了。
      */
     private fun scheduleRecompute() {
+        if (detached) return
         recomputeJob?.cancel()
         recomputeJob = scope.launch {
             delay(DEBOUNCE_MS)
@@ -273,11 +290,9 @@ internal class CapsuleCoordinator(
 
         // 没有待处理：走执行中/已完成/出错三态。
         val snapshot = live?.takeIf { it.sessionId == sessionId }
-        val phase = if (live != null && live?.sessionId == sessionId && snapshot?.running == false) {
-            CapsulePhase.Done
-        } else {
-            CapsulePhase.Running
-        }
+        // 只用这一份快照判相位：`live` 会被 setLive 并发改写，重复读三次
+        // 可能落在不同版本上，那个表达式就不再是作者想要的那一个。
+        val phase = if (snapshot?.running == false) CapsulePhase.Done else CapsulePhase.Running
         return CapsuleContent.running(
             sessionId = sessionId,
             title = title,
@@ -321,6 +336,16 @@ internal class CapsuleCoordinator(
             val first = request.questions.firstOrNull()
             val options = first?.options.orEmpty().take(MAX_OPTION_ACTIONS)
             val callId = request.capsuleCallId()
+            // 多题组**照样给选项按钮**——这条曾被第二轮审查建议关掉，但没有采纳。
+            //
+            // 审查者的理由是「UI 路径 `answerQuestionGroup` 要求整组答完才提交，
+            // 胶囊只提交一道，两者矛盾」。但真机证据反驳了它：2026-11-09 21:48，
+            // 一个 3 题组在胶囊上显示「修改 / 排查 / ⋯」，点第一个后卡片**原地
+            // 更新成下一道题的「blue / green」**——服务端接受单条答案并把剩下的
+            // 推回来。也就是说「答一道 → 下一道」是真的可用，不是矛盾。
+            //
+            // 再说用户 m01450 就是要「待回答显示前两个选项按钮」；为了一句文案
+            // 的自洽把这个入口砍掉，等于拿需求换整齐。
             if (first != null && options.isNotEmpty()) {
                 // 前两个选项 + 一个「⋯」进 App。第三个选项如果塞进来，用户就失去了
                 // 「进 App 处理」的入口，而多选题与自定义输入本来就必须进 App。

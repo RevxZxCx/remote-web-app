@@ -250,7 +250,10 @@ internal class CapsuleCenter(private val context: Context) {
         }
         return PendingIntent.getActivity(
             context,
-            REQUEST_CODE_OPEN,
+            // 必须用高位保留码段：`151_080 and 0x7FFF == 20_008` 落在会话码段内，
+            // 而两处 getActivity 的 Intent 结构一致（filterEquals 不看 extras），
+            // 配合 FLAG_UPDATE_CURRENT 会互相覆盖 → 点胶囊跳进错误的会话。
+            NotificationCenter.CAPSULE_REQUEST_CODE_OPEN,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -317,8 +320,13 @@ internal class CapsuleCenter(private val context: Context) {
          */
         const val NOTIFICATION_ID: Int = 151_080
 
-        internal const val REQUEST_CODE_OPEN: Int = 151_080
-        private const val REQUEST_CODE_DELETE: Int = 151_081
+        /**
+         * 划掉胶囊时的取消广播。
+         *
+         * 同样必须在高位保留段：它走 `getBroadcast`、action 也与会话通知不同，
+         * 但仍与前一条保持同一约定，避免以后有人把两者合并时踩坑。
+         */
+        private const val REQUEST_CODE_DELETE: Int = 0x9001
 
         /** 系统最多渲染 3 个 action（真机实测，第 4 个直接不出现）。 */
         const val MAX_ACTIONS: Int = 3

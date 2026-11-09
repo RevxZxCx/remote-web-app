@@ -352,8 +352,7 @@ class NotificationCenter(
      * 把两段错开——碰撞的后果是「一条提问把一条审批盖掉」，而那条审批背后是一个
      * 正在等授权的任务。宁可多花 65536 个 id 也不用一个可能撞的方案。
      */
-    private fun questionId(eventId: String): Int =
-        QUESTION_ID_BASE + (eventId.hashCode() and ASK_ID_MASK)
+    private fun questionId(eventId: String): Int = questionNoticeId(eventId)
 
     /**
      * 发过通知、还没撤掉的那些请求，按 `eventId` 索引。
@@ -783,6 +782,16 @@ class NotificationCenter(
          */
         fun askNoticeId(eventId: String): Int =
             ASK_ID_BASE + (eventId.hashCode() and ASK_ID_MASK)
+
+        /**
+         * 提问通知 id 的纯函数版本。
+         *
+         * 与 [askNoticeId] 同一理由：`CapsuleActionIntents` 是 `object`、拿不到
+         * `NotificationCenter` 实例，但撤通知时要算出同一条 id。两处各写一份公式
+         * 就会漂移（R059 第一轮 P2-4 就是这么来的），所以只留这一份。
+         */
+        fun questionNoticeId(eventId: String): Int =
+            QUESTION_ID_BASE + (eventId.hashCode() and ASK_ID_MASK)
 
         const val ASK_ID_BASE = 20_000
 

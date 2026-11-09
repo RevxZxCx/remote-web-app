@@ -63,6 +63,10 @@ internal data class CapsuleState(
             phase == CapsulePhase.Failed -> "出错"
             phase == CapsulePhase.Done -> "已完成"
             // 多会话时把个数带上：+1 是因为 otherRunning 不含自己。
+            // 上限 9：状态栏标签 96dp 只保证 7 个字符不截断，而「执行中 12 个」
+            // 是 8 个 code point，会命中系统自己截、且截断位置不可控。
+            // 超过 9 个并发会话就写「执行中 9+ 个」（4+1+3 = 7 字），保持定长。
+            otherRunning >= 8 -> "执行中 9+ 个"
             otherRunning > 0 -> "执行中 ${otherRunning + 1} 个"
             progress != null -> "第 ${progress.safeDone} 步"
             else -> "执行中"
@@ -390,10 +394,16 @@ internal object CapsuleContent {
         action = firstQuestion?.takeIf { it.isNotBlank() }?.let { clip(it, ACTION_MAX_CHARS) },
         // 不写「问题 i / 共 n」：这个计数是**这道题在组里的序号**，而卡片上只放
         // 当前这一道，用户答完一道后服务端推来剩下几道，序号会重新从 1 开始——
-        // 真机上就出现过「已经答过一道，它还写问题 1」。写「本组共 N 道」只陈述
-        // 这一组的题数（`request.questions.size` 是服务端给的实数），不声称位置，
-        // 因此不会谎报。宁可少说也不编。
-        step = if (count > 1) "本组共 $count 道：选择一项即可" else "选择一项即可",
+        // 真机上就出现过「已经答过一道，它还写问题 1」。所以只陈述这一组还有
+        // 题（`count` 是服务端给的实数），不声称位置。
+        //
+        // 「答完会自动出现下一道」不仅是文案，是**实测行为**：点掉一道后服务端
+        // 推回剩下的题，卡片原地换成下一道的选项。写出来是为了让用户敢点。
+        step = if (count > 1) {
+            "本组共 $count 道，答完一道自动出现下一道"
+        } else {
+            "选择一项即可"
+        },
         progress = null,
         startedAt = startedAt,
         pending = PendingKind.Question,

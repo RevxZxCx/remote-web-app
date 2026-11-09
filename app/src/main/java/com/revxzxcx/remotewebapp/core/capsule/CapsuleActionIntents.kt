@@ -91,6 +91,9 @@ internal object CapsuleActionIntents {
             putExtra(NotificationCenter.EXTRA_CALL_ID, callId)
             putExtra(NotificationCenter.EXTRA_QUESTION_ID, questionId)
             putExtra(NotificationCenter.EXTRA_OPTION_LABEL, label)
+            // 宿主解析失败时接收器要靠它撤掉这条卡片。少了它 `getIntExtra` 落到 -1，
+            // 撤通知就成了空操作——用户面对一个永远没反应的按钮反复点。
+            putExtra(NotificationCenter.EXTRA_NOTICE_ID, NotificationCenter.questionNoticeId(eventId))
             setPackage(context.packageName)
         },
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,

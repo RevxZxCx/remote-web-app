@@ -347,7 +347,7 @@ class CapsuleContentTest {
         assertEquals("选哪个目录？", state.action)
         // 不写「问题 i / 共 n」：答掉一道后服务端推来剩下的，序号会重新从 1 开始，
         // 真机上出现过「已经答过一道，它还写问题 1」。只陈述本组题数，不声称位置。
-        assertEquals("本组共 3 道：选择一项即可", state.step)
+        assertEquals("本组共 3 道，答完一道自动出现下一道", state.step)
     }
 
     @Test

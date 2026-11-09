@@ -471,8 +471,16 @@ class AppContainer(context: Context) {
             // `QuestionRequest.capsuleCallId`），所以先剥前缀再比对 eventId，
             // 否则「有几个选项却找不到这个组」，失败原因会指错方向。
             val rawId = callId.removePrefix(com.revxzxcx.remotewebapp.core.events.RemoteEvents.WATERFALL_PREFIX)
+            // 四种写法都必须认，且**必须与 `RemoteEventsClient.answerQuestions`
+            // 里的条件逐条一致**。少认一种的后果不是「少匹配一次」，而是：
+            // 这里判 `waiting == null` 就直接报「已经不在等待回答了」，
+            // 而真正发请求的那一层其实能匹配上——用户看到一个假的失败原因，
+            // 且原本可以成功的回答被拦下。两处条件必须一起改（R059 第二轮 P2）。
             val waiting = client?.questions?.value?.firstOrNull {
-                it.callId == callId || it.eventId == rawId || it.eventId == callId
+                it.callId == callId ||
+                    it.callId == rawId ||
+                    it.eventId == rawId ||
+                    it.eventId == callId
             }
             val options = waiting?.questions?.firstOrNull { it.id == questionId }
                 ?.options.orEmpty()

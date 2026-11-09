@@ -73,9 +73,6 @@ data class NoticeStatus(
      * 以及**自己那个频道**没被关掉——胶囊本质仍是一条通知，频道被关掉后
      * `notify` 会被系统静默丢弃，而 AppOp 仍是 `allow`（R059 审查 P2-3）。
      */
-    val capsuleUsable: Boolean
-        get() = capsuleSupported && systemEnabled && permissionGranted &&
-            capsuleChannelEnabled && capsulePromoted
 }
 
 /**
