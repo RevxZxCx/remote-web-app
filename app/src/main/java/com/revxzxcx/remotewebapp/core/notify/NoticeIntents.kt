@@ -43,6 +43,36 @@ object NoticeIntents {
         _pendingSessionId.value = trimmed
     }
 
+    private val _pendingOpenSettings = MutableStateFlow(false)
+
+    /**
+     * 待打开「通知与后台保活」页；false 表示没有。
+     *
+     * 与会话信箱**分开两个流**：两者语义不同（一个是「去看那条会话」，一个是
+     * 「去改后台连接开关」），合成一个 `String?` 就会让「空串」这种值承担两种含义，
+     * `AppRoot` 里的判断也会变成「字符串非空就开会话」——而它根本不是会话 id。
+     *
+     * 用 `Boolean` 而不是 `Unit?` 的原因同 [pendingSessionId]：同一条通知连点两次时
+     * 值与上次相同、StateFlow 不发射，正好避免重复跳转。
+     */
+    val pendingOpenSettings: StateFlow<Boolean> = _pendingOpenSettings.asStateFlow()
+
+    /** 由 Activity 在 `onCreate` / `onNewIntent` 里调用。 */
+    fun offerSettings() {
+        _pendingOpenSettings.value = true
+    }
+
+    /**
+     * 取走「打开设置页」的意图。
+     *
+     * 消费即清，理由同 [consume]：这是一次性交接，留着会让下次重组又把用户弹进设置页。
+     */
+    fun consumeSettings(): Boolean {
+        val current = _pendingOpenSettings.value
+        _pendingOpenSettings.value = false
+        return current
+    }
+
     /**
      * 取走并清空。
      *
@@ -58,5 +88,6 @@ object NoticeIntents {
     /** 断开会话（退配对）时清空：这些 id 属于上一台主机，换台之后没有意义。 */
     fun clear() {
         _pendingSessionId.value = null
+        _pendingOpenSettings.value = false
     }
 }

@@ -81,5 +81,11 @@ class MainActivity : ComponentActivity() {
         if (intent == null) return
         if (intent.action != NotificationCenter.ACTION_VIEW) return
         NoticeIntents.offer(intent.getStringExtra(NotificationCenter.EXTRA_SESSION_ID))
+        // 另一个信箱：点「后台连接断了」那条要落到设置页（R057 / 用户 Q5 拍板）。
+        // 与会话 id 分开判断——两者可以同时存在（一条通知带 id、另一条带这个标记），
+        // 但绝不共用同一个键。
+        if (intent.getBooleanExtra(NotificationCenter.EXTRA_OPEN_SETTINGS, false)) {
+            NoticeIntents.offerSettings()
+        }
     }
 }

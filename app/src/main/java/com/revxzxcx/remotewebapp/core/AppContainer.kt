@@ -1,6 +1,7 @@
 package com.revxzxcx.remotewebapp.core
 
 import android.content.Context
+import android.util.Log
 import com.revxzxcx.remotewebapp.core.cache.CacheMappers
 import com.revxzxcx.remotewebapp.core.cache.DshCache
 import com.revxzxcx.remotewebapp.core.cache.DshDatabase
@@ -27,6 +28,11 @@ import com.revxzxcx.remotewebapp.core.pairing.PairingApi
 import com.revxzxcx.remotewebapp.core.pairing.PairingCoordinator
 import com.revxzxcx.remotewebapp.core.prefs.PresetPreferences
 import com.revxzxcx.remotewebapp.core.prefs.ThemePreferences
+import com.revxzxcx.remotewebapp.core.service.LinkServiceController
+import com.revxzxcx.remotewebapp.core.service.LinkServicePrefs
+import com.revxzxcx.remotewebapp.core.service.LinkServiceUi
+import com.revxzxcx.remotewebapp.core.service.ServicePreferences
+import com.revxzxcx.remotewebapp.core.service.ServiceStatus
 import com.revxzxcx.remotewebapp.core.protocol.DshJson
 import com.revxzxcx.remotewebapp.core.protocol.TypertException
 import com.revxzxcx.remotewebapp.core.session.ChatFrame
@@ -48,6 +54,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 应用级的连接状态。
@@ -167,6 +174,15 @@ class AppContainer(context: Context) {
     val noticeSettings: NoticeSettings = NoticeSettings(appContext)
 
     /**
+     * 后台连接相关偏好（R057）：三个开关按主机分开记。
+     *
+     * 与 [noticeSettings] 分开一个 SharedPreferences 文件，是因为两者的生命周期不同：
+     * 通知开关是全局的（一台手机一套），而后台连接开关是**按主机**的——用户完全可能
+     * 只希望某台常连的保持后台连接。
+     */
+    val servicePreferences: ServicePreferences = ServicePreferences(appContext)
+
+    /**
      * 系统通知的唯一出口（R056）。
      *
      * 只在这里建一个实例：`NotificationCenter` 内部持有「会话 → 通知 id」的池子
@@ -187,6 +203,25 @@ class AppContainer(context: Context) {
         settings = noticeSettings,
         names = SessionNameTable(),
         fetchLastTurn = { sessionId -> fetchLastTurnEnd(sessionId) },
+    )
+
+    /**
+     * 后台连接的编排层（R057）。
+     *
+     * 与 [notifier] 并列放在容器里，理由相同：常驻通知与「任务跑完的提醒」都必须活过
+     * 任何一个界面。区别是它还额外持有 [ServiceStatusTracker]——那个每秒推进的时长
+     * 只能有一份，多看几份（服务一份、设置页一份）就会各自从不同起点开始数。
+     *
+     * `hostKeyProvider` 传的是**函数**而不是当前 hostId：开关按主机分开记，而主机随时
+     * 会切换。存成固定值的话，换主机之后这个对象还在用旧 key 读写偏好，表现是
+     * 「新主机明明没开开关，却起了服务」。
+     */
+    val linkService: LinkServiceController = LinkServiceController(
+        context = appContext,
+        scope = appScope,
+        prefs = servicePreferences,
+        notificationCenter = notificationCenter,
+        hostKeyProvider = { linkStore.current().activeHost?.hostId ?: "" },
     )
 
     /**
@@ -226,6 +261,13 @@ class AppContainer(context: Context) {
             // 没有连接 = 不存在「正在重连」这回事，把判定器恢复成初始态。
             // 不复位的话，下次配对成功时会拿着上一台的断开计时立刻弹一条「连不上」。
             notifier.onCarrier(CarrierState.Idle, System.currentTimeMillis())
+            // 服务层的状态也要跟着退：**一台主机都没有了**，留一条「正在连接」的
+            // 常驻通知等于让用户一直等一个不会来的连接。
+            //
+            // 注意这里用的是 `onNoConnection` 而不是 `onCarrier(Idle)`（R057 审查 P2-1）：
+            // `Idle` 在换主机时也会出现，那条路径必须让服务活着等新连接，
+            // 详见 `ServiceStatusTracker.onCarrier` 的 Idle 分支与 `onNoConnection`。
+            linkService.onNoConnection()
             return
         }
         carrierJob = appScope.launch {
@@ -239,10 +281,15 @@ class AppContainer(context: Context) {
                     // 把 Connected 当成一次「连上了」而去补一遍账）。
                     if (last == null) {
                         last = carrier
+                        // 第一帧对通知层要跳过（见上），但对服务层不能跳过：
+                        // 常驻通知里那句「运行中 · 已连上桌面端 · 2 分钟」的起点
+                        // 就在这一帧里，跳过了它要等下一次状态变化才显示得出时长。
+                        linkService.onCarrier(carrier)
                         return@collect
                     }
                     last = carrier
                     notifier.onCarrier(carrier, System.currentTimeMillis())
+                    linkService.onCarrier(carrier)
                 }
         }
     }
@@ -314,7 +361,119 @@ class AppContainer(context: Context) {
         }
     }
 
-    /** 连接不在时给用户的说明；也用作各类传输失败的统一说辞。 */
+    /**
+     * 后台连接此刻的状态（R057）。
+     *
+     * 单一真相：常驻通知、设置页的状态行、「是否在跑」的判断全部读这一个流。
+     * 服务自己**不持有**状态，它只把 `linkService.status` 画出来。
+     */
+    val serviceStatus: kotlinx.coroutines.flow.StateFlow<ServiceStatus> get() = linkService.status
+
+    /**
+     * 偏好（三个开关 + 确认标记 + 失败原因）的第几版，**每次写盘都 +1**。
+     *
+     * 设置页拿它当重读信号（第四轮审查 P2）。用信号而不是把偏好本身做成 `StateFlow`：
+     * 设置页只在版本变化时同步读一次快照，不必为「偏好」再造一条每秒都可能被读的流。
+     */
+    val servicePrefsRevision: kotlinx.coroutines.flow.StateFlow<Int> get() = linkService.prefsRevision
+
+    /**
+     * 服务起来了（由 [ForegroundLinkService.onStartCommand] 调）。
+     *
+     * 委托给 [linkService]：清「本次已退出」、把状态推成「连接中」、开始每秒推进时长
+     * 这三件事必须成组发生，散落在服务里就会漏掉其中一件。
+     */
+    fun onServiceStarted() {
+        linkService.onStarted()
+    }
+
+    /** 服务停了（正常停止 / 用户点退出）。 */
+    fun onServiceStopped() {
+        linkService.onStopped()
+    }
+
+    /**
+     * 服务**意外**停了（启动失败 / 被系统判定无效）。
+     *
+     * 与 [onServiceStopped] 的区别在于要不要惊动用户：这里按「自动恢复」开关的
+     * 两个分支走（开着就静默拉起，关着才发通知），那条逻辑在
+     * [LinkServiceController.ensureRunning] 里，这里只负责重新判一次。
+     */
+    fun onServiceUnexpectedStop() {
+        linkService.onStopped()
+        linkService.ensureRunning()
+    }
+
+    /**
+     * 启动失败（`ForegroundServiceStartNotAllowedException` / `SecurityException` 等）。
+     *
+     * 记录原因，并按「这个失败用户能不能自己修」决定要不要把开关弹回去
+     * （通知没授权时不弹——那是可恢复的前置条件，见 [LinkServiceController.onStartFailed]）。
+     */
+    fun onServiceStartFailed(cause: Throwable) {
+        linkService.onStartFailed(cause)
+    }
+
+    /**
+     * 服务**此刻该不该存在**（由 [ForegroundLinkService.onStartCommand] 每次校验）。
+     *
+     * ## 为什么服务要回头问容器（R057 审查 P1-3）
+     *
+     * 返回 `START_STICKY` 等于告诉系统「这个服务值得在被杀之后重起」。但系统只记得
+     * 「它曾经值得」，不知道用户后来把「保持后台连接」关掉了。所以服务每次进来
+     * （包括系统替我们重起的那次）都必须重新问一遍，而不是信任自己是被正当拉起的。
+     *
+     * 判据**不含「本次已退出」**：退出只影响用户点它的那一次，系统重起属于新的一次启动
+     * （见 [ForegroundLinkService.onStartCommand] 的 KDoc）。
+     */
+    fun serviceWanted(): Boolean = linkService.wanted()
+
+    /** 设置页三个开关的写入入口（R057）；统一走控制器，避免调用点直接摸偏好。 */
+    fun setServiceForegroundEnabled(enabled: Boolean) = linkService.setForegroundEnabled(enabled)
+
+    fun setServiceAutoRecover(enabled: Boolean) = linkService.setAutoRecover(enabled)
+
+    fun setServiceBootStart(enabled: Boolean) = linkService.setBootStart(enabled)
+
+    fun markServiceConfirmSeen() = linkService.markConfirmSeen()
+
+    /**
+     * 只读三个开关 + 一次性确认标记，**不含每秒都在变的状态**（第三轮审查 P3-2）。
+     *
+     * ## 为什么要把「会变的」和「不变的」拆开
+     * 拆分之前是一个 `linkServiceUi()`：一次读完状态 + 6 个偏好，设置页拿
+     * `remember(serviceStatus, serviceUiEpoch)` 缓存它。`serviceStatus` 由
+     * [ServiceStatusTracker.tick] 每秒 `copy` 一次，于是用户停在设置页的每一秒
+     * 都会重建一次 UI 快照、做 **6 次 SharedPreferences 读取**
+     * （status / enabled / autoRecover / bootStart / confirmSeen / lastFailure）。
+     * 这些都是主线程上的同步磁盘读。
+     *
+     * 拆出来之后：状态走 `collectAsState`（本来就是每秒变），开关只在这个快照键变化时读，
+     * 而它的键是 `serviceUiEpoch`——只在用户拨开关时递增。拼装交给
+     * [LinkServicePrefs.withStatus]。
+     */
+    fun linkServicePrefs(): LinkServicePrefs = LinkServicePrefs(
+        enabled = linkService.foregroundEnabled(),
+        autoRecover = linkService.autoRecover(),
+        bootStart = linkService.bootStart(),
+        confirmSeen = linkService.confirmSeen(),
+        lastFailure = linkService.lastFailure(),
+    )
+
+    /** 开机广播问「要不要起服务」（由 [BootReceiver] 调）。 */
+    fun startServiceOnBoot(): Boolean = linkService.startOnBoot()
+
+    /**
+     * 用户在常驻通知里点了「退出」（R057）。
+     *
+     * 只是把意图转给 [linkService]：真正的三件事（置「本次已退出」、停服务、撤通知）
+     * 只有它同时知道该怎么做，散在这里会让状态与服务不同步。
+     */
+    fun exitLinkService() {
+        linkService.exitFromNotification()
+    }
+
+
     private val DISCONNECTED_HINT = "连接已断开，进 App 重试。"
 
     /** 把回答失败的原因翻成一句用户看得懂的话（通知栏里没有错误码的位置）。 */
@@ -376,12 +535,39 @@ class AppContainer(context: Context) {
     /**
      * 权限弹窗有了结果（R056）。
      *
-     * 只做一件事：如果拿到了，把频道补齐——首次安装时 `ensureChannels()` 在
-     * `bootstrap()` 里跑过，但那之后用户可能已经清掉了 App 数据里的通知设置，
-     * 系统里的 channel 也就跟着没了。再调一次是幂等的。
+     * 做两件事：
+     * 1. 如果拿到了，把频道补齐——首次安装时 `ensureChannels()` 在
+     *    `bootstrap()` 里跑过，但那之后用户可能已经清掉了 App 数据里的通知设置，
+     *    系统里的 channel 也就跟着没了。再调一次是幂等的。
+     * 2. **重试一次后台连接服务**（第五轮审查 P1）。
+     *
+     * ## 为什么第 2 件非做不可
+     * Android 13+ 新装默认没有 `POST_NOTIFICATIONS`。用户首次打开「保持后台连接」时
+     * `startService()` 因为 `noticeUsable()` 为假直接失败，而 `startFailurePolicy`
+     * 对这种情况明确「不关开关、不挡重试」——开关亮着、服务没起来，是**正确**的中间态：
+     * 用户去授权就能好。但「能好」得有代码把它变好：`ensureRunning()` 原来只有
+     * 载波变化和意外停止两个调用点，而连接稳定之后不会再产生新载波帧，
+     * 于是用户授权回来，服务永远起不来，设置页长期停在「开但未运行」。
+     * 那正是用户第 1 条约束「通知必须如实写状态」要否定的东西。
+     *
+     * 放在这里而不是监听系统设置：这个回调是我们**确知**用户刚刚给了权限的时刻，
+     * 比轮询或猜时机可靠。
      */
     fun onNoticePermissionResult(granted: Boolean) {
-        if (granted) notificationCenter.ensureChannels()
+        if (!granted) return
+        notificationCenter.ensureChannels()
+        linkService.ensureRunning()
+    }
+
+    /**
+     * App 回到前台（由 [DshApplication] 的生命周期观察者转发）。
+     *
+     * 同样补一次 [LinkServiceController.ensureRunning]：用户很可能是**离开 App 去系统设置
+     * 里开通知权限**，回来时不会有任何权限回调（那个回调只在弹窗路径上有）。
+     * 连接在这段时间里是稳定的，载波不会产生新帧，所以不补这一次就永远补不上。
+     */
+    fun onAppForeground() {
+        linkService.ensureRunning()
     }
 
     /**
@@ -436,6 +622,41 @@ class AppContainer(context: Context) {
     /** 当前连接（非响应式读；仅供容器内部与不关心重组的调用方）。 */
     private val connection: DshConnection?
         get() = linkStore.current().connection
+
+    /**
+     * 进程级 bootstrap：**保证只跑一次**，谁先要谁触发。
+     *
+     * ## 为什么不能只由 UI 触发（R057 审查 P1）
+     *
+     * [bootstrap] 原先只在 `AppRoot` 的 `LaunchedEffect(Unit)` 里调。那条路径在
+     * 「用户打开 App」时成立，但 R057 的两个场景**根本不会打开 App**：
+     *
+     * 1. 开机自启：[BootReceiver] 直接起服务，Activity 从未创建；
+     * 2. `START_STICKY` 重启：系统拉起服务，同样不经过 UI。
+     *
+     * 这两种情况下没人建连接，`watchCarrier` 不跑，`linkService.onCarrier` 永远收不到帧，
+     * 状态钉在 [ServicePhase.Connecting]——常驻通知写着「正在连接桌面端」写一整夜，
+     * 时长永不出现。用户 Q1「状态如实写」在这里是直接违反的，而且是最糟的一种：
+     * 唯一的后台入口看起来在工作，实际上从来没连过。
+     *
+     * 所以触发点必须**与进程同寿**，由最早的那个发起者（Application 或服务）拉起。
+     * 用 `AtomicBoolean` 而不是 `@Volatile` 布尔：两个入口可能真的并发进来
+     * （服务 `onStartCommand` 跑在主线程，`Application.onCreate` 之后紧接着就可能来），
+     * 只有 CAS 才能保证 `installConnection` 不被跑两遍——跑两遍会建出两条连接，
+     * 而审批 waterfall 只允许一条（见 [ForegroundLinkService] 的 KDoc）。
+     *
+     * 幂等：第二次之后直接返回。失败也不抛给调用方——bootstrap 失败等于「没有可用主机」，
+     * 那是 [AppState.Unpaired] 的正常一相，不该让开机流程崩掉。
+     */
+    fun bootstrapOnce() {
+        if (!bootstrapped.compareAndSet(false, true)) return
+        appScope.launch {
+            runCatching { bootstrap() }.onFailure { Log.w(TAG, "bootstrap 失败", it) }
+        }
+    }
+
+    /** [bootstrapOnce] 的闸门。见它的 KDoc：必须 CAS，不能只是 if 判读。 */
+    private val bootstrapped = AtomicBoolean(false)
 
     /** 冷启动：把落盘的凭证簿读回来。解不开 / 不存在都按未配对处理。 */
     suspend fun bootstrap() {
@@ -638,6 +859,39 @@ class AppContainer(context: Context) {
      * 单测里直接断言，而本方法要真建 [DshConnection]，测不了。编排留在测不到的地方，
      * 改回错误写法单测依然全绿是有前科的（M57 复审 P1）。
      */
+    /**
+     * 把「当前活动主机」记进 [ServicePreferences]（第三轮审查 P1-1 的另一半）。
+     *
+     * ## 为什么必须落盘一份
+     * [LinkServiceController.hostKey] 读的是 `linkStore.current().activeHost?.hostId`，
+     * 而 `linkStore` 要等 `bootstrapOnce()` 在 **IO 线程**跑完 `bootstrap()` →
+     * `installConnection` → 本方法所在的发布点，才有第一台主机。
+     *
+     * 开机那条路径上这两件事是**并发**的：`Application.onCreate` 里
+     * `container.bootstrapOnce()` 只是 `appScope.launch`（异步），紧接着
+     * `BootReceiver.onReceive` 在主线程问 `startServiceOnBoot()`。那一刻 hostKey 还是空串，
+     * `ServicePreferences.key()` 落到 `NO_HOST`（"none"）后缀，读到的是三个默认值——
+     * `foregroundEnabled=false`，于是 [shouldStartOnBoot] 恒 false。
+     * **「开机自启」整条链路是死的**，而不只是少一个按钮。
+     *
+     * 同一个空窗口也命中 `wanted()`：系统 `START_STICKY` 重启服务时判 false，
+     * 服务当场被停——「被杀后自动恢复」同样不成立。
+     *
+     * 所以每次发布活动主机就把 hostId 落一份；`Controller.hostKey` 在拿到空串时
+     * 回退读它。凭证簿仍然**不做**同步读（[CredentialStore] 全是 suspend 方法，
+     * 加一个非 suspend 入口会让主线程读盘）。
+     *
+     * 簿里一台可用主机都没有时清掉：留着旧值会让「退配对之后开机还想连」复活。
+     */
+    private fun rememberServiceHost(book: CredentialBook) {
+        val hostId = book.active?.hostId
+        if (hostId.isNullOrBlank()) {
+            servicePreferences.clearLastHostKey()
+        } else {
+            servicePreferences.setLastHostKey(hostId)
+        }
+    }
+
     private suspend fun installConnection(book: CredentialBook) {
         when (val plan = planFor(linkStore.current().connection, book)) {
             is ConnectionPlan.Reuse -> {
@@ -651,6 +905,7 @@ class AppContainer(context: Context) {
                 plan.connection.updateCredential(plan.credential)
                 // 复用 = 同一个连接实例，`publish` 据此保持代次不变（不会重建整组 ViewModel）。
                 linkStore.publish(book = book, connection = plan.connection)
+                rememberServiceHost(book)
                 _state.value = AppState.Paired
                 // 通知订阅跟着连接走。复用分支里 `attach` 收到的是同一个实例，
                 // 它会立刻返回（不改订阅）——配置变更重跑 bootstrap 时不会重复订一遍。
@@ -664,6 +919,7 @@ class AppContainer(context: Context) {
                 // 避免观察者在中间读到一条已经关掉的连接。
                 val previous = linkStore.current().connection
                 linkStore.publish(book = book, connection = null)
+                rememberServiceHost(book)
                 _state.value = AppState.Unpaired
                 // 先退订再关连接：反过来的话，`RemoteEventsClient` 已经随连接一起死了，
                 // 协调器手里那个引用指向一条不再发事件的流，重连后也不会自己好。
@@ -724,6 +980,7 @@ class AppContainer(context: Context) {
         // B004 的关键一行：新簿与新连接在**同一次**赋值里换掉。放到这里（而不是更早）是因为
         // 上面每个挂起点之后都不该让观察者看到半新半旧的一份。
         linkStore.publish(book = book, connection = rebuilt)
+        rememberServiceHost(book)
         _state.value = AppState.Paired
 
         // 新连接已经对外可见，这时才轮到释放旧的（见方法开头）。放在这里也顺带保证：
@@ -761,5 +1018,7 @@ class AppContainer(context: Context) {
          * `session/list`。4 台覆盖「公司 + 家里 + 笔记本 + 备用」这类常见组合。
          */
         private const val MAX_CACHED_OWNERS: Int = 4
+
+        private const val TAG: String = "AppContainer"
     }
 }

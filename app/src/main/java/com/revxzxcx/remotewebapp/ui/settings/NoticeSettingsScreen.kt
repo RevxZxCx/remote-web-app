@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,8 +28,12 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -62,6 +67,12 @@ import com.revxzxcx.remotewebapp.core.notify.OemGuideSteps
 import com.revxzxcx.remotewebapp.core.notify.noticeStatusDetail
 import com.revxzxcx.remotewebapp.core.notify.shouldGuideToSystemSettings
 import com.revxzxcx.remotewebapp.core.notify.shouldRequestPermission
+import com.revxzxcx.remotewebapp.core.service.LinkServiceUi
+import com.revxzxcx.remotewebapp.core.service.ServicePhase
+import com.revxzxcx.remotewebapp.core.service.ServiceText
+import com.revxzxcx.remotewebapp.core.service.autoRecoverDetail
+import com.revxzxcx.remotewebapp.core.service.bootStartDetail
+import com.revxzxcx.remotewebapp.core.service.keepAliveDetail
 import com.revxzxcx.remotewebapp.ui.common.AppIconButton
 import com.revxzxcx.remotewebapp.ui.theme.groupShape
 
@@ -102,6 +113,17 @@ fun NoticeSettingsScreen(
     onPermissionAsked: () -> Unit,
     onPermissionResult: (Boolean) -> Unit,
     onOpenSystemSettings: () -> Unit,
+    /**
+     * 「后台连接」那一段的全部数据（R057）。
+     *
+     * 打成单个对象而不是拆成六个参数：这六个字段永远一起出现（开关读偏好、状态读
+     * `ServiceStatus`），拆开之后调用点会有六行几乎同名的实参，改起来极易错位。
+     */
+    linkService: LinkServiceUi = LinkServiceUi(),
+    onToggleKeepAlive: (Boolean) -> Unit = {},
+    onToggleAutoRecover: (Boolean) -> Unit = {},
+    onToggleBootStart: (Boolean) -> Unit = {},
+    onConfirmSeen: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -115,6 +137,48 @@ fun NoticeSettingsScreen(
     var problemDismissed by remember { mutableStateOf(false) }
     LaunchedEffect(status.anyUsable) {
         if (status.anyUsable) problemDismissed = false
+    }
+
+    // 首次打开「保持后台连接」时的确认框（R057 原型第 4 节最后一屏）。
+    //
+    // 为什么要拦一下：这一项会在通知栏里多一条**常驻且不响**的通知，是 Android 对
+    // 前台服务的硬性要求。用户拨开关时看到的只是一行中文，不解释就去关它，
+    // 关掉的其实是「后台连接」本身。只问一次：`confirmSeen` 记在偏好里。
+    var askConfirm by remember { mutableStateOf(false) }
+    if (askConfirm) {
+        AlertDialog(
+            onDismissRequest = { askConfirm = false },
+            shape = RoundedCornerShape(28.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = {
+                Text(
+                    text = "会多一条常驻通知",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            },
+            text = {
+                Text(
+                    text = "为了退到后台也不断开，系统要求必须显示一条不会响的常驻通知。" +
+                        "耗电会略增。任务跑完、要你确认时仍然照常提醒。",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        askConfirm = false
+                        // 先记账再开：中途被杀也不该再问一次。
+                        onConfirmSeen()
+                        onToggleKeepAlive(true)
+                    },
+                ) { Text("打开") }
+            },
+            dismissButton = {
+                TextButton(onClick = { askConfirm = false }) { Text("算了") }
+            },
+        )
     }
 
     Scaffold(
@@ -233,6 +297,55 @@ fun NoticeSettingsScreen(
                     onCheckedChange = onToggleLockScreenDetail,
                 )
             }
+
+            SectionLabel("后台连接")
+
+            CardGroup {
+                SwitchRow(
+                    // 没有 Link 图标可用（只依赖 material-icons-core），Settings 是齿轮，
+                    // 读作「系统层面在后台有东西跑」，比 Info 贴切。
+                    icon = Icons.Default.Settings,
+                    title = "保持后台连接",
+                    detail = keepAliveDetail(linkService),
+                    checked = linkService.enabled,
+                    // 首次打开先问一句（原型第 4 节最后一屏）；问过之后直连。
+                    onCheckedChange = { enabled ->
+                        if (enabled && !linkService.confirmSeen) askConfirm = true else onToggleKeepAlive(enabled)
+                    },
+                )
+                // 状态行只在开关打开时出现：关着的时候「未运行」是废话，
+                // 反而会让用户以为坏了。
+                if (linkService.enabled) {
+                    RowDivider()
+                    LinkStatusRow(ui = linkService)
+                }
+                RowDivider()
+                SwitchRow(
+                    icon = Icons.Default.Refresh,
+                    title = "服务停了自动恢复",
+                    detail = if (linkService.enabled) autoRecoverDetail(linkService) else "需要先打开上一项",
+                    checked = linkService.autoRecover,
+                    enabled = linkService.enabled,
+                    onCheckedChange = onToggleAutoRecover,
+                )
+                RowDivider()
+                SwitchRow(
+                    icon = Icons.Default.PlayArrow,
+                    title = "开机后自动连接",
+                    detail = if (linkService.enabled) bootStartDetail() else "需要先打开上一项",
+                    checked = linkService.bootStart,
+                    enabled = linkService.enabled,
+                    onCheckedChange = onToggleBootStart,
+                )
+            }
+
+            Text(
+                text = "说明：这是 Android 的前台服务。它让系统知道「这个 App 正在后台维持连接」，" +
+                    "从而不容易被冻结或回收——但**不是免死金牌**。一加 / ColorOS 上仍需要下面的手动设置。",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 2.dp, bottom = 12.dp),
+            )
 
             SectionLabel("后台保活")
 
@@ -400,6 +513,10 @@ private fun GuideStepRow(index: Int, title: String, detail: String) {
 /**
  * 开关行：与设置主页的 [SettingRow] 同一套几何（26dp 图标块 + 13sp 标题 + 11sp 说明），
  * 右侧换成 Switch。**整行可点**——只让 Switch 可点会让一半的用户点在这行文字上没反应。
+ *
+ * @param enabled false 时整行置灰且不可点（R057 的「需要先打开上一项」）。
+ *   不能只把 `Switch` 置灰而留着整行可点：那样点文字仍会翻转一个被禁用的开关，
+ *   界面与偏好就对不上了。
  */
 @Composable
 private fun SwitchRow(
@@ -408,11 +525,13 @@ private fun SwitchRow(
     detail: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    enabled: Boolean = true,
 ) {
+    val alpha = if (enabled) 1f else 0.45f
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(role = Role.Switch) { onCheckedChange(!checked) }
+            .clickable(role = Role.Switch, enabled = enabled) { onCheckedChange(!checked) }
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -420,7 +539,7 @@ private fun SwitchRow(
             modifier = Modifier
                 .size(26.dp)
                 .background(
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f * alpha),
                     shape = RoundedCornerShape(8.dp),
                 ),
             contentAlignment = Alignment.Center,
@@ -429,7 +548,7 @@ private fun SwitchRow(
                 imageVector = icon,
                 contentDescription = null,
                 modifier = Modifier.size(15.dp),
-                tint = MaterialTheme.colorScheme.primary,
+                tint = MaterialTheme.colorScheme.primary.copy(alpha = alpha),
             )
         }
         Spacer(Modifier.width(12.dp))
@@ -438,17 +557,67 @@ private fun SwitchRow(
                 text = title,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
             )
             Text(
                 text = detail,
                 fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha),
                 modifier = Modifier.padding(top = 1.dp),
             )
         }
         Spacer(Modifier.width(8.dp))
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
+    }
+}
+
+/**
+ * 后台连接的状态行（R057 原型第 4 节中间那屏）。
+ *
+ * 只读：这一行不是开关，是**事实**。文案全部来自 [ServiceText.statusLine]，
+ * 与服务常驻通知同源——两处读同一个 `ServiceStatus`、用同一个格式化函数，
+ * 才不会出现「通知栏说已连接 2 分钟、设置页说正在重连」这种自相矛盾。
+ *
+ * 左侧色条按相变色：连着是主色，重连/需配对是警示色。**不画绿点**：
+ * 「运行中」不等于「能用」，绿色会被读成「一切正常」，而 [ServicePhase.Reconnecting]
+ * 这一相恰恰是「服务在跑但此刻收不到通知」。
+ */
+@Composable
+private fun LinkStatusRow(ui: LinkServiceUi) {
+    val phase = ui.status.phase
+    val accent = when (phase) {
+        ServicePhase.Connected -> MaterialTheme.colorScheme.primary
+        ServicePhase.Reconnecting, ServicePhase.Unpaired -> MaterialTheme.colorScheme.error
+        ServicePhase.Connecting, ServicePhase.Stopped -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .width(3.dp)
+                .height(26.dp)
+                .background(accent, RoundedCornerShape(2.dp)),
+        )
+        Spacer(Modifier.width(11.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = ServiceText.statusLine(ui.status),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            if (ui.lastFailure.isNotBlank()) {
+                Text(
+                    text = "上次启动失败：${ui.lastFailure}",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 1.dp),
+                )
+            }
+        }
     }
 }
 

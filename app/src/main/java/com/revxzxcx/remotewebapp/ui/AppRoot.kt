@@ -327,8 +327,9 @@ fun AppRoot(container: AppContainer) {
     var pendingRemoveHost by remember { mutableStateOf<DeviceCredential?>(null) }
 
     LaunchedEffect(Unit) {
-        // 幂等：重复调用只是重读一次凭证。
-        container.bootstrap()
+        // 幂等：`DshApplication.onCreate` 已经先跑过一次，这里只是兜住
+        // 「Application 那次失败了 / 被跳过了」的极端情况。重复调用只是重读一次凭证。
+        container.bootstrapOnce()
     }
 
     // `imePadding()` 是**必需的**（用户 m21177 附加反馈）：MainActivity 调了
@@ -443,6 +444,22 @@ fun AppRoot(container: AppContainer) {
                     // 键是 `noticeTarget` 这个可空字符串：它是 `StateFlow.collectAsState()`
                     // 出来的值，变化才会重跑（直接用 flow 当键只会在首次组合时跑一次）。
                     val noticeTarget by NoticeIntents.pendingSessionId.collectAsState()
+                    // R057 / Q5：用户点的是「后台连接断了」那条通知，落点必须是
+                    // 设置 →「通知与后台保活」页（后台连接段就在这一页里），
+                    // 而不是那条会话——会话里没有任何东西能让他把它连回去。
+                    val noticeWantsSettings by NoticeIntents.pendingOpenSettings.collectAsState()
+                    LaunchedEffect(noticeWantsSettings) {
+                        if (!noticeWantsSettings) return@LaunchedEffect
+                        // 消费即清：`offerSettings()` 只会把 false→true 推一次，
+                        // 但 Activity 重建后这个值还是 true，不清就会每次进来都跳设置页。
+                        NoticeIntents.consumeSettings()
+                        openSession = null
+                        openFile = null
+                        newSessionOpen = false
+                        openDebug = false
+                        openNoticeSettings = true
+                        resetSidebar()
+                    }
                     // R056 / Q3：上次进程是不是被系统杀掉的。null 表示「这次不用提示」。
                     // 一次性：只要有值就会渲染卡片，用户点掉后 `consume()` 置回 null。
                     val deathNotice by container.deathWatcher.pending.collectAsState()
@@ -597,6 +614,25 @@ fun AppRoot(container: AppContainer) {
                             LaunchedEffect(openNoticeSettings) {
                                 noticeStatus = container.noticeStatus()
                             }
+                            // 后台连接那段的数据（R057）。服务状态每秒都在变（时长在走），
+                            // 所以必须 `collectAsState` 订阅，不能只在进页面时读一次快照。
+                            val serviceStatus by container.serviceStatus.collectAsState()
+                            // 三个开关 + 确认标记是**偏好**，不是每秒都在变的状态（审查 P3-2），
+                            // 所以它们不能和 `serviceStatus` 挤在同一个 `remember` key 里——
+                            // 那样停在设置页的每一秒都会重读 5 次 SharedPreferences
+                            // （同步磁盘读，跑在主线程），而那一秒唯一变的东西只有时长。
+                            //
+                            // 但也不能只由用户回调驱动（第四轮审查 P2）：启动失败时
+                            // `onStartFailed` 会自己关掉开关并写入失败原因，那是后台触发的。
+                            // 所以订阅 `servicePrefsRevision`——它由控制器里所有写盘路径
+                            // 统一递增，任何来源的偏好变化都能让这里重读。
+                            val prefsRevision by container.servicePrefsRevision.collectAsState()
+                            val servicePrefs = remember(prefsRevision) {
+                                container.linkServicePrefs()
+                            }
+                            val linkUi = remember(servicePrefs, serviceStatus) {
+                                servicePrefs.withStatus(serviceStatus)
+                            }
                             ScreenTransition(route = "notice-settings") {
                                 NoticeSettingsScreen(
                                     status = noticeStatus,
@@ -620,6 +656,22 @@ fun AppRoot(container: AppContainer) {
                                         noticeStatus = container.noticeStatus()
                                     },
                                     onOpenSystemSettings = { uiContext.openNoticeSystemSettings() },
+                                    linkService = linkUi,
+                                    // 这四处不再需要手动递增任何计数：写盘路径统一经
+                                    // `writePrefs`，`servicePrefsRevision` 会自己推高，
+                                    // 上面那个 `remember(prefsRevision)` 随之重读。
+                                    onToggleKeepAlive = { enabled ->
+                                        container.setServiceForegroundEnabled(enabled)
+                                    },
+                                    onToggleAutoRecover = { enabled ->
+                                        container.setServiceAutoRecover(enabled)
+                                    },
+                                    onToggleBootStart = { enabled ->
+                                        container.setServiceBootStart(enabled)
+                                    },
+                                    onConfirmSeen = {
+                                        container.markServiceConfirmSeen()
+                                    },
                                 )
                             }
                         }

@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>R057 效果图 · 前台服务（specialUse 保活 + 自动恢复 + 开机自启）</title>
+<style>
+:root{
+  --primary:#5AA2FF; --onPrimary:#04121F;
+  --background:#0B1420; --onBackground:#E6EFFA;
+  --surface:#111C2B; --onSurface:#E6EFFA;
+  --surfaceVariant:#1A2942; --onSurfaceVariant:#9BB0C8;
+  --outline:#31485F; --outlineVariant:#22334A;
+  --tertiary:#F2C14E; --running:#4ADE80; --error:#FF8A80;
+  --r-xs:6px; --r-sm:10px; --r-md:14px; --r-lg:20px; --r-xl:28px; --r-pill:999px;
+  --t-fast:140ms; --t-med:240ms; --t-slow:360ms;
+  --ease:cubic-bezier(.2,0,0,1);
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#060B12;color:var(--onBackground);
+  font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:13px;line-height:1.6;padding:28px 24px 80px}
+.wrap{max-width:1640px;margin:0 auto}
+h1{font-size:19px;font-weight:600;letter-spacing:.2px}
+.sub{color:var(--onSurfaceVariant);font-size:12px;margin-top:6px;line-height:1.8}
+.sub code{font-family:var(--mono);font-size:11px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+section{margin-top:40px}
+h2{font-size:14px;font-weight:600;color:var(--primary);display:flex;align-items:center;gap:8px}
+h2 .n{width:20px;height:20px;border-radius:50%;background:rgba(90,162,255,.14);
+  border:1px solid rgba(90,162,255,.4);font-size:11px;display:flex;
+  align-items:center;justify-content:center;color:var(--primary);flex:0 0 20px}
+.note{color:var(--onSurfaceVariant);font-size:11.5px;line-height:1.85;margin-top:8px}
+.note b{color:var(--onSurface);font-weight:600}
+.note code{font-family:var(--mono);font-size:10.5px;background:var(--surfaceVariant);
+  padding:1px 5px;border-radius:3px;color:var(--primary)}
+.row{display:flex;gap:26px;align-items:flex-start;flex-wrap:wrap;margin-top:16px}
+.warnbox{background:rgba(255,138,128,.08);border-left:2px solid rgba(255,138,128,.55);
+  padding:9px 12px;border-radius:0 var(--r-sm) var(--r-sm) 0;margin-top:10px;
+  font-size:11.5px;line-height:1.85;color:var(--onSurfaceVariant)}
+.warnbox b{color:var(--error);font-weight:600}
+.okbox{background:rgba(74,222,128,.07);border-left:2px solid rgba(74,222,128,.5);
+  padding:9px 12px;border-radius:0 var(--r-sm) var(--r-sm) 0;margin-top:10px;
+  font-size:11.5px;line-height:1.85;color:var(--onSurfaceVariant)}
+.okbox b{color:var(--running);font-weight:600}
+.tipbox{background:rgba(90,162,255,.07);border-left:2px solid rgba(90,162,255,.5);
+  padding:9px 12px;border-radius:0 var(--r-sm) var(--r-sm) 0;margin-top:10px;
+  font-size:11.5px;line-height:1.85;color:var(--onSurfaceVariant)}
+.tipbox b{color:var(--primary);font-weight:600}
+
+/* ── 手机外壳 ─────────────────────────────────────────── */
+.phone{width:360px;flex:0 0 360px;background:var(--background);
+  border-radius:22px;border:1px solid var(--outlineVariant);
+  overflow:hidden;box-shadow:0 22px 60px rgba(0,0,0,.6);
+  display:flex;flex-direction:column;height:640px;position:relative}
+.cap{font-size:10.5px;color:var(--onSurfaceVariant);margin-top:7px;text-align:center;
+  width:360px;flex:0 0 360px;line-height:1.6}
+.cap b{color:var(--primary);font-weight:600}
+.status{height:26px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 13px;font-size:9.5px;color:var(--onSurfaceVariant);letter-spacing:.3px;flex:0 0 auto;z-index:3}
+
+/* ── 通知栏 ───────────────────────────────────────────── */
+.shade{flex:1;display:flex;flex-direction:column;padding:4px 10px 10px;gap:7px;
+  overflow:hidden;background:linear-gradient(180deg,rgba(26,41,66,.5),transparent 70%)}
+.shade-head{display:flex;justify-content:space-between;align-items:center;
+  font-size:10px;color:var(--onSurfaceVariant);padding:0 3px 2px}
+.notif{background:var(--surface);border:1px solid var(--outlineVariant);
+  border-radius:var(--r-md);padding:8px 10px 9px;box-shadow:0 6px 18px rgba(0,0,0,.4)}
+.nhead{display:flex;align-items:center;gap:5px;font-size:9px;color:var(--onSurfaceVariant)}
+.nicon{width:14px;height:14px;border-radius:4px;display:flex;align-items:center;
+  justify-content:center;font-size:8px;background:rgba(90,162,255,.18);color:var(--primary);flex:0 0 14px}
+.nicon.ask{background:rgba(242,193,78,.18);color:var(--tertiary)}
+.nicon.bad{background:rgba(255,138,128,.18);color:var(--error)}
+.nhead .sp{flex:1}
+.ntitle{font-size:11.5px;font-weight:600;margin-top:4px;line-height:1.5;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nbody{font-size:10px;color:var(--onSurfaceVariant);margin-top:2px;line-height:1.7}
+.nacts{display:flex;gap:5px;margin-top:7px}
+.nact{font-size:9.5px;padding:4px 10px;border-radius:var(--r-sm);
+  background:rgba(90,162,255,.14);color:var(--primary);border:1px solid rgba(90,162,255,.3)}
+.nact.dgr{background:rgba(255,138,128,.1);color:#FF8A80;border-color:rgba(255,138,128,.3)}
+.nexpand{font-size:9px;color:var(--onSurfaceVariant);margin-top:5px}
+.notif.ongoing{border-color:rgba(90,162,255,.35);background:rgba(90,162,255,.06)}
+.notif.ongoing.warn{border-color:rgba(242,193,78,.4);background:rgba(242,193,78,.06)}
+.notif.mini{background:transparent;border:none;box-shadow:none;padding:6px 10px}
+.notif.mini .ntitle{font-weight:500;color:var(--onSurfaceVariant);font-size:10.5px}
+.chev-exp{display:inline-block;font-size:8px;color:var(--primary);margin-left:3px}
+
+/* ── 设置页 ───────────────────────────────────────────── */
+.topbar{height:50px;display:flex;align-items:center;gap:4px;padding:0 6px 0 4px;
+  border-bottom:1px solid var(--outlineVariant);flex:0 0 auto;z-index:2}
+.tb-btn{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;color:var(--onSurface);font-size:15px;flex:0 0 34px}
+.tb-mid{flex:1;min-width:0;padding:0 4px}
+.tb-t1{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb-t2{font-size:9px;color:var(--onSurfaceVariant);margin-top:1px}
+.body-scroll{flex:1;overflow:hidden;padding:8px 14px 14px;display:flex;flex-direction:column;gap:8px}
+.seclbl{font-size:9px;letter-spacing:.7px;color:var(--primary);font-weight:600;
+  margin:8px 2px -2px}
+.cardgrp{background:var(--surface);border:1px solid var(--outlineVariant);
+  border-radius:var(--r-md);overflow:hidden}
+.srow{display:flex;align-items:center;gap:10px;padding:10px 12px;min-height:46px}
+.srow+.srow{border-top:1px solid var(--outlineVariant)}
+.srow .st{flex:1;min-width:0}
+.st1{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.st2{font-size:9.5px;color:var(--onSurfaceVariant);margin-top:1px;line-height:1.5}
+.sw{width:34px;height:20px;border-radius:var(--r-pill);background:var(--surfaceVariant);
+  border:1px solid var(--outline);position:relative;flex:0 0 34px}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;
+  border-radius:50%;background:var(--onSurfaceVariant);transition:all var(--t-fast)}
+.sw.on{background:rgba(90,162,255,.28);border-color:rgba(90,162,255,.6)}
+.sw.on::after{left:16px;background:var(--primary)}
+.sw.off-dim{opacity:.45}
+.chev{font-size:9px;color:var(--onSurfaceVariant);flex:0 0 auto}
+.banner{display:flex;gap:8px;align-items:flex-start;padding:9px 11px;
+  border-radius:var(--r-sm);font-size:10px;line-height:1.7;
+  background:rgba(242,193,78,.08);border:1px solid rgba(242,193,78,.28);color:var(--onSurfaceVariant)}
+.banner b{color:var(--tertiary);font-weight:600}
+.banner.err{background:rgba(255,138,128,.08);border-color:rgba(255,138,128,.28)}
+.banner.err b{color:var(--error)}
+.banner.ok{background:rgba(74,222,128,.07);border-color:rgba(74,222,128,.26)}
+.banner.ok b{color:var(--running)}
+
+/* ── 状态卡 ───────────────────────────────────────────── */
+.statecard{background:var(--surface);border:1px solid var(--outlineVariant);
+  border-radius:var(--r-md);padding:11px 12px;margin-top:8px}
+.statecard .h{display:flex;align-items:center;gap:7px;font-size:11.5px;font-weight:600}
+.dot{width:7px;height:7px;border-radius:50%;flex:0 0 7px}
+.dot.on{background:var(--running);box-shadow:0 0 0 3px rgba(74,222,128,.16)}
+.dot.off{background:var(--onSurfaceVariant)}
+.dot.warn{background:var(--tertiary);box-shadow:0 0 0 3px rgba(242,193,78,.16)}
+.statecard .b{font-size:9.5px;color:var(--onSurfaceVariant);line-height:1.7;margin-top:5px}
+
+/* ── 弹窗 ─────────────────────────────────────────────── */
+.sheet{background:var(--surface);border:1px solid var(--outline);border-radius:var(--r-xl);
+  box-shadow:0 26px 64px rgba(0,0,0,.7);padding:16px 16px 10px;width:296px}
+.sheet .h{display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600}
+.sheet .h .i{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;font-size:13px;background:rgba(90,162,255,.16);color:var(--primary)}
+.sheet .b{font-size:11px;color:var(--onSurfaceVariant);line-height:1.85;margin-top:9px}
+.sheet .b b{color:var(--onSurface);font-weight:600}
+.sheet .b ul{margin:7px 0 0 15px}
+.sheet .b li{margin-top:4px}
+.sheet .f{display:flex;justify-content:flex-end;gap:4px;margin-top:12px}
+.btn{font-size:12px;padding:7px 13px;border-radius:var(--r-sm);color:var(--primary)}
+.scrim{position:absolute;inset:0;background:rgba(4,8,14,.6);z-index:4;
+  display:flex;align-items:center;justify-content:center}
+
+/* ── 表格 ─────────────────────────────────────────────── */
+table.t{width:100%;border-collapse:collapse;margin-top:12px;font-size:11.5px}
+table.t th{text-align:left;padding:8px 10px;background:var(--surfaceVariant);
+  color:var(--onSurface);font-size:10.5px;font-weight:600;
+  border-bottom:1px solid var(--outlineVariant)}
+table.t td{padding:8px 10px;border-bottom:1px solid var(--outlineVariant);
+  color:var(--onSurfaceVariant);line-height:1.75;vertical-align:top}
+table.t td b{color:var(--onSurface);font-weight:600}
+table.t td code{font-family:var(--mono);font-size:10px;background:var(--surfaceVariant);
+  padding:1px 4px;border-radius:3px;color:var(--primary)}
+table.t tr:last-child td{border-bottom:none}
+.badge2{display:inline-block;font-size:9px;padding:1px 6px;border-radius:var(--r-pill);
+  background:rgba(90,162,255,.14);color:var(--primary);border:1px solid rgba(90,162,255,.32);
+  white-space:nowrap}
+.badge2.ok{background:rgba(74,222,128,.12);color:var(--running);border-color:rgba(74,222,128,.34)}
+.badge2.warn{background:rgba(242,193,78,.12);color:var(--tertiary);border-color:rgba(242,193,78,.32)}
+.badge2.bad{background:rgba(255,138,128,.12);color:var(--error);border-color:rgba(255,138,128,.32)}
+
+/* ── 决策块 ───────────────────────────────────────────── */
+.q{background:var(--surface);border:1px solid var(--outlineVariant);border-radius:var(--r-md);
+  padding:12px 14px;margin-top:10px}
+.q .qt{font-size:12px;font-weight:600;color:var(--primary)}
+.q .qb{font-size:11.5px;color:var(--onSurfaceVariant);line-height:1.8;margin-top:5px}
+.q .qb b{color:var(--onSurface)}
+.opt{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.opt .o{font-size:10.5px;padding:4px 9px;border-radius:var(--r-pill);
+  border:1px solid var(--outline);color:var(--onSurfaceVariant)}
+.opt .o.rec{border-color:rgba(74,222,128,.5);color:var(--running)}
+.opt .o.done{border-color:rgba(90,162,255,.5);color:var(--primary);background:rgba(90,162,255,.1)}
+
+/* ── 流程箭头图 ───────────────────────────────────────── */
+.flow{display:flex;gap:0;align-items:stretch;margin-top:14px;flex-wrap:wrap}
+.fstep{flex:1 1 0;min-width:140px;background:var(--surface);
+  border:1px solid var(--outlineVariant);border-radius:var(--r-sm);
+  padding:8px 10px;position:relative}
+.fstep+.fstep{margin-left:22px}
+.fstep+.fstep::before{content:"→";position:absolute;left:-19px;top:50%;
+  transform:translateY(-50%);color:var(--primary);font-size:13px}
+.fstep .ft{font-size:9px;color:var(--primary);letter-spacing:.5px;font-weight:600}
+.fstep .fb{font-size:10px;color:var(--onSurfaceVariant);line-height:1.65;margin-top:3px}
+.fstep .fb code{font-family:var(--mono);font-size:9px;background:var(--surfaceVariant);
+  padding:0 3px;border-radius:2px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>R057 效果图 · 前台服务</h1>
+<div class="sub">
+  目标：<b>让 App 退到后台后连接不断；服务被停时能自动恢复；手机重启后自动连回来。</b>
+  <br>这一版是<b>设计与调研</b>，不含代码。平台结论都标了官方来源；一加的部分是社区实测，单独标出。
+  <br>优先适配机型：<b>一加 Ace 5</b>（ColorOS 15 / Android 16）。
+  <br><b>背景：R056 做完之后通知功能本身是全的，但 App 一退后台就被系统冻结（logcat 实测 <code>freezing &lt;pid&gt;</code>），连接断掉就什么都收不到。这一轮解决的就是这一层。</b>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">0</span>你拍板的四件事（已并入本版）</h2>
+<table class="t">
+<tr><th style="width:60px">问题</th><th style="width:290px">你的决定</th><th>落在哪</th></tr>
+<tr>
+  <td><b>Q1</b></td>
+  <td>常驻通知<b>按状态如实写</b></td>
+  <td>第 3 节：四态（连接中 / 已连接 / 重连中（第 N 次）/ 已停止），文案各不相同，<b>不糊成一句「在后台运行」</b>。</td>
+</tr>
+<tr>
+  <td><b>Q2</b></td>
+  <td><b>服务停了自动恢复</b>；<b>自动恢复可开关</b>；<b>关闭状态下才发恢复通知</b></td>
+  <td>第 4 节：新增第三个开关「服务停了自动恢复」，<b>默认开启</b>。
+  第 6 节：开 → 静默拉起不发通知；关 → 发可点通知。<b>互斥，不叠加。</b></td>
+</tr>
+<tr>
+  <td><b>Q3</b></td>
+  <td>服务状态行<b>显示运行时长</b></td>
+  <td>第 4 节：状态行写「运行中 · 已连上桌面端 · 2 小时 14 分」。</td>
+</tr>
+<tr>
+  <td><b>新增</b></td>
+  <td>常驻通知<b>展开后有「退出」按钮</b>，<b>只影响本次</b>，<b>后续启动仍会启动</b></td>
+  <td>第 3 节：展开态设计。第 5 节：定义「本次」的边界——
+  退出后本次运行内不再自动恢复（否则自动恢复会立刻拉起来，按钮就白点了）；
+  重新打开 App / 手机重启后抑制失效。</td>
+</tr>
+</table>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">1</span>先纠正我上一轮的错误结论</h2>
+<div class="note">
+  上一轮我给的判断是「前台服务不可做 / 开机自启被官方堵死」，<b>那是错的</b>。
+  错的根源是：<b>我拿 <code>dataSync</code> 当默认选项去推结论，而它恰好是限制最重的那一类。</b>
+  换成 <code>specialUse</code> 之后，三条限制一条都不成立。
+</div>
+<table class="t">
+<tr><th style="width:185px">限制</th><th style="width:190px">我上一轮说的</th><th>官方原文（针对 <code>specialUse</code>）</th></tr>
+<tr>
+  <td><b>6 小时 / 天超时</b></td>
+  <td><span class="badge2 bad">会触发 onTimeout</span></td>
+  <td>只有 <code>dataSync</code> 和 <code>mediaProcessing</code> 有。<code>specialUse</code> <b>完全不在超时文档的适用范围里</b>。</td>
+</tr>
+<tr>
+  <td><b><code>BOOT_COMPLETED</code> 不能拉起</b></td>
+  <td><span class="badge2 bad">开机自启行不通</span></td>
+  <td>禁用清单只有六种：<code>dataSync</code> / <code>camera</code> / <code>mediaPlayback</code> / <code>phoneCall</code> / <code>mediaProjection</code> / <code>microphone</code>。<b><code>specialUse</code> 不在清单里。</b></td>
+</tr>
+<tr>
+  <td><b>后台启动需豁免</b></td>
+  <td><span class="badge2 bad">拿不到豁免</span></td>
+  <td><code>ACTION_BOOT_COMPLETED</code> 接收器<b>本身就在豁免清单里</b>。</td>
+</tr>
+<tr>
+  <td><b>运行时前提条件</b></td>
+  <td><span class="badge2">—</span></td>
+  <td>官方写的是<b>「无」</b>。只需清单声明 <code>FOREGROUND_SERVICE_SPECIAL_USE</code> 权限，加一个 <code>&lt;property&gt;</code> 写明用途。</td>
+</tr>
+</table>
+<div class="tipbox">
+  <b>来源</b>：<code>developer.android.com/develop/background-work/services/fgs/timeout</code> ·
+  <code>.../fgs/service-types</code> · <code>.../fgs/restrictions-bg-start</code> ·
+  <code>about/versions/15/behavior-changes-15</code>。
+</div>
+<div class="warnbox">
+  <b>收益的边界：</b>前台服务能把 App 从「缓存态」提到「前台服务态」，<b>降低</b>被冻结和回收的概率，
+  但它<b>不是免死金牌</b>。一加在 dontkillmyapp.com 上得 5 💩，官方写的就是
+  <b>No known solution on the developer end</b>。这一轮做的是「尽量活」，不是「一定活」。
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">2</span>做与不做，差在哪</h2>
+<table class="t">
+<tr><th style="width:130px">场景</th><th style="width:160px">现在（R056）</th><th style="width:170px">加上前台服务（R057）</th><th>说明</th></tr>
+<tr>
+  <td><b>切到后台 30 秒</b></td>
+  <td><span class="badge2 bad">进程被冻结</span></td>
+  <td><span class="badge2 ok">连接保持</span></td>
+  <td>最常发生的一个。真机 logcat 实测 <code>freezing 3235 com.revxzxcx.remotewebapp</code>。
+  前台服务态的进程不会被缓存冻结。</td>
+</tr>
+<tr>
+  <td><b>后台跑完一轮</b></td>
+  <td><span class="badge2 warn">晚 90 秒左右</span></td>
+  <td><span class="badge2 ok">实时</span></td>
+  <td>现在靠「断开 90 秒发离线提醒 + 重连补账」兜底，能收到但会晚。</td>
+</tr>
+<tr>
+  <td><b>服务被系统回收</b></td>
+  <td><span class="badge2 bad">无感知</span></td>
+  <td><span class="badge2 ok">自动恢复 / 通知你</span></td>
+  <td>本轮新增（你 Q2 定的）。</td>
+</tr>
+<tr>
+  <td><b>手机重启后</b></td>
+  <td><span class="badge2 bad">完全离线</span></td>
+  <td><span class="badge2 ok">自动重新连接（可关）</span></td>
+  <td><code>BOOT_COMPLETED</code> + <code>specialUse</code>。</td>
+</tr>
+<tr>
+  <td><b>一加「深度优化」杀进程</b></td>
+  <td><span class="badge2">被杀</span></td>
+  <td><span class="badge2">被杀</span></td>
+  <td><b>这条救不了。</b>厂商层不受 Android 前台服务约束，只能靠那五项手动设置。</td>
+</tr>
+<tr>
+  <td><b>耗电</b></td>
+  <td>低</td>
+  <td>略高</td>
+  <td>长期 Active 态，被标成高耗电的概率上升。心跳已是 30 秒，不再缩短。</td>
+</tr>
+<tr>
+  <td><b>通知栏</b></td>
+  <td>干净</td>
+  <td>多一条常驻</td>
+  <td>硬性要求。最低档通道，不响不震动，<b>可手动退出</b>。</td>
+</tr>
+</table>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">3</span>常驻通知：四态 + 展开后的「退出」</h2>
+<div class="note">
+  第一屏是<b>收起态</b>（通知栏默认看到的）：只有标题，没有按钮，不占位置。
+  <br>第二屏是<b>展开态</b>（向下拖或点右侧箭头）：正文 + 运行时长 + <b>「退出」</b>。
+  <br>按钮叫「退出」不叫「停止」——用户的念头是「把这条推掉」，不是「操作一个后台服务」。
+</div>
+<div class="row">
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>⌁ ▮▮▮</span></div>
+      <div class="shade">
+        <div class="shade-head"><span>DSHRM · 1 条常驻</span><span>全部清除</span></div>
+
+        <div class="notif ongoing">
+          <div class="nhead"><span class="nicon">◈</span><span>DSHRM</span><span class="sp"></span><span>常驻</span></div>
+          <div class="ntitle">正在连接桌面端<span class="chev-exp">▾</span></div>
+          <div class="nexpand">下拉展开 · 可退出</div>
+        </div>
+
+        <div class="notif mini"><div class="ntitle">任务结束 · bot</div></div>
+        <div class="notif mini"><div class="ntitle">任务结束 · 前端重构</div></div>
+        <div class="shade-head" style="padding-top:2px"><span>其余通知已折叠</span><span></span></div>
+      </div>
+    </div>
+    <div class="cap"><b>收起态</b> · 一行标题，无按钮</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>⌁ ▮▮▮</span></div>
+      <div class="shade">
+        <div class="shade-head"><span>DSHRM · 1 条常驻</span><span>全部清除</span></div>
+
+        <div class="notif ongoing">
+          <div class="nhead"><span class="nicon">◈</span><span>DSHRM</span><span class="sp"></span><span>常驻</span></div>
+          <div class="ntitle">正在连接桌面端<span class="chev-exp">▴</span></div>
+          <div class="nbody">
+            任务跑完、要你确认时会在这里提醒。<br>
+            已连接 <span style="color:var(--running);font-weight:600">2 小时 14 分</span>。
+          </div>
+          <div class="nacts"><span class="nact dgr">退出</span></div>
+        </div>
+
+        <div class="notif mini"><div class="ntitle">任务结束 · bot</div></div>
+        <div class="shade-head" style="padding-top:2px"><span>其余通知已折叠</span><span></span></div>
+      </div>
+    </div>
+    <div class="cap"><b>展开态</b> · 正文 + 运行时长 + 「退出」</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>⌁ ▮▮▮</span></div>
+      <div class="shade">
+        <div class="shade-head"><span>DSHRM · 1 条常驻</span><span>全部清除</span></div>
+
+        <div class="notif ongoing warn">
+          <div class="nhead"><span class="nicon ask">◈</span><span>DSHRM</span><span class="sp"></span><span>常驻</span></div>
+          <div class="ntitle">正在重连桌面端…（第 3 次）<span class="chev-exp">▾</span></div>
+          <div class="nexpand">下拉展开 · 可退出</div>
+        </div>
+
+        <div class="notif mini"><div class="ntitle">连不上桌面端了</div></div>
+        <div class="shade-head" style="padding-top:2px"><span>其余通知已折叠</span><span></span></div>
+      </div>
+    </div>
+    <div class="cap"><b>重连中</b> · 标题带次数，边框转黄</div>
+  </div>
+</div>
+
+<div class="row" style="margin-top:22px">
+  <div style="flex:1 1 430px;min-width:340px">
+    <table class="t" style="margin-top:0">
+    <tr><th style="width:110px">状态</th><th style="width:170px">收起态标题</th><th>展开态正文</th></tr>
+    <tr>
+      <td><b>连接中</b></td>
+      <td>正在连接桌面端</td>
+      <td>任务跑完、要你确认时会在这里提醒。<br>（还没有连接时长）</td>
+    </tr>
+    <tr>
+      <td><b>已连接</b></td>
+      <td>正在连接桌面端</td>
+      <td>任务跑完、要你确认时会在这里提醒。<br>已连接 <b>2 小时 14 分</b>。</td>
+    </tr>
+    <tr>
+      <td><b>重连中</b></td>
+      <td>正在重连桌面端…（第 N 次）</td>
+      <td>如果一直连不上，检查桌面端是否开着。<br>已断开 <b>42 秒</b>。</td>
+    </tr>
+    <tr>
+      <td><b>已停止</b></td>
+      <td><span class="badge2">通知已撤掉</span></td>
+      <td>服务停掉后常驻通知就撤了，不留残影。</td>
+    </tr>
+    </table>
+    <div class="note" style="margin-top:12px">
+      <b>为什么「连接中」和「已连接」标题一样</b><br>
+      两者对用户含义完全相同——<b>「后台有个东西在跑」</b>。差别只在展开后的时长。
+      而「重连中」必须换标题，因为它意味着<b>现在收不到通知</b>，这是用户需要知道的事实。
+    </div>
+  </div>
+  <div style="flex:1 1 340px;min-width:290px">
+    <div class="statecard" style="margin-top:0">
+      <div class="h"><span class="dot on"></span>已连接 · 2 小时 14 分</div>
+      <div class="b">服务在跑，WebSocket 活着，通知实时到。</div>
+    </div>
+    <div class="statecard">
+      <div class="h"><span class="dot warn"></span>重连中 · 第 3 次 · 已断 42 秒</div>
+      <div class="b">退避 2s → 4s → 8s → 16s → 32s。超过 90 秒会额外发一条离线提醒（R056 已有）。</div>
+    </div>
+    <div class="statecard">
+      <div class="h"><span class="dot off"></span>已退出 —— 界面上不显示</div>
+      <div class="b">你点了「退出」。服务停掉、常驻通知撤掉、设置页那一行整个消失。<b>不留「已退出（本次）」这种半吊子状态</b>；本次运行内不会再自动拉起。</div>
+    </div>
+    <div class="tipbox">
+      <b>「退出」按一次就生效，不追问</b><br>
+      常驻通知<b>不能划掉</b>（<code>setOngoing(true)</code>），所以必须给一个正面出口。
+      没有这个按钮，用户唯一的办法是进系统设置强停整个 App——那会连通知一起废掉。
+      <br><br><b>已拍板（m13687）</b>：退出之后<b>前台服务一起退出，界面不再显示它</b>。
+      「服务状态」那一行整个消失，<b>不显示「已退出（本次）」也不给「立即恢复」按钮</b>。
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">4</span>设置页：三个开关 + 一个状态行</h2>
+<div class="note">
+  接在 R056 通知二级页的「后台保活」段落<b>之前</b>。左：<b>全关</b>（默认）。中：<b>全开</b>。右：<b>首次打开确认框</b>。
+  <br><b>「服务停了自动恢复」默认开启</b>——它是纯收益（不响不弹，只把服务拉回来），
+  而「多一条常驻通知」这个代价由上面的总开关承担，不需要在第二个开关上再问一次。
+</div>
+<div class="row">
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>⌁ ▮▮▮</span></div>
+      <div class="topbar">
+        <div class="tb-btn">‹</div>
+        <div class="tb-mid"><div class="tb-t1">通知与后台保活</div><div class="tb-t2">远程 Web</div></div>
+      </div>
+      <div class="body-scroll">
+        <div class="banner ok"><span>✓</span><div>通知已开启，任务跑完或要你确认时会提醒。</div></div>
+
+        <div class="seclbl">后台连接</div>
+        <div class="cardgrp">
+          <div class="srow">
+            <div class="st">
+              <div class="st1">保持后台连接</div>
+              <div class="st2">退到后台也不断开，任务跑完能立刻收到</div>
+            </div>
+            <div class="sw"></div>
+          </div>
+          <div class="srow" style="opacity:.5">
+            <div class="st">
+              <div class="st1">服务停了自动恢复</div>
+              <div class="st2">需要先打开上一项</div>
+            </div>
+            <div class="sw off-dim"></div>
+          </div>
+          <div class="srow" style="opacity:.5">
+            <div class="st">
+              <div class="st1">开机后自动连接</div>
+              <div class="st2">需要先打开上一项</div>
+            </div>
+            <div class="sw off-dim"></div>
+          </div>
+        </div>
+
+        <div class="banner">
+          <span>ⓘ</span>
+          <div>打开后会<b>多一条常驻通知</b>（不会响），耗电略增。这是 Android 对前台服务的硬性要求。</div>
+        </div>
+
+        <div class="seclbl">一加 / ColorOS 另有 4 项</div>
+        <div class="cardgrp">
+          <div class="srow">
+            <div class="st"><div class="st1">手动保活设置</div>
+              <div class="st2">没有接口可以代劳，只能你手动开一次</div></div>
+            <div class="chev">›</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>全关（默认）</b> · 后两项置灰</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>⌁ ▮▮▮</span></div>
+      <div class="topbar">
+        <div class="tb-btn">‹</div>
+        <div class="tb-mid"><div class="tb-t1">通知与后台保活</div><div class="tb-t2">远程 Web</div></div>
+      </div>
+      <div class="body-scroll">
+        <div class="banner ok"><span>✓</span><div>通知已开启，任务跑完或要你确认时会提醒。</div></div>
+
+        <div class="seclbl">后台连接</div>
+        <div class="cardgrp">
+          <div class="srow">
+            <div class="st">
+              <div class="st1">保持后台连接</div>
+              <div class="st2">退到后台也不断开，任务跑完能立刻收到</div>
+            </div>
+            <div class="sw on"></div>
+          </div>
+          <div class="srow">
+            <div class="st">
+              <div class="st1">服务停了自动恢复</div>
+              <div class="st2">不吵你，静默拉回来；关掉则发通知等你点</div>
+            </div>
+            <div class="sw on"></div>
+          </div>
+          <div class="srow">
+            <div class="st">
+              <div class="st1">开机后自动连接</div>
+              <div class="st2">手机重启后不用打开 App 也能连回来</div>
+            </div>
+            <div class="sw on"></div>
+          </div>
+          <div class="srow">
+            <div class="st">
+              <div class="st1">服务状态</div>
+              <div class="st2">运行中 · 已连上桌面端 · 2 小时 14 分</div>
+            </div>
+            <div class="chev">›</div>
+          </div>
+        </div>
+
+        <div class="banner ok">
+          <span>✓</span>
+          <div>后台连接已开启。只要进程活着，连接就不会断。</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>全开</b> · 多出「服务状态」行，带运行时长</div>
+  </div>
+
+  <div>
+    <div class="phone">
+      <div class="status"><span>9:41</span><span>⌁ ▮▮▮</span></div>
+      <div class="topbar">
+        <div class="tb-btn">‹</div>
+        <div class="tb-mid"><div class="tb-t1">通知与后台保活</div><div class="tb-t2">远程 Web</div></div>
+      </div>
+      <div class="body-scroll" style="opacity:.35">
+        <div class="banner ok"><span>✓</span><div>通知已开启，任务跑完或要你确认时会提醒。</div></div>
+        <div class="seclbl">后台连接</div>
+        <div class="cardgrp">
+          <div class="srow">
+            <div class="st"><div class="st1">保持后台连接</div>
+              <div class="st2">退到后台也不断开，任务跑完能立刻收到</div></div>
+            <div class="sw"></div>
+          </div>
+          <div class="srow" style="opacity:.5">
+            <div class="st"><div class="st1">服务停了自动恢复</div>
+              <div class="st2">需要先打开上一项</div></div>
+            <div class="sw off-dim"></div>
+          </div>
+          <div class="srow" style="opacity:.5">
+            <div class="st"><div class="st1">开机后自动连接</div>
+              <div class="st2">需要先打开上一项</div></div>
+            <div class="sw off-dim"></div>
+          </div>
+        </div>
+      </div>
+      <div class="scrim">
+        <div class="sheet">
+          <div class="h"><span class="i">◈</span>打开后台连接？</div>
+          <div class="b">
+            打开后：
+            <ul>
+              <li>通知栏会<b>常驻一条</b>「正在连接桌面端」，<b>不会响也不会震动</b></li>
+              <li>这条通知<b>划不掉</b>，但展开后有「<b>退出</b>」按钮，随时能停</li>
+              <li>耗电会略增（系统不会提示这一项，我们自己说明）</li>
+              <li>一加的「深度优化」还是会杀掉它，那需要另外手动设置</li>
+            </ul>
+          </div>
+          <div class="f">
+            <span class="btn" style="color:var(--onSurfaceVariant)">取消</span>
+            <span class="btn">打开</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>首次打开确认</b> · 四条代价直说</div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">5</span>「退出」按钮：本次生效，下次照旧</h2>
+<div class="note">
+  这是你新加的需求里<b>最需要定清边界</b>的一条。因为「自动恢复」和「退出」逻辑上直接冲突：
+  用户点退出 → 服务停了 → 自动恢复发现没了 → 立刻拉起来 → <b>用户会觉得按钮坏了</b>。
+</div>
+<div class="flow">
+  <div class="fstep">
+    <div class="ft">① 点「退出」</div>
+    <div class="fb">停服务、撤常驻通知，同时置一个<b>「本次已退出」</b>标记。</div>
+  </div>
+  <div class="fstep">
+    <div class="ft">② 自动恢复被抑制</div>
+    <div class="fb">恢复逻辑看到标记就<b>不再拉起</b>，也不发恢复通知。<b>这是「退出」有意义的前提。</b></div>
+  </div>
+  <div class="fstep">
+    <div class="ft">③ 标记何时清</div>
+    <div class="fb">三种：<b>重新打开 App</b> / <b>手机重启</b> / <b>设置页手动重开开关</b>。</div>
+  </div>
+  <div class="fstep">
+    <div class="ft">④ 之后</div>
+    <div class="fb">服务<b>照常启动</b>，回到原样。开关本身<b>没有被关掉</b>。</div>
+  </div>
+</div>
+<div class="tipbox">
+  <b>为什么标记不落盘持久化</b><br>
+  「本次」的含义就是「这次 App 活着期间」，用内存变量（跟着进程走）就够了。
+  如果真落盘，用户退出后再杀一次 App、再打开，标记还在，服务就永远起不来——
+  那等于把「退出一次」变成了「永久关闭」，和你的要求相反。
+</div>
+<div class="warnbox">
+  <b>一个诚实的说明：</b>如果用户在<b>点退出之后</b>手机被重启，<code>BOOT_COMPLETED</code> 会照常拉起服务
+  （「本次已退出」标记只活在内存里，重启就没了）。这与你要求的「后续启动还是会启动」一致。
+  如果你希望「退出后即使重启也不起」，那需要标记落盘 + 加一条「下次启动仍要恢复」的隐式规则，逻辑会变复杂，我不建议。
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">6</span>自动恢复 vs 恢复通知：二选一，不叠加</h2>
+<div class="note">
+  你定的是「服务停了自动恢复，自动恢复可开关，<b>关闭状态下才做恢复的通知</b>」。所以两者是<b>互斥分支</b>，不是「都做」。
+</div>
+<table class="t">
+<tr><th style="width:160px">触发情形</th><th style="width:120px">自动恢复 = 开</th><th style="width:140px">自动恢复 = 关</th><th>说明</th></tr>
+<tr>
+  <td><b>服务被系统回收</b><br><span style="font-size:10px">（内存紧张 / <code>START_STICKY</code>）</span></td>
+  <td><span class="badge2 ok">静默拉起</span></td>
+  <td><span class="badge2 warn">发通知</span></td>
+  <td>「任务结束」频道的补充提醒：「后台连接断了」+ 一个「重连」按钮。</td>
+</tr>
+<tr>
+  <td><b>App 冷启动</b><br><span style="font-size:10px">（用户打开 App）</span></td>
+  <td><span class="badge2 ok">直接启动服务</span></td>
+  <td><span class="badge2 ok">直接启动服务</span></td>
+  <td><b>一样。</b>用户主动打开了 App，这就是最好的恢复时机，不需要通知他。</td>
+</tr>
+<tr>
+  <td><b>手机重启</b></td>
+  <td><span class="badge2 ok">开机自启那项管</span></td>
+  <td><span class="badge2 warn">发通知</span></td>
+  <td>开机自启是独立开关。若它关着、自动恢复开着，仍可发通知提示「后台连接没起来」。</td>
+</tr>
+<tr>
+  <td><b>用户点「退出」</b></td>
+  <td><span class="badge2">什么都不做</span></td>
+  <td><span class="badge2">什么都不做</span></td>
+  <td><b>两个开关都不管。</b>用户主动要求的，不能再用通知去烦他（见第 5 节）。</td>
+</tr>
+<tr>
+  <td><b>进程被厂商直接杀掉</b></td>
+  <td><span class="badge2 bad">抓不到</span></td>
+  <td><span class="badge2 bad">抓不到</span></td>
+  <td><b>两条路都没有代码能跑。</b>只能等下次 App 启动时用 <code>ApplicationExitInfo</code> 判断（R056 已有的提示卡）。</td>
+</tr>
+</table>
+<div class="warnbox">
+  <b>技术边界：</b>「自动恢复」不是无限次的。<code>START_STICKY</code> 只在系统因内存回收服务时生效；
+  如果用户从系统设置里「强制停止」了 App，<b>Android 会冻结整个应用</b>，连 <code>BOOT_COMPLETED</code> 都收不到，
+  直到用户再打开一次 App。这是平台设计，任何代码都绕不过去。设置页会有一行说明。
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">7</span>启动失败怎么降级</h2>
+<table class="t">
+<tr><th style="width:140px">失败点</th><th style="width:200px">抓住什么异常</th><th>退回什么状态</th></tr>
+<tr>
+  <td><b>启动被拒</b></td>
+  <td><code>ForegroundServiceStartNotAllowedException</code></td>
+  <td>不发常驻通知，退回 R056 的上下线提醒 + 重连补账。<b>开关自动关掉</b>，设置页显示一行原因，
+  不让用户以为是开着的。</td>
+</tr>
+<tr>
+  <td><b>权限被拒</b></td>
+  <td><code>SecurityException</code></td>
+  <td>同上。通常意味着 <code>POST_NOTIFICATIONS</code> 没给（前台服务必须有通知），设置页直接指向「先去开通知」。</td>
+</tr>
+<tr>
+  <td><b>通知被用户关掉</b></td>
+  <td><span class="badge2 warn">无异常</span></td>
+  <td>前台服务会因为没有通知而被判为无效。<b>启动前先检查通知权限与频道</b>，不满足就不启动，
+  并在设置页说「先开通知才能用后台连接」。</td>
+</tr>
+</table>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">8</span>要动哪些文件</h2>
+<table class="t">
+<tr><th style="width:240px">文件</th><th style="width:70px">类型</th><th>内容</th></tr>
+<tr><td><code>AndroidManifest.xml</code></td><td><span class="badge2">改</span></td>
+  <td>加 <code>FOREGROUND_SERVICE</code> + <code>FOREGROUND_SERVICE_SPECIAL_USE</code>；
+  加 <code>RECEIVE_BOOT_COMPLETED</code>；加 <code>&lt;service android:foregroundServiceType="specialUse"&gt;</code> 与
+  <code>&lt;property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"&gt;</code>；
+  加 <code>&lt;receiver&gt;</code> 接 <code>BOOT_COMPLETED</code>。</td></tr>
+<tr><td><code>core/service/LinkService.kt</code></td><td><span class="badge2 ok">新</span></td>
+  <td>前台服务本体。持有连接、发常驻通知、<code>START_STICKY</code>、<code>onTimeout</code> 兜底。</td></tr>
+<tr><td><code>core/service/BootReceiver.kt</code></td><td><span class="badge2 ok">新</span></td>
+  <td>接 <code>BOOT_COMPLETED</code>，读开关决定是否起服务。<b>整套 try/catch</b>。</td></tr>
+<tr><td><code>core/service/ServiceState.kt</code></td><td><span class="badge2 ok">新</span></td>
+  <td>四态机 + 运行时长 + <b>「本次已退出」抑制标记</b>。纯数据，可测。</td></tr>
+<tr><td><code>core/notify/ServiceNotice.kt</code></td><td><span class="badge2 ok">新</span></td>
+  <td>常驻通知文案与构建（收起 / 展开两套内容，「退出」按钮的 <code>PendingIntent</code>）。</td></tr>
+<tr><td><code>core/notify/NoticeActionReceiver.kt</code></td><td><span class="badge2">改</span></td>
+  <td>加 <code>ACTION_EXIT_SERVICE</code> 分支（现在只有审批的 <code>ACTION_ANSWER</code>）。</td></tr>
+<tr><td><code>core/notify/NoticeChannels.kt</code></td><td><span class="badge2">改</span></td>
+  <td>加第三个频道 <code>SERVICE</code>（<code>IMPORTANCE_MIN</code>）：不响不震动、通知栏默认折叠。</td></tr>
+<tr><td><code>core/prefs/ServicePreferences.kt</code></td><td><span class="badge2 ok">新</span></td>
+  <td>三个开关 + 上次启动失败原因。<b>按主机分开记</b>（与 R055 的模式偏好同构）。</td></tr>
+<tr><td><code>ui/settings/NoticeSettingsScreen.kt</code></td><td><span class="badge2">改</span></td>
+  <td>插入「后台连接」段落（三开关 + 状态行 + 首次确认框）。</td></tr>
+<tr><td><code>core/AppContainer.kt</code></td><td><span class="badge2">改</span></td>
+  <td><code>bootstrap()</code> 的调用来源扩到「服务也能调」；服务活着时 AppRoot 不重复建连。</td></tr>
+</table>
+<div class="tipbox">
+  <b>工作量估计：3–4 天</b>（含测试、变异验证、六轮审查、真机验收）。
+  比初版估计多一天，多出来的全在「退出 / 自动恢复」这两个状态的交互上——
+  <b>状态之间会互相打架，这是最容易出 bug 的地方</b>。
+</div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+<h2><span class="n">9</span>你最后拍板的两件事</h2>
+
+<div class="q">
+  <div class="qt">Q4 · 「退出」之后 —— 已定：<span style="color:var(--running)">前台服务一起退出，界面不再显示它</span></div>
+  <div class="qb">
+    退出就是真的退干净：服务停掉、常驻通知撤掉、设置页的「<b>服务状态</b>」整行<b>消失</b>，不留任何残影。
+    <b>不显示「已退出（本次）」这种半吊子状态，也不给「立即恢复」按钮。</b>
+    <br>开关本身<b>仍然开着</b>——因为下次启动真的还会启动服务，关掉它等于骗人。
+    <br><br><b>怎么再开起来</b>（三条路，都不需要额外的按钮）：
+  </div>
+  <div class="opt">
+    <span class="o done">把「保持后台连接」关掉再打开</span>
+    <span class="o done">退出 App 再重新打开</span>
+    <span class="o done">手机重启（如果开了开机自启）</span>
+  </div>
+</div>
+
+<div class="q">
+  <div class="qt">Q5 · 恢复通知点开后 —— 已定：<span style="color:var(--running)">打开 App 并停在设置页这一段</span></div>
+  <div class="qb">
+    自动恢复关着、服务停了时发的那条「后台连接断了」，点开直接落在
+    <b>设置 → 通知与后台保活</b>，光标就在「后台连接」这一段旁边。
+    <br>理由：这条通知的意图就是「去把它开回来」，落在设置页比落在会话页更对得上。
+  </div>
+</div>
+
+</section>
+
+</div>
+</body>
+</html>

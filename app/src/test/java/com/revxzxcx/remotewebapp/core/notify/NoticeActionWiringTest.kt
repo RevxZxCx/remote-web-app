@@ -1,7 +1,8 @@
 package com.revxzxcx.remotewebapp.core.notify
 
 import android.app.Application
-import android.app.NotificationManager
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
@@ -9,7 +10,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
-import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
@@ -27,6 +27,15 @@ import org.robolectric.annotation.Config
  *
  * 所以这里测的不是「接收器逻辑对不对」（那部分本来就是对的），而是
  * **「装配对不对」**——这类缺陷只有跑真机才暴露，代价是一整轮验收。
+ *
+ * ## 为什么断言「宿主有没有被叫到」而不是「通知条还在不在」
+ * R057 把 `bootstrapOnce()` 提到了 `DshApplication.onCreate`，它在 `appScope` 里异步跑
+ * `installConnection(loadBook())`。Robolectric 下凭证簿一般是空的 → 走
+ * `ConnectionPlan.Drop` → `notificationCenter.cancelAll()`。这条后台清场会和单测里
+ * 「摆一条占位通知 → onReceive → 数一遍还剩几条」赛跑，于是计数断言偶发变红
+ * （同一份代码，整类跑会红、单跑这一条却绿）。
+ *
+ * 换成 spy 宿主之后，每条用例只依赖接收器自己的分支判断，与进程里别的异步工作无关。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -46,77 +55,113 @@ class NoticeActionWiringTest {
 
     @Test
     fun `接收器对别的 action 一律不理 不能把系统广播当成审批回答`() {
-        val receiver = NoticeActionReceiver()
-        val before = askCount()
-        receiver.onReceive(app, Intent(Intent.ACTION_BOOT_COMPLETED))
-        assertEquals("无关广播不该动通知", before, askCount())
+        val spy = SpyHost()
+        NoticeActionReceiver().onReceive(spyContext(spy), Intent(Intent.ACTION_BOOT_COMPLETED))
+        assertEquals("无关广播不该触发审批回答", 0, spy.answers.size)
+        assertEquals("无关广播不该触发退出服务", 0, spy.exits)
     }
 
     @Test
-    fun `没有 eventId 时直接返回 不去碰通知`() {
-        val receiver = NoticeActionReceiver()
-        postProbe()
-        val before = askCount()
-        receiver.onReceive(
-            app,
+    fun `没有 eventId 时直接返回 不去回答`() {
+        val spy = SpyHost()
+        NoticeActionReceiver().onReceive(
+            spyContext(spy),
             Intent(app, NoticeActionReceiver::class.java).apply {
                 action = NotificationCenter.ACTION_ANSWER
                 putExtra(NotificationCenter.EXTRA_ALLOW, true)
             },
         )
-        assertEquals("没有 eventId 就不该撤通知，用户还得能再点一次", before, askCount())
+        assertEquals("没有 eventId 就不该回答，用户还得能再点一次", 0, spy.answers.size)
     }
 
     @Test
     fun `没带 allow extra 时不能当成拒绝 拒绝是不可撤销的`() {
         // 关键分支：`getBooleanExtra(..., false)` 在「extra 没带」时与「显式给了 false」
         // 无法区分。一次构造错误的 Intent 会被当成「拒绝」，而工具已经失败、撤不回来。
-        // 所以实现用 `hasExtra` 判，缺 extra 时直接返回。
-        val receiver = NoticeActionReceiver()
-        postProbe()
-        val before = askCount()
-        receiver.onReceive(
-            app,
+        // 所以实现用 `hasExtra` 判，缺 extra 时直接返回——宿主**一次都不该被叫到**。
+        val spy = SpyHost()
+        NoticeActionReceiver().onReceive(
+            spyContext(spy),
             Intent(app, NoticeActionReceiver::class.java).apply {
                 action = NotificationCenter.ACTION_ANSWER
                 putExtra(NotificationCenter.EXTRA_EVENT_ID, "evt-1")
             },
         )
-        assertEquals("缺 allow 就当拒绝会把任务误杀", before, askCount())
+        assertEquals("缺 allow 就当拒绝会把任务误杀", 0, spy.answers.size)
     }
 
     @Test
     fun `eventId 是空白串时同样直接返回`() {
-        val receiver = NoticeActionReceiver()
-        postProbe()
-        val before = askCount()
-        receiver.onReceive(
-            app,
+        val spy = SpyHost()
+        NoticeActionReceiver().onReceive(
+            spyContext(spy),
             Intent(app, NoticeActionReceiver::class.java).apply {
                 action = NotificationCenter.ACTION_ANSWER
                 putExtra(NotificationCenter.EXTRA_EVENT_ID, "   ")
                 putExtra(NotificationCenter.EXTRA_ALLOW, true)
             },
         )
-        assertEquals(before, askCount())
+        assertEquals("空白 eventId 不该回答", 0, spy.answers.size)
     }
 
-    private fun manager(): NotificationManager =
-        app.getSystemService(NotificationManager::class.java)
-
-    /** 当前进程发出的通知条数（用来判「有没有被撤掉」）。 */
-    private fun askCount(): Int = shadowOf(manager()).size()
-
-    /** 摆一条占位通知，好让「撤掉了没有」这件事可观测。 */
-    private fun postProbe() {
-        val nm = manager()
-        if (shadowOf(nm).size() > 0) return
-        nm.notify(
-            99,
-            android.app.Notification.Builder(app, NoticeChannels.ASK)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle("probe")
-                .build(),
+    @Test
+    fun `payload 齐了就把回答原样交给宿主`() {
+        val spy = SpyHost()
+        NoticeActionReceiver().onReceive(
+            spyContext(spy),
+            Intent(app, NoticeActionReceiver::class.java).apply {
+                action = NotificationCenter.ACTION_ANSWER
+                putExtra(NotificationCenter.EXTRA_EVENT_ID, "evt-1")
+                putExtra(NotificationCenter.EXTRA_ALLOW, false)
+            },
         )
+        assertEquals(1, spy.answers.size)
+        assertEquals("拒绝必须原样传下去，不能被吞成批准", "evt-1" to false, spy.answers.first())
+    }
+
+    @Test
+    fun `退出服务那条 action 走宿主 不会误走审批分支`() {
+        val spy = SpyHost()
+        NoticeActionReceiver().onReceive(
+            spyContext(spy),
+            Intent(app, NoticeActionReceiver::class.java).apply {
+                action = NotificationCenter.ACTION_EXIT_SERVICE
+            },
+        )
+        assertEquals("退出只能叫一次", 1, spy.exits)
+        assertEquals("退出不能触发审批回答", 0, spy.answers.size)
+    }
+
+    /** 记录「有没有被叫到」的宿主替身。 */
+    private class SpyHost : NoticeActionHost {
+        val answers = mutableListOf<Pair<String, Boolean>>()
+        var exits = 0
+
+        override fun answerFromNotification(eventId: String, allow: Boolean) {
+            answers += eventId to allow
+        }
+
+        override fun exitServiceFromNotification() {
+            exits += 1
+        }
+    }
+
+    /**
+     * 把 `applicationContext` 换成 spy 的 Context。
+     *
+     * 接收器第一件事是 `context.applicationContext as? NoticeActionHost`，只要让
+     * `applicationContext` 返回一个「自己就是宿主」的 Context，就能在这一跳上劫持它，
+     * 不必改动真实的 Application。
+     */
+    private fun spyContext(host: NoticeActionHost): Context = object : ContextWrapper(app), NoticeActionHost {
+        override fun getApplicationContext(): Context = this
+
+        override fun answerFromNotification(eventId: String, allow: Boolean) {
+            host.answerFromNotification(eventId, allow)
+        }
+
+        override fun exitServiceFromNotification() {
+            host.exitServiceFromNotification()
+        }
     }
 }

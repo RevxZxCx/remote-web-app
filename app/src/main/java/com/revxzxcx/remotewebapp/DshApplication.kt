@@ -68,10 +68,34 @@ class DshApplication : Application(), NoticeActionHost {
         container.answerFromNotification(eventId, allow)
     }
 
+    /**
+     * 用户在常驻通知里点了「退出」（R057）。
+     *
+     * 这个 implements 与 [answerFromNotification] 同样不是可选的：少了它，
+     * 接收器走 `as? NoticeActionHost` 拿不到宿主，只撤通知不做事——用户点「退出」，
+     * 通知条消失，服务却还在跑、下一帧又把它画回来。**那比按钮不存在更糟**，
+     * 因为他会以为点成功了。
+     */
+    override fun exitServiceFromNotification() {
+        container.exitLinkService()
+    }
+
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
         watchForeground()
+        // 🔴 连接必须**由进程**建，不能等界面（R057 审查 P1）。
+        //
+        // 早先只有 `AppRoot` 的 `LaunchedEffect(Unit)` 调 `bootstrap()`。那条路径在
+        // 用户打开 App 时成立，但 R057 的两个核心场景根本不经过界面：
+        // 开机自启（`BootReceiver` 直接起服务）与 `START_STICKY` 重启（系统拉起服务）。
+        // 那两刻没人建连接，`watchCarrier` 不跑，服务拿不到任何载波帧 →
+        // 常驻通知整夜写「正在连接桌面端」、时长永不出现，而用户不打开 App 就永远等不到。
+        //
+        // 放在这里而不是服务里：Application.onCreate 一定先于任何组件，
+        // 且服务被拉起时进程必然已经走过这里，两个入口天然有序。`bootstrapOnce`
+        // 用 CAS 兜住并发，界面那边再调一次也只是空转。
+        container.bootstrapOnce()
     }
 
     /**
@@ -106,6 +130,10 @@ class DshApplication : Application(), NoticeActionHost {
             object : DefaultLifecycleObserver {
                 override fun onStart(owner: LifecycleOwner) {
                     notifier.setForeground(true)
+                    // 用户很可能是离开 App 去系统设置里开通知权限，回来时不会有
+                    // 任何权限回调（那个回调只在弹窗路径上有）。补一次后台连接的重试，
+                    // 否则「授权后服务永远起不来」——第五轮审查 P1。
+                    container.onAppForeground()
                 }
 
                 override fun onStop(owner: LifecycleOwner) {

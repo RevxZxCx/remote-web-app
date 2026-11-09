@@ -18,6 +18,19 @@
         android:name="android.hardware.camera.autofocus"
         android:required="false" />
 
+    <!-- R057：保持后台连接的前台服务。
+         `specialUse` 而不是 `dataSync`：后者受 Android 15「24 小时累计 6 小时」限制，
+         超时抛 RemoteServiceException；官方超时文档明确「目前此项限制仅适用于 dataSync
+         与 mediaProcessing」，`specialUse` 不在其中，Android 15 的 BOOT_COMPLETED
+         禁用清单（dataSync/camera/mediaPlayback/phoneCall/mediaProjection/microphone）
+         也不含它。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- R057：开机后自动恢复后台连接（可开关，默认关）。
+         BOOT_COMPLETED 本身就在「后台启动豁免」清单里，所以起 specialUse 型服务合法。 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <application
         android:name=".DshApplication"
         android:allowBackup="false"
@@ -44,10 +57,47 @@
 
         <!-- R056：通知里的「批准 / 拒绝」按钮落地处。
              `exported="false"`：只接本进程内由自己的 PendingIntent 发出的显式广播，
-             别的应用即便知道类名也发不进来（否则任何 App 都能替用户批授权）。 -->
+             别的应用即便知道类名也发不进来（否则任何 App 都能替用户批授权）。
+             R057 起它还承接常驻通知的「退出」按钮（同一个接收器、另一个 action）。 -->
         <receiver
             android:name=".core.notify.NoticeActionReceiver"
             android:exported="false" />
+
+        <!-- R057：保持后台连接的前台服务。
+             `stopWithTask="false"`：用户从最近任务里划掉 App 时**不要**顺手停掉服务——
+             那样「保持后台连接」就只在 App 开着时有效，而它存在的理由恰恰是划掉之后。 -->
+        <service
+            android:name=".core.service.ForegroundLinkService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <!-- Play 要求 specialUse 必须说明「特殊在哪」；本项目侧载分发，
+                 但这个 property 在 API 34+ 是 startForeground 的硬性前置条件。 -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps a persistent connection to the paired desktop instance so task completions and approval requests can be delivered as notifications." />
+        </service>
+
+        <!-- R057：开机 / 应用被替换后恢复后台连接（受「开机后自动连接」开关控制，默认关）。
+
+             ⚠️ `exported` **必须是 true**：`BOOT_COMPLETED` 由 system_server
+             （uid 1000）发出，而 `exported="false"` 的接收器只接受**同 UID** 的广播，
+             系统广播一律被丢掉。真机实测过：清单写 false 时开机后进程根本不启动，
+             logcat 里连我们的 tag 都没有一行，`am broadcast` 也直接报
+             `Requires permission not exported from uid 10052`。
+             这个接收器不处理任何外部数据、只读本地开关，放开没有暴露面。 -->
+        <receiver
+            android:name=".core.service.BootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <!-- 只登记真正会送达的两个：`LOCKED_BOOT_COMPLETED` 需要 receiver 是
+                 directBootAware 才会来，而本 receiver 与 Application 都不是
+                 （凭证在 Keystore + 文件里，直接启动阶段读不到），登记了也永远不触发。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

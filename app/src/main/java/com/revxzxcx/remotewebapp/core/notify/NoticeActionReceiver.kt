@@ -29,6 +29,21 @@ import android.content.Intent
 class NoticeActionReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
+        // 「退出后台连接」（R057）：不带任何参数，只让服务停下来。
+        // 与审批那条 action 分开判断，两者的载荷完全不同（见 ACTION_EXIT_SERVICE 的 KDoc）。
+        if (intent.action == NotificationCenter.ACTION_EXIT_SERVICE) {
+            val host = context.applicationContext as? NoticeActionHost
+            // 宿主不对时也要撤掉通知条：用户刚点了「退出」，若通知还挂着他会以为没生效，
+            // 而那条通知是 ongoing 的——划也划不掉。
+            if (host == null) {
+                context.getSystemService(NotificationManager::class.java)
+                    ?.cancel(com.revxzxcx.remotewebapp.core.service.ServiceNotice.NOTICE_ID)
+                return
+            }
+            host.exitServiceFromNotification()
+            return
+        }
+
         if (intent.action != NotificationCenter.ACTION_ANSWER) return
         val eventId = intent.getStringExtra(NotificationCenter.EXTRA_EVENT_ID)
         if (eventId.isNullOrBlank()) return
@@ -68,4 +83,13 @@ interface NoticeActionHost {
      * 用接收器自己的生命周期跑不完一次网络往返。
      */
     fun answerFromNotification(eventId: String, allow: Boolean)
+
+    /**
+     * 用户在常驻通知里点了「退出」（R057）。
+     *
+     * 语义是「这一次不要了」：停服务、撤通知、把「本次已退出」标记置上让自动恢复
+     * 别再拉起它，但**不动开关**——用户原话是「这个按钮只影响这一次的前台服务状态，
+     * 后续启动还是会启动前台服务」。
+     */
+    fun exitServiceFromNotification()
 }

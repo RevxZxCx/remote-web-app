@@ -473,7 +473,7 @@ class NotificationCenter(
      * 不带 `setAutoCancel(true)`：它不是「点开就没事了」的通知——点开会话并不能
      * 让连接回来。撤掉它的唯一途径是真的连上（见 [cancelLink]）。
      */
-    fun postLink(offline: Boolean, text: String, title: String) {
+    fun postLink(offline: Boolean, text: String, title: String, openSettings: Boolean = false) {
         val nm = manager ?: return
         val notification = NotificationCompat.Builder(context, NoticeChannels.DONE)
             .setSmallIcon(R.drawable.ic_notice_done)
@@ -481,7 +481,9 @@ class NotificationCenter(
             .setContentTitle(title)
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-            .setContentIntent(openSessionIntent(null))
+            // 带会话 id 是「点开去看那条会话」，不带是「点开进首页」；
+            // 「后台连接断了」这条要落到设置页那一行，所以第三种：标记 openSettings。
+            .setContentIntent(openSessionIntent(null, openSettings))
             .setOngoing(offline)
             // 恢复那条点开就该消失；「连不上」那条不能，理由见上面的 KDoc。
             .setAutoCancel(!offline)
@@ -502,6 +504,62 @@ class NotificationCenter(
     /** 撤掉「连不上」通知。 */
     fun cancelLink() {
         manager?.cancel(LINK_ID)
+    }
+
+    /**
+     * R057：后台连接被系统停掉、且用户关掉了「自动恢复」时发的那条提醒。
+     *
+     * ## 为什么不复用 [postLink]
+     * 第三轮审查 P2-2。`postLink` 固定用 [NoticeChannels.DONE]（任务结束）频道，
+     * 而这条通知讲的是**后台连接服务**，与「任务跑完」是两件事：
+     *
+     * 1. **语义错位**：用户关掉「任务结束」频道，理由通常是「我不想每跑一轮就响一声」，
+     *    不代表他不要「后台连接掉了」这种运维级提醒。塞进同一个频道，等于让一个
+     *    与它无关的偏好顺手把它静音。
+     * 2. **可见性没有保证**：`postLink` 全程不查频道是否被关。而 [NoticeChannels.SERVICE]
+     *    是 MIN 重要性、默认折叠，用户关掉它的概率明显更高——若不检查，这条提醒
+     *    会被系统静默丢弃，`planRecovery` 返回的 `NotifyUser` 就成了空操作。
+     *
+     * 所以这里单开一条：**用自己的 id**（与 [LINK_ID] 错开，两者可以同时成立）、
+     * **走 SERVICE 频道**、**发之前先查该频道没被关**。
+     *
+     * ## 为什么不用 `setOngoing`
+     * 它不是「现在就进来看」而是「服务没了，你可能想知道」：用户看完就该能划掉。
+     * 真要让服务回来，开关就在设置页那一行，点开即达。
+     */
+    fun postServiceStopped(title: String, text: String) {
+        val nm = manager ?: return
+        // 频道被用户关掉时宁可不发：发了也是被系统丢弃，还白白让调用方以为通知到了。
+        if (!isChannelEnabled(NoticeChannels.SERVICE)) return
+        val notification = NotificationCompat.Builder(context, NoticeChannels.SERVICE)
+            .setSmallIcon(R.drawable.ic_notice_service)
+            .setColor(WARN_COLOR)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentIntent(openSessionIntent(null, openSettings = true))
+            .setAutoCancel(true)
+            // 🔴 `setOnlyAlertOnce(true)` 不是省事，是必需的（第六轮审查 P2）。
+            //
+            // 第六轮把 `ensureRunning()` 接进了「每次回前台」（`onAppForeground`）与
+            // 「拿到通知权限」，调用频率从「连接状态变化时」变成「每次切回 App」。
+            // 而「自动恢复」关着时它会走 `RecoveryAction.NotifyUser` 分支发这一条。
+            // 没有这一句，用户划掉提醒、切出去再切回来，同一条通知就会被**重新投递**——
+            // 反复重建状态栏条目，看起来像功能在抽风。
+            //
+            // 用 `setOnlyAlertOnce` 而不是在外面记「这次死亡已提示过」：通知 id 固定，
+            // 系统本来就按 id 覆盖；`onlyAlertOnce` 让它安静地覆盖而不是重新弹出。
+            // 用户真要看原因，点进去就是设置页。
+            .setOnlyAlertOnce(true)
+            .setCategory(Notification.CATEGORY_SERVICE)
+            .setVisibility(lockScreenVisibility())
+            .build()
+        nm.notify(SERVICE_STOPPED_ID, notification)
+    }
+
+    /** 撤掉「后台连接已被停掉」那条提醒。 */
+    fun cancelServiceStopped() {
+        manager?.cancel(SERVICE_STOPPED_ID)
     }
 
     /**
@@ -551,7 +609,7 @@ class NotificationCenter(
      * 用 `FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE`：前者让同一个会话的重复通知
      * 共用一条 PendingIntent（否则 extras 会停在第一次那个），后者是 31+ 的硬性要求。
      */
-    private fun openSessionIntent(sessionId: String?): PendingIntent {
+    private fun openSessionIntent(sessionId: String?, openSettings: Boolean = false): PendingIntent {
         val intent = Intent(context, MainActivity::class.java).apply {
             action = ACTION_VIEW
             // 必须带 NEW_TASK：从通知启动 Activity 时若没有它，`startActivity`
@@ -559,10 +617,13 @@ class NotificationCenter(
             // an Activity context requires the FLAG_ACTIVITY_NEW_TASK flag`。
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             if (!sessionId.isNullOrBlank()) putExtra(EXTRA_SESSION_ID, sessionId)
+            // 「后台连接断了」那条点开必须停在设置页那一行，否则用户被丢到首页，
+            // 还得自己找「通知与后台保活」——而他刚刚点的正是那件事。
+            if (openSettings) putExtra(EXTRA_OPEN_SETTINGS, true)
         }
         return PendingIntent.getActivity(
             context,
-            requestCodeFor(sessionId),
+            requestCodeFor(sessionId, openSettings),
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -603,8 +664,29 @@ class NotificationCenter(
      * 所以不同会话**必须**给不同 requestCode，否则所有通知的 contentIntent 会共用
      * 第一条的 extras，点谁都跳去同一个会话。
      */
-    private fun requestCodeFor(sessionId: String?): Int =
-        if (sessionId.isNullOrBlank()) 0 else sessionId.hashCode() and REQUEST_CODE_MASK
+    /**
+     * 给 `PendingIntent` 分配 requestCode。
+     *
+     * ## 🔴 为什么不能只是 `sessionId?.hashCode() ?: 0`（R057 子代理审查 P2-7）
+     *
+     * `PendingIntent.getActivity` 判断「是不是同一个 PendingIntent」用的是
+     * `Intent.filterEquals`，而它**只比 action / data / type / component / categories，
+     * 不比 extras**。所以两个只有 extras 不同的 Intent、requestCode 又一样时，
+     * 第二次会**复用同一个 PendingIntent 并覆盖 extras**——先前那条通知的点击目标
+     * 就被悄悄改掉了。
+     *
+     * 具体到本类：[LINK_ID] 那条（`sessionId = null, openSettings = true`）与
+     * [ACCOUNT_ID] 那条（`sessionId = null, openSettings = false`）原本都落在
+     * requestCode 0 上。先发连接提醒、再发账号提醒 → 连接提醒的「打开设置页」
+     * 被抹成「打开首页」，用户点它只会到首页，还得自己找那一行。
+     *
+     * 所以这里把「没有会话 id」的两种用途各占一个固定段，与会话 hash 段分开。
+     */
+    private fun requestCodeFor(sessionId: String?, openSettings: Boolean): Int = when {
+        !sessionId.isNullOrBlank() -> sessionId.hashCode() and REQUEST_CODE_MASK
+        openSettings -> REQUEST_CODE_SETTINGS
+        else -> REQUEST_CODE_HOME
+    }
 
     companion object {
         /** 「任务结束」通知 id 的起点，与审批的 id 段错开，避免互相顶掉。 */
@@ -645,11 +727,37 @@ class NotificationCenter(
          */
         const val ACCOUNT_ID = 151_073
 
+        /**
+         * R057：「后台连接被系统停掉、且用户关了自动恢复」那条提醒的固定 id。
+         *
+         * 与 [LINK_ID] / [ACCOUNT_ID] 错开：断开连接、账号掉线、服务被停是三件独立的事，
+         * 完全可能同时成立，共用一个槽位会互相顶掉，用户只能看到最后发生的那件。
+         *
+         * 也**不与 [com.revxzxcx.remotewebapp.core.service.ServiceNotice.NOTICE_ID]
+         * （151_074）相同**：那条是前台服务的常驻状态条，生命周期完全不同。
+         * 取 151_076 而不是 151_075，是为了避开 `ServiceNotice.SETTINGS_REQUEST_CODE`
+         * ——两者分属「通知 id」与「PendingIntent requestCode」两个命名空间，技术上不冲突，
+         * 但同号会让日后排查多一次无用功。
+         */
+        const val SERVICE_STOPPED_ID = 151_076
+
         /** 审批 id 的取值范围掩码（`20_000..20_000+0xFFFF`，与完成通知段不重叠）。 */
         const val ASK_ID_MASK = 0xFFFF
 
         /** 跳转用的 requestCode 掩码。 */
         const val REQUEST_CODE_MASK = 0x7FFF
+
+        /**
+         * 「点通知打开设置页」那条的 requestCode。
+         *
+         * 与会话 hash 段（`0..0x7FFF`，见 [REQUEST_CODE_MASK]）**不能重叠**：
+         * 它与 [LINK_ID] 绑定，一旦和某条会话通知撞上，`FLAG_UPDATE_CURRENT`
+         * 会让后发的把先发的 extras 覆盖掉（见 [requestCodeFor] 的 KDoc）。
+         */
+        const val REQUEST_CODE_SETTINGS = 0x8001
+
+        /** 「点账号提醒回首页」那条的 requestCode；理由同 [REQUEST_CODE_SETTINGS]。 */
+        const val REQUEST_CODE_HOME = 0x8002
 
         /** `Intent` 里带会话 id 的键；`MainActivity` 与这里必须一致。 */
         const val EXTRA_SESSION_ID = "com.revxzxcx.remotewebapp.extra.SESSION_ID"
@@ -674,6 +782,24 @@ class NotificationCenter(
 
         /** 广播里带通知 id 的键。 */
         const val EXTRA_NOTICE_ID = "com.revxzxcx.remotewebapp.extra.NOTICE_ID"
+
+        /**
+         * 点通知「进设置页」的标记（R057）。
+         *
+         * 与 [EXTRA_SESSION_ID] 并列而不是复用它：两者的消费方不同——会话 id 要打开
+         * 某条对话，这个标记要打开设置页并滚到「后台连接」那一行。混用一个键会让
+         * `AppRoot` 里那段路由判断变成「字符串非空就开会话」，而它根本不是会话 id。
+         */
+        const val EXTRA_OPEN_SETTINGS = "com.revxzxcx.remotewebapp.extra.OPEN_SETTINGS"
+
+        /**
+         * 「退出后台连接」的广播 action（R057）。
+         *
+         * 与 [ACTION_ANSWER] 分开：那个要带 `eventId` 去回答一条 waterfall 请求，
+         * 这个什么参数都不带、只让服务停下来。合成一个 action 会让接收器里
+         * 「有没有 eventId」变成决定行为的分叉，读起来极易看错。
+         */
+        const val ACTION_EXIT_SERVICE = "com.revxzxcx.remotewebapp.notify.EXIT_SERVICE"
 
         /** 同 id 原地重绘时最多记多少条原请求。 */
         private const val ASK_TRACK_CAPACITY = 32
