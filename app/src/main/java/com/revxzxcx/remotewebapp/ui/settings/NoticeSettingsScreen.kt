@@ -319,6 +319,15 @@ fun NoticeSettingsScreen(
                     RowDivider()
                     LinkStatusRow(ui = linkService)
                 }
+                // 系统频道被单独关掉时必须单独说（第七轮审查 P3）。「后台连接」这个频道
+                // 不在 `NoticeChannels.USER_TOGGLES` 里——App 内没有它的开关，用户只能去
+                // 系统页关它。关掉之后 `noticeUsable()` 恒为 false：开关仍显示「开」、
+                // 状态行只剩「未运行」，而这是全新频道，首次打开开关时连 `lastFailure`
+                // 都是空的，用户完全无从判断。另两个频道有对应的行，这里不能少。
+                if (!status.serviceChannelEnabled) {
+                    RowDivider()
+                    ChannelBlockedRow(detail = "「后台连接」这个系统频道被关掉了，去系统设置里打开——否则后台连接无法维持。")
+                }
                 RowDivider()
                 SwitchRow(
                     icon = Icons.Default.Refresh,

@@ -836,4 +836,61 @@ class LinkServiceWiringContractTest {
         val stop = bodyOf(controller, "fun requestStop()")
         assertTrue("主动收工要重置账本", stop.contains("stoppedNotified = false"))
     }
+
+    @Test
+    fun `换主机之后要双向对账 开关关着的那台不能继续挂着服务`() {
+        // 三个开关按主机分开记。只调单向的 ensureRunning() 的话，
+        // 从「开着的 A」切到「关着的 B」时没有任何路径让服务停下：
+        // wanted() 只在 onStartCommand 里读一次，服务已经在跑就不会再走那段。
+        val controller = source("src/main/java/com/revxzxcx/remotewebapp/core/service/LinkServiceController.kt")
+
+        val reconcile = bodyOf(controller, "fun reconcile()")
+        assertTrue("该跑就起", reconcile.contains("ensureRunning()"))
+        assertTrue("不该跑就停", reconcile.contains("requestStop()"))
+        // 停的那一半必须挂在「服务还活着」上，否则每次换到关着的主机都会白跑一次 stopService。
+        assertTrue(
+            "没在跑就别白停一次",
+            reconcile.contains("if (tracker.serviceAlive) requestStop()"),
+        )
+        // 判据要复用 wanted()，不能退回到只读前景开关（那样通知不可用时服务照样挂着耗电）。
+        assertTrue("判据复用 wanted()", reconcile.contains("if (wanted())"))
+
+        val container = source("src/main/java/com/revxzxcx/remotewebapp/core/AppContainer.kt")
+        // 三处主机发布点都要对账：复用分支、退配对分支、重建分支。
+        val wired = container.split("reconcileService()").size - 1
+        assertTrue("三处主机发布点都要对账，实际 $wired 处", wired >= 3)
+        // 重建分支里对账必须在 publish 之后：否则 hostKey 读到的还是上一台的开关。
+        val rebuilt = bodyOf(container, "private suspend fun installRebuilt(")
+        val publishAt = rebuilt.indexOf("linkStore.publish(book = book, connection = rebuilt)")
+        val reconcileAt = rebuilt.indexOf("reconcileService()")
+        assertTrue("重建分支要发布新簿之后才对账", publishAt > 0 && reconcileAt > publishAt)
+    }
+
+    @Test
+    fun `后台连接频道被单独关掉时要单独指出来 不能只说未运行`() {
+        // SERVICE 频道不在 NoticeChannels.USER_TOGGLES 里——App 内没有它的开关，
+        // 用户只能去系统页关。关掉之后 noticeUsable() 恒 false，开关仍显示「开」、
+        // 状态行只剩「未运行」，而这是全新频道，首次打开时连 lastFailure 都是空的。
+        val status = source("src/main/java/com/revxzxcx/remotewebapp/core/notify/NoticeStatus.kt")
+        assertTrue(
+            "NoticeStatus 要有这个维度",
+            status.contains("val serviceChannelEnabled: Boolean = true"),
+        )
+
+        val container = source("src/main/java/com/revxzxcx/remotewebapp/core/AppContainer.kt")
+        assertTrue(
+            "noticeStatus() 要真的去查这个频道",
+            container.contains("serviceChannelEnabled = notificationCenter.isChannelEnabled(NoticeChannels.SERVICE)"),
+        )
+
+        val screen = source("src/main/java/com/revxzxcx/remotewebapp/ui/settings/NoticeSettingsScreen.kt")
+        assertTrue(
+            "被关掉时要画诊断行",
+            screen.contains("if (!status.serviceChannelEnabled)"),
+        )
+        assertTrue(
+            "诊断行要复用同一个组件，不能各写一套",
+            screen.contains("ChannelBlockedRow(detail = \"「后台连接」这个系统频道被关掉了"),
+        )
+    }
 }

@@ -428,6 +428,15 @@ class AppContainer(context: Context) {
      */
     fun serviceWanted(): Boolean = linkService.wanted()
 
+    /**
+     * 按**当前活动主机**重新对账「服务该不该跑」：该跑就起来，不该跑就停掉。
+     *
+     * 三个开关是按主机分开记的，所以每次活动主机变了都要重估一次。
+     * 之前只接了单向的 `ensureRunning()`，从「开着的 A」切到「关着的 B」时
+     * 服务会一直挂着（第七轮审查 P2）。
+     */
+    private fun reconcileService() = linkService.reconcile()
+
     /** 设置页三个开关的写入入口（R057）；统一走控制器，避免调用点直接摸偏好。 */
     fun setServiceForegroundEnabled(enabled: Boolean) = linkService.setForegroundEnabled(enabled)
 
@@ -506,6 +515,8 @@ class AppContainer(context: Context) {
         lockScreenDetail = noticeSettings.lockScreenDetail,
         askChannelEnabled = notificationCenter.isChannelEnabled(NoticeChannels.ASK),
         doneChannelEnabled = notificationCenter.isChannelEnabled(NoticeChannels.DONE),
+        // 「后台连接」频道 App 内没有开关（不在 USER_TOGGLES 里），只能报它的系统状态。
+        serviceChannelEnabled = notificationCenter.isChannelEnabled(NoticeChannels.SERVICE),
     )
 
     /**
@@ -911,6 +922,8 @@ class AppContainer(context: Context) {
                 // 它会立刻返回（不改订阅）——配置变更重跑 bootstrap 时不会重复订一遍。
                 notifier.attach(plan.connection.remoteEvents)
                 watchCarrier(plan.connection)
+                // 换主机之后按**新主机**的开关重新对账（第七轮审查 P2）。
+                reconcileService()
             }
 
             ConnectionPlan.Drop -> {
@@ -933,6 +946,8 @@ class AppContainer(context: Context) {
                 notificationCenter.cancelLink()
                 NoticeIntents.clear()
                 previous?.close()
+                // 一台主机都没有了：不管上一台的开关是什么，服务都不该继续挂着。
+                reconcileService()
             }
 
             is ConnectionPlan.Rebuild -> {
@@ -982,6 +997,10 @@ class AppContainer(context: Context) {
         linkStore.publish(book = book, connection = rebuilt)
         rememberServiceHost(book)
         _state.value = AppState.Paired
+        // 换主机之后按**新主机**的开关重新对账（第七轮审查 P2）。
+        // 放在 publish 之后：上面那行已经把新 book 发布出去，`linkService.hostKey`
+        // 读到的才是新主机的 hostId，否则读到的是上一台的开关。
+        reconcileService()
 
         // 新连接已经对外可见，这时才轮到释放旧的（见方法开头）。放在这里也顺带保证：
         // 即便 close 抛异常，用户手上的已经是能用的新连接。

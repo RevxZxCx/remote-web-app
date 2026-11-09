@@ -26,6 +26,7 @@ package com.revxzxcx.remotewebapp.core.notify
  * @param lockScreenDetail 锁屏是否显示详细内容。
  * @param askChannelEnabled 「需要确认」这个系统频道是否还被允许。
  * @param doneChannelEnabled 「任务结束」这个系统频道是否还被允许。
+ * @param serviceChannelEnabled 「后台连接」这个系统频道是否还被允许。
  */
 data class NoticeStatus(
     val systemEnabled: Boolean = true,
@@ -36,6 +37,7 @@ data class NoticeStatus(
     val lockScreenDetail: Boolean = true,
     val askChannelEnabled: Boolean = true,
     val doneChannelEnabled: Boolean = true,
+    val serviceChannelEnabled: Boolean = true,
 ) {
 
     /** 此刻是否真的能收到「任务结束」通知（四层全通）。 */

@@ -294,6 +294,31 @@ class LinkServiceController(
      */
     fun wanted(): Boolean = prefs.foregroundEnabled(hostKey) && noticeUsable()
 
+    /**
+     * **双向对账**：换主机之后，该跑就起来、不该跑就停掉。
+     *
+     * ## 为什么不能只调 [ensureRunning]（第七轮审查 P2）
+     * 三个开关都是**按主机分开记**的。切换主机时若只重估「要不要起服务」，
+     * 方向是不对称的：
+     * - 从「开关关的 A」切到「开关开的 B」：后续 `Connected` 帧会走
+     *   [onCarrier] → [ensureRunning]，服务能起来；
+     * - 从「开关开的 A」切到「开关关的 B」：**没有任何路径让服务停下**。
+     *   [wanted] 只在 `ForegroundLinkService.onStartCommand` 里被读一次，
+     *   而服务已经在跑就不会再走那段——于是设置页 B 的「保持后台连接」显示关闭，
+     *   常驻通知却继续挂着并按 B 的载波更新文案。
+     *
+     * 两个方向的差异还取决于切过去之后能不能连上（连不上就没有 `Connected` 帧），
+     * 所以不是「设计上就让它继续跑」能解释的。
+     */
+    fun reconcile() {
+        if (wanted()) {
+            ensureRunning()
+            return
+        }
+        // 开关关着，或通知发不出去：服务不该继续挂着。
+        if (tracker.serviceAlive) requestStop()
+    }
+
     // ---------------------------------------------------------------- 服务回调
 
     /**

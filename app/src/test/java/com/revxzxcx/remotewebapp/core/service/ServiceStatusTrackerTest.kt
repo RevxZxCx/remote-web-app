@@ -141,11 +141,41 @@ class ServiceStatusTrackerTest {
         // 重建 socket 时会先走一帧 Connecting。
         tracker.onCarrier(CarrierState.Connecting)
         assertEquals(ServicePhase.Connecting, tracker.status.value.phase)
+        // ⚠️ 必须断**对外可观察的字段**，不能只断相位（第七轮审查 P2）。
+        // 早先只断言 phase，于是 `ServiceStatus(Connecting)` 把 downForMillis 与
+        // attempt 归零这件事完全测不出来——常驻通知会在
+        // 「正在重连（第 1 次）/ 已断开 2 秒」与「正在连接 / 正在建立连接」之间
+        // 每轮跳一次，而下面 15_000 处重算出来的 4_000L 恰好掩盖了中间态。
+        assertEquals(
+            "Connecting 也要带着已断开多久，否则每一轮重试都从 0 重数",
+            2_000L,
+            tracker.status.value.downForMillis,
+        )
+        assertEquals("重试次数也不能被 Connecting 抹掉", 1, tracker.status.value.attempt)
         now = 15_000L
         tracker.onCarrier(CarrierState.Reconnecting(attempt = 2, retryAtMillis = 0L, reason = "reset"))
         assertEquals(
             "断开起点被 Connecting 清掉的话，用户看到时间倒退只能理解成刚刚才断",
             4_000L,
+            tracker.status.value.downForMillis,
+        )
+    }
+
+    @Test
+    fun `Connecting 窗口里断开时长要接着走 不能冻住`() {
+        var now = 10_000L
+        val tracker = ServiceStatusTracker(now = { now })
+        tracker.onStarting()
+        now = 11_000L
+        tracker.onCarrier(CarrierState.Reconnecting(attempt = 1, retryAtMillis = 0L, reason = "reset"))
+        now = 13_000L
+        tracker.onCarrier(CarrierState.Connecting)
+        // socket 超时窗口可以长达 30 秒，这段时间相位一直停在 Connecting。
+        now = 18_000L
+        tracker.tick()
+        assertEquals(
+            "tick 对 Connecting 直接 return 的话，这 30 秒里「已断开 X」是个卡住的数字",
+            7_000L,
             tracker.status.value.downForMillis,
         )
     }

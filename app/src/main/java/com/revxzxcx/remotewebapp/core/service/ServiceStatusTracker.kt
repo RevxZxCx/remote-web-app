@@ -109,10 +109,24 @@ class ServiceStatusTracker(
             }
 
             is CarrierState.Connecting -> {
-                // ⚠️ **不清 `downSince`**（R057 审查 P3）。一次断线里可能先 `Reconnecting`
-                // 再 `Connecting`（重建 socket、重新握手），此时把起点清掉会让「已断开 X」
-                // 从 0 重数，用户看到时间倒退只能理解成「刚刚才断的」。
-                _status.value = ServiceStatus(phase = ServicePhase.Connecting)
+                // ⚠️ **不清 `downSince`，也不把对外字段归零**（R057 审查 P2）。
+                //
+                // 一次断线里必然是 `Reconnecting → Connecting → Reconnecting` 循环：
+                // `RemoteStreamMux` 每次建连尝试开始都写 `Connecting`，失败后写 `Reconnecting`。
+                // 若这里发一个全新的 `ServiceStatus(Connecting)`，`downForMillis` 与 `attempt`
+                // 会落回默认值 0 —— 常驻通知在「正在重连（第 N 次）/ 已断开 20 秒」与
+                // 「正在连接 / 正在建立连接」之间每轮跳一次，而 `tick()` 对 Connecting 直接
+                // return，整个建连窗口（TCP 超时可达 30 秒）里「已断开 X」完全停止跳动；
+                // 设置页更会把运行中的服务显示成「启动中」。
+                //
+                // 所以保留上一相的断开起点与重试次数，只换相位。首次连上时两者本来就是 0/0。
+                val since = downSince
+                val previous = _status.value
+                _status.value = ServiceStatus(
+                    phase = ServicePhase.Connecting,
+                    downForMillis = if (since == null) 0L else (at - since).coerceAtLeast(0L),
+                    attempt = previous.attempt,
+                )
             }
 
             is CarrierState.Reconnecting -> {
@@ -188,7 +202,16 @@ class ServiceStatusTracker(
                 current.copy(downForMillis = (at - since).coerceAtLeast(0L))
             }
 
-            // 其余三相没有会走的数字（Connecting 不显示时长，Unpaired/Stopped 同理）。
+            // ⚠️ Connecting 也要走（R057 审查 P2）。建连重试期间相位会在
+            // `Reconnecting ↔ Connecting` 之间来回跳，每一次 socket 超时（可达 30 秒）
+            // 都是一个 Connecting 窗口；不让它 tick 的话，「已断开 X」会在窗口里冻住，
+            // 用户看到的是一个卡住不动的数字。
+            ServicePhase.Connecting -> {
+                val since = downSince ?: return
+                current.copy(downForMillis = (at - since).coerceAtLeast(0L))
+            }
+
+            // 其余两相没有会走的数字（Unpaired 是终态，Stopped 是没在跑）。
             else -> return
         }
     }
