@@ -65,11 +65,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.FlowPreview
 import com.revxzxcx.remotewebapp.core.capsule.CapsuleBridge
-import com.revxzxcx.remotewebapp.core.capsule.beginsNewTurn
+import com.revxzxcx.remotewebapp.core.capsule.CapsuleLiveFrame
+import com.revxzxcx.remotewebapp.core.capsule.CapsuleLiveState
+import com.revxzxcx.remotewebapp.core.capsule.advanceLive
 import com.revxzxcx.remotewebapp.core.capsule.capsuleActive
-import com.revxzxcx.remotewebapp.core.capsule.clipForCapsule
 import com.revxzxcx.remotewebapp.core.capsule.clipReportForCapsule
-import com.revxzxcx.remotewebapp.core.capsule.stickyText
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -137,33 +137,16 @@ class ChatViewModel(
 
     private val _state = MutableStateFlow(ChatUiState())
 
-    /**
-     * B018：胶囊第一行「汇报」的粘滞副本。
-     *
-     * 用户 m04765 第 8 条：*「实际最好做成两列，并且固定，没有新的操作内容的时候
-     * 就不刷新，而不是显示一段时间后就不显示操作了，下一次操作来时才重新显示」*。
-     *
-     * 所以这里不是「当前帧有没有」而是「**最近一次有的**」——助手在几次工具调用之间
-     * 常常长时间没有正文输出，若按帧取，那一行会在整个空档期消失，看起来像断了。
-     * 只在真正出现新正文时覆盖。
-     */
-    private var capsuleReport: String? = null
 
-    /**
-     * B018：胶囊第二行「当前操作」的粘滞副本。理由同上。
+        /**
+     * 胶囊的跨帧状态（汇报粘滞 + 动作计数 + 轮次边界）。
      *
-     * 与 [capsuleReport] 分开保存是刻意的：他说的是「两列」，即两行**各自独立**，
-     * 一行有新内容不该把另一行顶掉。
+     * 状态转移全部在 [advanceLive] 里，这里只存一个值。
+     * 抽出去的理由：第二轮变异验证里，埋在 `collect` 里的四个判定
+     * （无工具也生成动作行、thinking 不看 tool、换轮不清记忆）**一个都没被杀掉**。
      */
-    private var capsuleAction: String? = null
+    private var capsuleLive: CapsuleLiveState = CapsuleLiveState()
 
-    /**
-     * B018、审查第一轮 P2：上一帧是不是还在跑，用来认出「新一轮开始」。
-     *
-     * 在 false → true 的那一帧把两个粘滞快照清空，否则第二轮开头会拿着上一轮的末句
-     * 和上一轮最后一个工具名当“当前…”显示。
-     */
-    private var capsuleWasRunning: Boolean = false
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
 
     /** 输入框内容（放在 ViewModel 里，旋转屏幕不丢）。 */
@@ -750,60 +733,63 @@ class ChatViewModel(
                     val running = ui.live
                     // B018：两行各自独立取源。
                     //   第 1 行「汇报」← 流式正文（助手这一轮说的话）
-                    //   第 2 行「操作」← 最近一次工具名
-                    // 旧实现把 todo 正文塞进 report，于是标题等于把 subText 又抄了一遍，
-                    // 而真正的汇报反而没地方显示。
-                    // 审查第一轮 P2：**指纹里必须用裁剪后的值**。
-                    // 用原值的话，流式期间每多一个字前 22 字就变一次，
-                    // `distinctUntilChanged` 几乎每帧放行，与下面 KDoc 写的
-                    // 「推全文只会让每一帧 hash 都不同」直接矛盾。
+                    //   第 2 行「操作」← 最近一次工具调用
+                    // 旧实现把 todo 正文塞进 report，于是标题等于把 subText 又抄了一遍。
+                    //
+                    // 审查第一轮 P2：**指纹里必须用裁剪后的值**。用原值的话，
+                    // 流式期间每多一个字前 22 字就变一次，`distinctUntilChanged`
+                    // 几乎每帧放行，与「推全文只会让每一帧 hash 都不同」直接矛盾。
                     val freshReport = running?.text
                         ?.lineSequence()
                         ?.lastOrNull { it.isNotBlank() }
                         ?.trim()
                         ?.takeIf { it.isNotEmpty() }
                         ?.let { clipReportForCapsule(it) }
-                    val freshAction = running?.toolNames?.values?.lastOrNull()
+                    // R062：不再把 `bash` / `write` 原样贴到卡片上。
+                    //
+                    // 取 `entries` 而不是 `values`：计数需要的身份是**这一次工具调用**的 id
+                    // （`toolNames` 的 key，由后端给，每次调用一个新值），不是工具名本身——
+                    // 同名工具连跑 N 次时工具名一直一样，只有 id 会变。
+                    val lastTool = running?.toolNames?.entries?.lastOrNull()
+                    val freshTool = lastTool?.value
                         ?.trim()
                         ?.takeIf { it.isNotEmpty() }
-                        ?.let { clipForCapsule(it) }
                     CapsuleFingerprint(
                         total = todos.total,
                         done = todos.done,
                         active = todos.items.firstOrNull { it.status.capsuleActive }?.content,
                         report = freshReport,
-                        action = freshAction,
+                        tool = freshTool,
+                        // R062 审查 P2：动作的身份是「这一次工具调用」的 id，不是 UI 帧、
+                        // 也不是 attemptId。前者会把同一次调用数成 `×37`；后者是 step 级，
+                        // 同一 step 内连跑 N 次同名工具只会算一次。
+                        attemptKey = lastTool?.key,
                         running = running != null,
+                        // P1：轮次边界只能看 `generating`。`live` 在每一步之间都会被清，
+                        // 拿它当边界会把每一 step 判成新轮，计数永远起不来。
+                        generating = ui.generating,
                     )
                 }
                 .distinctUntilChanged()
                 .collect { fp ->
-                    // B018 粘滞：有新的才覆盖，没有就留着上一次。
-                    // 直接写 `report = fp.report` 会让助手两次工具调用之间的空档期
-                    // 整行消失（用户看到的是「显示一段时间后就不显示了」）。
-                    //
-                    // 但粘滞必须有轮次边界（审查第一轮 P2）：同一会话跑第二轮时，模型还没吐字的那一瞬
-                    // 若不清，卡片上还挂着上一轮的末句与最后一个工具名，看起来像那个工具正在跑。
-                    if (beginsNewTurn(capsuleWasRunning, fp.running)) {
-                        capsuleReport = null
-                        capsuleAction = null
-                    }
-                    capsuleWasRunning = fp.running
-                    capsuleReport = stickyText(capsuleReport, fp.report)
-                    capsuleAction = stickyText(capsuleAction, fp.action)
-                    // 一轮彻底结束（不再 running）时两行都留着：任务卡这时显示的是
-                    // 「已完成」，留着上一次的末态比空着更有信息量。
-                    //
-                    // ⚠ 这两个字段是 ChatViewModel 的私有状态，CapsuleBridge 够不到它们（它只清自己的
-                    // `_live`）。所以断连重连后同一个 VM 的下一次 `_state` 发射会把断连前的旧汇报
-                    // 重新发出。这属于「同一会话内的粘滞」，语义上可接受，但排查「重连后
-                    // 卡片先闪一下旧内容」时不要去 CapsuleBridge 那边找。
+                    val next = advanceLive(
+                        state = capsuleLive,
+                        frame = CapsuleLiveFrame(
+                            generating = fp.generating,
+                            running = fp.running,
+                            report = fp.report,
+                            tool = fp.tool,
+                            attemptKey = fp.attemptKey,
+                        ),
+                    )
+                    capsuleLive = next
+
                     CapsuleBridge.publishLive(
                         sessionId = sessionId,
                         todos = _state.value.todos,
-                        report = capsuleReport?.let { clipReportForCapsule(it) },
-                        action = capsuleAction?.let { clipForCapsule(it) },
-                        running = fp.running,
+                        report = next.report?.let { clipReportForCapsule(it) },
+                        action = next.action,
+                        thinking = next.thinking,
                     )
                 }
         }
@@ -821,8 +807,22 @@ class ChatViewModel(
         val done: Int,
         val active: String?,
         val report: String?,
-        val action: String?,
+        /**
+         * 当前正在跑的工具的**原始名字**（`bash` / `write` / ...），不是渲染后的短语。
+         *
+         * 指纹只回答「有没有变化」。翻成人话与连续计数都在 `collect` 里做，
+         * 因为计数需要跨 step 累加（`LiveFrame.Start` 每个 step 都会重建
+         * `LiveAttempt`，`toolNames` 只装当前 step 的工具，在指纹里数永远是 1）。
+         *
+         * 名字改成 `tool` 而不是继续叫 `action`：它现在装的东西和卡片上显示的
+         * 那一行已经不是一回事了，留着同名会让下一个人以为它就是最终文案。
+         */
+        val tool: String?,
+        /** 本次工具调用的身份（`LiveAttempt.attemptId`）。用于判断是「同一次调用在吐字」还是「又发生了一次」。 */
+        val attemptKey: String?,
         val running: Boolean,
+        /** 轮次级「还在生成」。见 [CapsuleLiveState.wasGenerating]。 */
+        val generating: Boolean,
     )
 
     /**

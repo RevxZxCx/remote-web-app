@@ -181,7 +181,12 @@ internal class CapsuleCenter(private val context: Context) {
     private fun build(state: CapsuleState, actions: List<CapsuleAction>): Notification {
         // B018：标题两行各自独立，缺一行就整行省略。拼装逻辑抽在 `capsuleTitle` 里，
         // 因为 `build()` 是 private + @RequiresApi(36)，单测够不着（变异验证实测存活过）。
-        val title = capsuleTitle(state.report, state.action, fallback = state.title)
+        val title = capsuleTitle(
+                report = state.report,
+                action = state.action,
+                fallback = state.title,
+                thinking = state.thinking,
+            )
 
         val builder = Notification.Builder(context, CHANNEL_ID)
             // 图标必须跟着状态走（R059-B016）：之前这里固定 `ic_capsule`，

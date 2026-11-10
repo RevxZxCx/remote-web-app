@@ -801,3 +801,595 @@ class CapsuleBeginsNewTurnTest {
 }
 
 }
+
+/**
+ * R062：工具名 → 人话。
+ *
+ * 用户原话：「而不是显示 bash、write 此类名称」。
+ */
+class CapsuleToolPhraseTest {
+
+    @Test
+    fun `命令执行类工具都说正在运行命令`() {
+        listOf("bash", "shell", "ops_bash", "terminal", "BASH").forEach {
+            assertEquals("正在运行命令…", toolPhrase(it))
+        }
+    }
+
+    @Test
+    fun `读写文件类工具分开说`() {
+        assertEquals("正在读取文件…", toolPhrase("read"))
+        assertEquals("正在读取文件…", toolPhrase("ops_read_files"))
+        assertEquals("正在写入文件…", toolPhrase("write"))
+        assertEquals("正在写入文件…", toolPhrase("edit"))
+    }
+
+    @Test
+    fun `未知工具不显示原名 而是统一兜底`() {
+        val phrase = toolPhrase("some_weird_tool_vendor_specific")
+        assertEquals("正在调用工具…", phrase)
+        // 原名不能泄漏到展示文案里。
+        assertFalse(phrase.contains("some_weird_tool"))
+    }
+
+    @Test
+    fun `没有工具在走时说正在思考`() {
+        assertEquals(THINKING_TEXT, toolPhrase(null))
+        assertEquals(THINKING_TEXT, toolPhrase(""))
+        assertEquals(THINKING_TEXT, toolPhrase("   "))
+    }
+
+    @Test
+    fun `工具名不区分大小写也不在意首尾空格`() {
+        assertEquals(toolPhrase("bash"), toolPhrase("  BaSh  "))
+    }
+
+    @Test
+    fun `短语长度必须在一行预算内 否则用户会一直看到截断`() {
+        // 真机：标题一行 12 字。带 "▸ " 与 "×NN" 后仍要能放下。
+        val samples = listOf(
+            "bash", "read", "write", "grep", "web_search", "task", "todo_write", null,
+        )
+        samples.forEach { name ->
+            val shown = actionLine(name, 13)
+            // "▸ " + 短语(<=7) + "×13"(=3) <= 12
+            assertTrue(
+                "动作行太长会被系统截断: $shown",
+                shown.length + 2 <= CapsuleContent.TITLE_LINE_MAX_CHARS,
+            )
+        }
+    }
+    @Test
+    fun `上网类工具要说联网 不能落到万能兼容那句`() {
+        // 审查点名的一批工具名里带 search 但实际上网，
+        // 旧写法让它们全部落到「正在调用工具…」——用户看不出区别。
+        val online = listOf(
+            "multi_search", "advanced_search", "platform_search",
+            "domain_search", "cache_search", "free_search_test", "video_search",
+        )
+        online.forEach { assertEquals(it, "正在联网查询…", toolPhrase(it)) }
+    }
+
+    @Test
+    fun `多智能体协作要说派子代理 不能落到万能兼容`() {
+        // 第三轮审查 P3：只有真的在创建子代理才能说「派子代理」。
+        // 把「查看 / 中断 / 等待」也写成「派子代理」，方向是相反的。
+        listOf("task", "subagent", "subagent_fork", "spawn_teammate").forEach {
+            assertEquals(it, "正在派子代理…", toolPhrase(it))
+        }
+        listOf("wait_agent", "interrupt_agent", "list_agents").forEach {
+            assertNotEquals(it, "正在派子代理…", toolPhrase(it))
+            assertNotEquals(it, "正在调用工具…", toolPhrase(it))
+        }
+        assertEquals("正在发消息…", toolPhrase("send_message"))
+        listOf("update_goal", "create_goal").forEach {
+            assertEquals(it, "正在更新计划…", toolPhrase(it))
+        }
+        assertEquals("正在读取文件…", toolPhrase("read_image"))
+    }
+
+    @Test
+    fun `未知工具不该吐出内部名字`() {
+        // 用户原话：「而不是显示 bash、write 此类名称」。
+        // 未知工具同理：它的名字是给程序看的，不是给人看的。
+        val phrase = toolPhrase("mcp__github__create_pull_request")
+        assertEquals("正在调用工具…", phrase)
+        assertFalse(phrase.contains("mcp"))
+        assertFalse(phrase.contains("github"))
+    }
+
+}
+
+/**
+ * R062：重复动作计数。
+ *
+ * 用户原话：模型一直连续运行 bash，流体云上一直显示 bash，「让人以为是卡住了」。
+ */
+class CapsuleRepeatCountTest {
+
+    @Test
+    fun `第一次出现计为 1`() {
+        assertEquals(1, nextRepeat(previousPhrase = null, freshPhrase = "A", previousRepeat = 0))
+    }
+
+    @Test
+    fun `连续同一个短语递增`() {
+        assertEquals(2, nextRepeat("A", "A", 1))
+        assertEquals(3, nextRepeat("A", "A", 2))
+        assertEquals(13, nextRepeat("A", "A", 12))
+    }
+
+    @Test
+    fun `换了动作就从 1 重新数`() {
+        assertEquals(1, nextRepeat("A", "B", 9))
+    }
+
+    @Test
+    fun `刚开始或刚换轮时 previous 为 null 也从 1 开始`() {
+        assertEquals(1, nextRepeat(null, "A", 7))
+    }
+
+    @Test
+    fun `计数顺序连着跑不会错位`() {
+        var phrase: String? = null
+        var repeat = 0
+        val seen = mutableListOf<Int>()
+        // A A A B B A
+        listOf("A", "A", "A", "B", "B", "A").forEach { fresh ->
+            repeat = nextRepeat(phrase, fresh, repeat)
+            phrase = fresh
+            seen.add(repeat)
+        }
+        assertEquals(listOf(1, 2, 3, 1, 2, 1), seen)
+    }
+}
+
+/** R062：[actionLine] 的显示形态。 */
+class CapsuleActionLineTest {
+
+    @Test
+    fun `第一次不显示乘号 因为×1 是噪音`() {
+        val line = actionLine("bash", 1)
+        assertEquals("正在运行命令…", line)
+        assertFalse(line.contains("×"))
+    }
+
+    @Test
+    fun `第二次起显示乘号与次数`() {
+        assertEquals("正在运行命令…×2", actionLine("bash", 2))
+        assertEquals("正在运行命令…×13", actionLine("bash", 13))
+    }
+
+    @Test
+    fun `计数封顶在 99 不能无限涨`() {
+        // 一行只有 12 字预算："▸ "(2) + 短语(7) + "×99"(3) = 12。
+        // → ×100 是 4 位数，溢出后被系统切掉的恰好是这个功能唯一新增的信息。
+        assertEquals("正在运行命令…×99", actionLine("bash", 100))
+        assertEquals("正在运行命令…×99", actionLine("bash", 250))
+        // 封顶后长度恒定，不会因次数变大而挤掉别的字。
+        assertEquals(actionLine("bash", 100).length, actionLine("bash", 9_999).length)
+    }
+
+    @Test
+    fun `没有工具时说正在思考`() {
+        assertEquals(THINKING_TEXT, actionLine(null, 1))
+        // 即使连续两次也不该说「正在思考 ×2」——那不是一个「动作」。
+        assertEquals("正在思考…×2", actionLine(null, 2))
+    }
+}
+
+/**
+ * R062：`thinking` 是一个独立开关，不是 action 行的一个取值。
+ *
+ * 审查第一轮 P1 的教训：最初把「正在思考」写进 action，再用
+ * `action != THINKING_TEXT` 把它抑制掉。可 `actionLine` 在连续次数 ≥ 2 时
+ * 输出的是「正在思考…×2」，不再全等于 `THINKING_TEXT`，抑制**一次都没生效**。
+ * 现在两者结构上互斥：action 只装真实动作，thinking 只在两行全空时兜底。
+ */
+class CapsuleThinkingSuppressTest {
+
+    @Test
+    fun `有汇报时 不给思考行留位置 汇报要吃满两行`() {
+        val title = capsuleTitle(
+            report = "一个非常长的汇报内容占满两行",
+            action = null,
+            fallback = "会话名",
+            thinking = true,
+        )
+        assertFalse(title.contains(THINKING_TEXT))
+        assertFalse(title.contains("\n"))
+        assertEquals("一个非常长的汇报内容占满两行", title)
+    }
+
+    @Test
+    fun `既没汇报也没动作时 正在思考才出现`() {
+        val title = capsuleTitle(
+            report = null,
+            action = null,
+            fallback = "会话名",
+            thinking = true,
+        )
+        assertEquals("▸ 正在思考…", title)
+    }
+
+    @Test
+    fun `不在跑的时候 不该说正在思考`() {
+        val title = capsuleTitle(
+            report = null,
+            action = null,
+            fallback = "会话名",
+            thinking = false,
+        )
+        assertEquals("会话名", title)
+    }
+
+    @Test
+    fun `有真实动作时 动作行照常占第二行`() {
+        val title = capsuleTitle(
+            report = "汇报",
+            action = "正在运行命令…×3",
+            thinking = false,
+        )
+        val lines = title.split("\n")
+        assertEquals(2, lines.size)
+        assertTrue(lines[0].startsWith("汇报"))
+        assertTrue(lines[1].startsWith("▸ 正在运行命令"))
+    }
+
+    @Test
+    fun `思考行与动作行不会同时出现`() {
+        val withAction = capsuleTitle(report = null, action = "正在读取文件…", thinking = true)
+        assertFalse(withAction.contains(THINKING_TEXT))
+    }
+}
+
+/**
+ * R062：动作行的跨帧状态转移。
+ *
+ * 这组用例是专门为一个存活的变异体补的（M10：把 `collect` 里的
+ * `capsuleLastPhrase = null; capsuleRepeat = 0` 删掉，89 项全绿）。
+ * 根因是那两句埋在回调里，单测够不到。
+ *
+ * 第一轮审查 P2-1 又改了身份口径：原来靠「短语相同」判断连续，
+ * 但调用点在 `distinctUntilChanged()` 之后，流式期间正文每变一帧就记一次，
+ * 同一次工具调用被数成 ×37。现在用 `actionKey`（attemptId）当身份。
+ */
+class CapsuleAdvanceActionTest {
+
+    private fun adv(
+        m: ActionMemory,
+        wasRunning: Boolean = true,
+        nowRunning: Boolean = true,
+        actionKey: String?,
+        phrase: String = "正在运行命令…",
+    ): ActionMemory = advanceAction(
+        memory = m,
+        wasRunning = wasRunning,
+        nowRunning = nowRunning,
+        actionKey = actionKey,
+        phrase = phrase,
+    )
+
+    @Test
+    fun `同一个动作在不同 step 里连着来 次数递增`() {
+        var m = ActionMemory()
+        m = adv(m, actionKey = "a1")
+        assertEquals(1, m.repeat)
+        m = adv(m, actionKey = "a2")
+        assertEquals(2, m.repeat)
+        m = adv(m, actionKey = "a3")
+        assertEquals(3, m.repeat)
+    }
+
+    @Test
+    fun `同一次工具调用在流式吐字时不能重复计数`() {
+        // 这是审查 P2-1 的核心：同一 attemptId 下正文每变一帧都会调一次，
+        // 计数若跟着涨，用户看到的就是「正在运行命令…×37」。
+        var m = ActionMemory()
+        repeat(20) { m = adv(m, actionKey = "same-attempt") }
+        assertEquals(1, m.repeat)
+    }
+
+    @Test
+    fun `换了工具就从 1 重新数`() {
+        var m = ActionMemory()
+        repeat(5) { i -> m = adv(m, actionKey = "step-$i") }
+        assertEquals(5, m.repeat)
+        m = adv(m, actionKey = "step-read", phrase = "正在读取文件…")
+        assertEquals(1, m.repeat)
+        assertEquals("正在读取文件…", m.phrase)
+    }
+
+    @Test
+    fun `换轮必须归零 否则上一轮的次数会带进新一轮`() {
+        var m = ActionMemory()
+        repeat(7) { i -> m = adv(m, actionKey = "step-$i") }
+        assertEquals(7, m.repeat)
+        // 一轮结束：原样返回，不改写成「正在思考」
+        m = adv(m, wasRunning = true, nowRunning = false, actionKey = null, phrase = "正在思考…")
+        assertEquals(7, m.repeat)
+        assertEquals("正在运行命令…", m.phrase)
+        // 下一轮开始，第一个动作又是 bash
+        m = adv(m, wasRunning = false, nowRunning = true, actionKey = "fresh")
+        assertEquals(1, m.repeat)
+    }
+
+    @Test
+    fun `收尾时保留末态 不能把动作行改写成正在思考`() {
+        // 审查 P2-2：旧写法在 nowRunning == false 时把动作行换成 toolPhrase(null)，
+        // 于是「任务已完成」的卡片上写着「▸ 正在思考…」，与设计直接矛盾。
+        var m = adv(ActionMemory(), actionKey = "a1")
+        val ended = adv(m, wasRunning = true, nowRunning = false, actionKey = null, phrase = "正在思考…")
+        assertEquals(m, ended)
+    }
+
+    @Test
+    fun `轮内的工具间隔不会把计数归零 否则「一直显示 bash」又回来了`() {
+        // 这条用例的前提被第一版写错了（断言 `expected:1 but was:4`）。
+        //
+        // 没有工具的那一帧，`watchCapsule` 里 `action` 直接为 null，
+        // **根本不会调 `advanceAction`**，所以计数原封不动。
+        // 下一帧 bash 带新 attemptId 继续 +1——这正是用户要的
+        // 「一直连续运行 bash 就显示 ×N」。
+        var m = ActionMemory()
+        repeat(3) { i -> m = adv(m, actionKey = "step-$i") }
+        assertEquals(3, m.repeat)
+        // 空档帧不调 advanceAction：状态原样传下去。
+        val afterGap = m
+        assertEquals(3, afterGap.repeat)
+        // 下一次 bash（新 attemptId、同一句短语）应该继续数到 4。
+        m = adv(m, actionKey = "after-gap")
+        assertEquals(4, m.repeat)
+    }
+
+    @Test
+    fun `新轮里继续同一个工具 重新从 1 数到 2`() {
+        var m = adv(ActionMemory(), actionKey = "x1")
+        assertEquals(1, m.repeat)
+        m = adv(m, actionKey = "x2")
+        assertEquals(2, m.repeat)
+        // 换轮
+        m = adv(m, wasRunning = true, nowRunning = false, actionKey = null)
+        m = adv(m, wasRunning = false, nowRunning = true, actionKey = "y1")
+        assertEquals(1, m.repeat)
+        m = adv(m, actionKey = "y2")
+        assertEquals(2, m.repeat)
+    }
+}
+
+/**
+ * R062 第二轮的抽取：`advanceLive` 把「每一帧该显示什么」收敛成一个纯函数。
+ *
+ * 第一版这些判定全埋在 `ChatViewModel.watchCapsule` 的 `collect { }` 里，
+ * 12 个变异体只杀掉 7 个——`没有工具也生成动作行`、`thinking 不看 tool`、
+ * `换轮不清动作记忆` 三个改坏了测试一条都不红。抽出来才测得到。
+ */
+class CapsuleAdvanceLiveTest {
+
+    private fun frame(
+        running: Boolean = true,
+        report: String? = null,
+        tool: String? = null,
+        attemptKey: String? = null,
+        // 默认与 running 一致：对绝大多数用例来说「有 live 预览」就是「在生成」。
+        // 真正区分二者的场景见下面「上一轮结束」那几条。
+        generating: Boolean = running,
+    ) = CapsuleLiveFrame(
+        generating = generating,
+        running = running,
+        report = report,
+        tool = tool,
+        attemptKey = attemptKey,
+    )
+
+    @Test
+    fun `有工具时动作行是它翻译过来的短语`() {
+        val st = advanceLive(CapsuleLiveState(), frame(tool = "bash", attemptKey = "a1"))
+        assertEquals("正在运行命令…", st.action)
+        assertFalse(st.thinking)
+    }
+
+    @Test
+    fun `没有工具时不生成动作行 把整行让给汇报`() {
+        val st = advanceLive(CapsuleLiveState(), frame(report = "正在梳理数据链路"))
+        assertNull(st.action)
+        assertEquals("正在梳理数据链路", st.report)
+        // 有汇报就不该再冒一句「正在思考」把汇报挤回一行。
+        assertFalse(st.thinking)
+    }
+
+    @Test
+    fun `没有工具也没有汇报时才说正在思考`() {
+        val st = advanceLive(CapsuleLiveState(), frame())
+        assertNull(st.action)
+        assertTrue(st.thinking)
+    }
+
+    @Test
+    fun `有工具时绝不会说正在思考`() {
+        val st = advanceLive(CapsuleLiveState(), frame(tool = "bash", attemptKey = "a1"))
+        assertFalse(st.thinking)
+    }
+
+    @Test
+    fun `换轮要清掉汇报与计数`() {
+        // 第一轮跑到连做 3 次 bash、有汇报
+        var st = CapsuleLiveState()
+        st = advanceLive(st, frame(report = "第一轮的汇报", tool = "bash", attemptKey = "a1"))
+        st = advanceLive(st, frame(report = "第一轮的汇报", tool = "bash", attemptKey = "a2"))
+        st = advanceLive(st, frame(report = "第一轮的汇报", tool = "bash", attemptKey = "a3"))
+        assertEquals(3, st.memory.repeat)
+        // 一轮结束
+        st = advanceLive(st, frame(running = false))
+        // 新一轮开始，模型还没吐字
+        st = advanceLive(st, frame(running = true))
+        assertNull(st.report)
+        assertEquals(0, st.memory.repeat)
+        assertNull(st.memory.phrase)
+        assertNull(st.lastAction)
+    }
+
+    @Test
+    fun `一轮结束时保留最后一个真实动作 不能改写成正在思考`() {
+        var st = CapsuleLiveState()
+        st = advanceLive(st, frame(tool = "bash", attemptKey = "a1"))
+        assertEquals("正在运行命令…", st.action)
+        st = advanceLive(st, frame(running = false))
+        assertEquals("正在运行命令…", st.action)
+        assertFalse(st.thinking)
+    }
+
+    @Test
+    fun `同一 attemptId 的流式帧不会把计数推上去`() {
+        var st = CapsuleLiveState()
+        repeat(15) {
+            st = advanceLive(
+                st,
+                frame(report = "逐字增长的汇报 $it", tool = "bash", attemptKey = "same"),
+            )
+        }
+        assertEquals(1, st.memory.repeat)
+        assertEquals("正在运行命令…", st.action)
+    }
+
+    @Test
+    fun `连续三次不同的 bash 调用要显示乘号`() {
+        var st = CapsuleLiveState()
+        st = advanceLive(st, frame(tool = "bash", attemptKey = "a1"))
+        st = advanceLive(st, frame(tool = "bash", attemptKey = "a2"))
+        st = advanceLive(st, frame(tool = "bash", attemptKey = "a3"))
+        assertEquals("正在运行命令…×3", st.action)
+    }
+
+    @Test
+    fun `汇报为空时不要用空串把上一句顶掉`() {
+        var st = CapsuleLiveState()
+        st = advanceLive(st, frame(report = "第一句汇报", tool = "bash", attemptKey = "a1"))
+        assertEquals("第一句汇报", st.report)
+        st = advanceLive(st, frame(report = "", tool = "bash", attemptKey = "a2"))
+        assertEquals("第一句汇报", st.report)
+        st = advanceLive(st, frame(report = "   ", tool = "bash", attemptKey = "a3"))
+        assertEquals("第一句汇报", st.report)
+    }
+
+    @Test
+    fun `同一次工具调用推多帧不能重复计数`() {
+        // 流式期间同一次调用会推很多帧（参数逐渐完整）。
+        // 计数身份必须是调用 id，同 id 只能算一次。
+        var st = CapsuleLiveState()
+        st = advanceLive(st, frame(tool = "bash", attemptKey = "call-1"))
+        st = advanceLive(st, frame(tool = "bash", attemptKey = "call-1"))
+        st = advanceLive(st, frame(tool = "bash", attemptKey = "call-1"))
+        assertEquals(1, st.memory.repeat)
+        assertEquals("正在运行命令…", st.action)
+    }
+
+    @Test
+    fun `同一 step 内连跑同名工具要能数到第三次`() {
+        // attemptId 是 step 级的，一个 step 里跑 3 次 bash 它不变。
+        // 拿它当计数身份就只会算一次——用户要的 ×3 出不来。
+        var st = CapsuleLiveState()
+        st = advanceLive(st, frame(tool = "bash", attemptKey = "a-call-1"))
+        st = advanceLive(st, frame(tool = "bash", attemptKey = "a-call-2"))
+        st = advanceLive(st, frame(tool = "bash", attemptKey = "a-call-3"))
+        assertEquals(3, st.memory.repeat)
+        assertEquals("正在运行命令…×3", st.action)
+    }
+
+    @Test
+    fun `step 之间 live 被清不算换轮 否则连续 bash 永远计不到 2`() {
+        // 真实帧序：ChatReducer 在每个 step 的 assistant/message 落盘时都 `dropLive`，
+        // 但 `generating` 仍为 true。旧写法拿 `live != null` 当轮次边界，
+        // 于是每一步都被当成新一轮，计数每格清零——用户要的 ×N 永远出不来。
+        var st = CapsuleLiveState()
+        st = advanceLive(st, frame(tool = "bash", attemptKey = "s1-bash"))
+        st = advanceLive(st, frame(generating = true, running = false, report = "第一步说完了"))
+        st = advanceLive(st, frame(tool = "bash", attemptKey = "s2-bash"))
+        assertEquals(2, st.memory.repeat)
+        assertEquals("正在运行命令…×2", st.action)
+    }
+
+    @Test
+    fun `轮内没工具时不能挂上上一个动作行`() {
+        // 工具已经跑完、模型正在写文字：卡片上还写着「正在运行命令」是假话。
+        var st = CapsuleLiveState()
+        st = advanceLive(st, frame(tool = "bash", attemptKey = "a1"))
+        assertEquals("正在运行命令…", st.action)
+        st = advanceLive(st, frame(generating = true, running = false, report = "正在整理结果"))
+        assertNull(st.action)
+        assertEquals("正在整理结果", st.report)
+    }
+
+    @Test
+    fun `一轮结束后 thinking 必须是假 否则已完成卡片会说正在思考`() {
+        var st = advanceLive(CapsuleLiveState(), frame())
+        assertTrue(st.thinking)
+        st = advanceLive(st, frame(running = false))
+        assertFalse(st.thinking)
+    }
+}
+
+/**
+ * R062：源码契约断言。
+ *
+ * 这几条测不了行为（逻辑在私有 `@RequiresApi` 方法或另一个包的回调里），
+ * 只能钉住「调用点有没有把该传的东西传下去」。写得窄但比没有强：
+ * 它们在第二轮变异验证里各自对应一个变异体。
+ */
+class CapsuleThinkingWiringTest {
+
+    private fun source(rel: String): String = java.io.File(SRC_ROOT, rel).readText()
+
+    private fun codeOnly(text: String): String =
+        text.lineSequence()
+            .filterNot { it.trimStart().startsWith("*") || it.trimStart().startsWith("//") }
+            .joinToString("\n")
+
+    @Test
+    fun `CapsuleCenter 必须把 state 的 thinking 传进 capsuleTitle`() {
+        val body = codeOnly(source("core/capsule/CapsuleCenter.kt"))
+        assertTrue(
+            "build() 里要把 thinking 传下去，否则「��在思考」永远不显示",
+            body.contains("thinking = state.thinking"),
+        )
+    }
+
+    @Test
+    fun `ViewModel 的 thinking 必须三个条件都看`() {
+        // 它现在住在 advanceLive 里，不在 VM 里了；这条盯的是纯函数实现。
+        val body = codeOnly(source("core/capsule/CapsuleModel.kt"))
+        assertTrue(
+            "thinking 必须同时要求 generating、没有工具、没有汇报",
+            body.contains("val thinking = frame.generating && frame.tool == null && report == null"),
+        )
+    }
+
+    @Test
+    fun `ViewModel 必须整块用 advanceLive 的返回值`() {
+        val body = codeOnly(source("ui/chat/ChatViewModel.kt"))
+        assertTrue(body.contains("advanceLive("))
+        assertTrue(
+            "动作行必须来自 next.action，不能自己另拼一份",
+            body.contains("action = next.action"),
+        )
+        assertTrue(
+            "thinking 必须来自 next.thinking",
+            body.contains("thinking = next.thinking"),
+        )
+    }
+
+    @Test
+    fun `没有工具时不能生成动作行`() {
+        val body = codeOnly(source("core/capsule/CapsuleModel.kt"))
+        assertTrue(
+            "advanceLive 里只有 tool != null 才产出 action",
+            body.contains("frame.tool != null && frame.running"),
+        )
+    }
+
+    companion object {
+        private val SRC_ROOT = java.io.File(
+            "src/main/java/com/revxzxcx/remotewebapp",
+        )
+    }
+}

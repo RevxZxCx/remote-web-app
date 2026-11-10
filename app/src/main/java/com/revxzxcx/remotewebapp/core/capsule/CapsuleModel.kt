@@ -40,6 +40,16 @@ internal data class CapsuleState(
     val otherRunning: Int,
     /** 会话此刻处在哪个阶段。只影响胶囊条那行短字，不影响卡片正文。 */
     val phase: CapsulePhase = CapsulePhase.Running,
+    /**
+     * 「还在跑、但既没汇报也没动作」时，卡片上是否说一句「正在思考…」。
+     *
+     * R062 审查 P1 的产物。最初「正在思考」是装在 [action] 里的，
+     * 导致：① 没工具时第二行永远有字，汇报因此永远被压到一行 12 字
+     * （用户抱怨的截断没修好）；② 连续调用时它会变成「正在思考…×37」，
+     * 既不准确也无意义。现在它不再占用动作行，只作为两行全空时的兜底，
+     * 两者互斥是**结构上**成立的，不靠字符串比较。
+     */
+    val thinking: Boolean = false,
 ) {
 
     /**
@@ -391,6 +401,8 @@ internal object CapsuleContent {
          * 会话摘要才是这台机器上唯一知道它到底跑没跑的东西。
          */
         phase: CapsulePhase = CapsulePhase.Running,
+        /** 见 [CapsuleState.thinking]。由调用方从 live 快照传入。 */
+        thinking: Boolean = false,
     ): CapsuleState {
         val progress = todos?.let { CapsuleProgress.fromTodos(it) }
         // 步骤行优先用 todo 里那条 in_progress 的正文 —— 那是「实际在做的步骤」，
@@ -427,6 +439,7 @@ internal object CapsuleContent {
             pending = PendingKind.None,
             otherRunning = otherRunning,
             phase = phase,
+            thinking = thinking,
         )
     }
 
@@ -515,11 +528,311 @@ internal val TodoStatus.capsuleActive: Boolean
     get() = this == TodoStatus.IN_PROGRESS
 
 /**
- * 给胶囊用的短文案裁剪（进程内工具函数）。
+ * 工具名 → 人话短语（R062，用户 m07102）。
  *
- * 与 [CapsuleContent.clip] 同一套逻辑，单独暴露是因为调用方（`ChatViewModel`）
- * 需要在**判重指纹**里就用裁剪后的值——用原值判重会让「同一句话末尾多一个字」
- * 也算新指纹，于是每条流式 token 都触发一次胶囊重算。
+ * ## 为什么不能再直接显示工具名
+ * 原来第 2 行写的 `running?.toolNames?.values?.lastOrNull()`，把那串东西原样
+ * 贴到卡片上，用户看到的是 `bash` / `write` / `ops_read_files` —— 这是给开发者看的
+ * 内部名字，不是给人看的进度。用户的原话是「而不是显示 bash、write 此类名称」。
+ *
+ * ## 为什么短语必须短
+ * 真机实测：卡片标题一行只放得下 **12 个汉字**（13 个字起系统开始省略），
+ * 胶囊条更窄、约 7 个字。短语定在 6~8 字是有预算依据的，不是随手写的：
+ * `正在运行命令…` 是 8 个字，加上 ` ×2` 共 11 字，仍在一行之内。
+ * 这也是为什么不能写「正在执行 bash 命令，请稍候」这种完整句子——必然被切。
+ *
+ * ## 为什么只有一个省略号（…）而不是两个（……）
+ * 动作行最终要写成 `▸ 正在运行命令… ×13`，前面的 `▸ ` 占掉两个位置，
+ * 而整行只有 12 个字的预算。双省略号会把 `×13` 挤出可见范围——**省下来的是一个数字的位置，
+ * 不是排版偏好**。
+ *
+ * ## 为什么未知工具不显示原名
+ * `ops_read_files` 这种名字长度就超过半行，而且对用户没有意义。统一兜底成
+ * 「正在调用工具…」，宁可少一点信息，也不要一行里一半是用户看不懂的标识符。
+ */
+internal fun toolPhrase(toolName: String?): String {
+    val name = toolName?.trim()?.lowercase().orEmpty()
+    return when {
+        name.isEmpty() -> THINKING_TEXT
+        // 命令执行：这是最常见的一类，也是用户抱怨「一直显示 bash」的那一类。
+        name == "bash" || name == "shell" || name == "ops_bash" || name == "terminal" ->
+            "正在运行命令…"
+        // 读文件
+        name == "read" || name == "ops_read_files" || name == "ops_inspect_local_file" ||
+            name == "cat" || name == "read_image" -> "正在读取文件…"
+        // 写文件（含改文件）
+        name == "write" || name == "edit" || name == "apply_patch" || name == "notebook_edit" ->
+            "正在写入文件…"
+        // 检索（**本地代码**）。不要把 `multi_search` 之类归到这里——
+        // 它们是去网上找东西，用户看到的是「联网」不是「搜代码」。
+        name == "grep" || name == "glob" || name == "ops_grep" || name == "ops_glob" ||
+            name == "search" -> "正在搜索代码…"
+        // 网络：`web_*` 命名空间 + 一批名字里带 search 但实际上网的工具。
+        name.startsWith("web_") || name == "research" || name == "fetch" ||
+            name == "multi_search" || name == "advanced_search" ||
+            name == "platform_search" || name == "domain_search" ||
+            name == "cache_search" || name == "free_search_test" ||
+            name == "video_search" || name == "weather" ->
+            "正在联网查询…"
+        // 子代理：**只有真的在创建**才说「派子代理」。
+        //
+        // 第三轮审查 P3：把 `list_agents`（列表）、`interrupt_agent`（中断）、
+        // `wait_agent`（等待）全并进这句，会让用户看到「正在派子代理」
+        // 而实际上正在终止代理——方向相反的两件事写成一句话。
+        name == "task" || name == "subagent" || name == "subagent_fork" ||
+            name == "spawn_teammate" -> "正在派子代理…"
+        name == "wait_agent" -> "正在等待子代理…"
+        name == "interrupt_agent" -> "正在中断子代理…"
+        name == "list_agents" -> "正在查看子代理…"
+        name == "send_message" -> "正在发消息…"
+        // 计划与目标
+        name == "todo_write" || name == "todowrite" ||
+            name == "update_goal" || name == "create_goal" -> "正在更新计划…"
+        else -> "正在调用工具…"
+    }
+}
+
+/** 没有任何在跑的工具时的那句话。 */
+internal const val THINKING_TEXT: String = "正在思考…"
+
+/**
+ * 动作行的跨帧状态（R062）。
+ *
+ * @property phrase 上一次的短语（已经是「正在运行命令」这种人话）
+ * @property repeat 连续出现了几次
+ */
+internal data class ActionMemory(
+    val phrase: String? = null,
+    val repeat: Int = 0,
+    /**
+     * 本次动作的身份 —— **工具调用的 id**（`LiveAttempt.toolNames` 的 key）。
+     *
+     * 不是 `attemptId`：后者是 **step 级**的，一个 step 里连跑 3 次 bash 它不变，
+     * 拿它当主键会只算一次（第二轮审查 P2）。
+     *
+     * 它区分「同一次工具调用在流式吐字」与「又发生了一次工具调用」。
+     * 没有它就只能靠短语相同来猜，而流式期间每个 token 都会发一帧。
+     */
+    val key: String? = null,
+)
+
+/**
+ * 推进一帧，得到下一个动作行状态。
+ *
+ * 这个函数本来是 `ChatViewModel.watchCapsule()` 的 `collect` 里一串赋值语句。
+ * 它们很难被测试——现在变成一个纯函数，「换轮要不要清零」这个判断
+ * 才能被断言直接盯住。
+ *
+ * 三种情形：
+ * 1. 新一轮开始（`wasRunning == false && nowRunning == true`）→ 一律从 1 重新数。
+ *    否则上一轮的 `×7` 会带到新一轮的第一句汇报上去。
+ * 2. 动作没变 → +1（用户看到的就是「还在做同一件事」）。
+ * 3. 动作变了 → 从 1 重新数。
+ *
+ * @param memory 上一帧的状态
+ * @param wasRunning 上一帧是否处于**生成中**（轮次级，即 `generating`）
+ * @param nowRunning 这一帧是否处于**生成中**（轮次级）
+ *
+ * 参数名保留 `running` 是历史原因；它们现在量的是 `generating`。
+ * 调用方**切勿**改传 `frame.running`（那是 step 级的）——会把计数永远卡在 1。
+ * @param nowRunning 这一帧会话在不在跑
+ * @param tool 这一帧正在跑的工具名（`null` = 没有工具）
+ */
+internal fun advanceAction(
+    memory: ActionMemory,
+    wasRunning: Boolean,
+    nowRunning: Boolean,
+    actionKey: String?,
+    phrase: String,
+): ActionMemory {
+    // 一轮结束后保留上一个动作，**不**改写成「正在思考」。
+    //
+    // 旧写法在 `nowRunning == false` 时会把动作行替换成 `toolPhrase(null)`，
+    // 于是任务已经结束、卡片上却写着「▸ 正在思考…」——与
+    // 「收尾保留末态」的设计直接矛盾。
+    if (!nowRunning) return memory
+
+    // 换轮：上一轮的计数不能带进新一轮。
+    if (beginsNewTurn(wasRunning, nowRunning)) {
+        return ActionMemory(phrase = phrase, repeat = 1, key = actionKey)
+    }
+
+    // 同一个动作：工具调用 id 不变就不重复计数。
+    //
+    // 这是第一轮审查 P2-1 的修法：原来只看短语是否相同，而调用点在
+    // `distinctUntilChanged` 之后——流式期间每个 token 都会推一帧，于是同一次工具
+    // 调用被计成 `×2…×37`。
+    // 第二轮审查 P2：中间一度改用 `attemptId`，但它是 step 级的，
+    // 同一 step 内连跑同名工具只会算一次。现在用 tool call id。
+    if (actionKey != null && actionKey == memory.key) {
+        return memory.copy(phrase = phrase)
+    }
+
+    return ActionMemory(
+        phrase = phrase,
+        repeat = nextRepeat(memory.phrase, phrase, memory.repeat),
+        key = actionKey,
+    )
+}
+
+/**
+ * 计算这一次该显示第几次。
+ *
+ * ## 为什么是单独一个函数
+ * 它本来埋在 `ChatViewModel.watchCapsule()` 的 `collect` 里，那里要构造
+ * `StateFlow`、跨 step 累加、还要穿过 300ms 去抖，单测根本够不到。
+ * 而「计数对不对」恰恰是这个功能里最容易错的一部分。
+ *
+ * 比较的是**短语**而不是原始工具名：`read` 与 `ops_read_files` 映射到同一句
+ * 「正在读取文件」，对用户而言确实是「还在做同一件事」，按同一件事数才对。
+ *
+ * @param previousPhrase 上一次的短语（`null` 表示刚开始或刚换轮）
+ * @param freshPhrase 这一次的短语
+ * @param previousRepeat 上一次累计到了几
+ * @return 这一次该显示的次数（至少 1）
+ */
+internal fun nextRepeat(
+    previousPhrase: String?,
+    freshPhrase: String,
+    previousRepeat: Int,
+): Int = if (freshPhrase == previousPhrase) previousRepeat + 1 else 1
+
+/**
+ * 动作行 = 短语 + 连续次数后缀。
+ *
+ * ## 为什么需要次数
+ * 用户 m07102：模型连续跑十几条 bash 命令时，卡片上一直是 `bash` 一个词，
+ * 「让人以为是卡住了」。加上 ` ×2`、` ×13` 之后，用户能看出它在推进，
+ * 只是还在做同一类动作。
+ *
+ * ## 为什么从 2 开始才显示
+ * `×1` 是噪音。第一次调用时后面加个「×1」既占字符又没信息量，
+ * 而这一行本来就只有 12 个字可用。
+ *
+ * @param repeat 这一次动作连续出现了几次（<2 不显示后缀）
+ */
+internal fun actionLine(toolName: String?, repeat: Int): String {
+    val phrase = toolPhrase(toolName)
+    // 后缀**不带空格**：
+    // "▸ "(2) + 7 字短语 + "×13"(3) = 12，正好卡在一行预算上限。
+    // 带空格就变成 13 字，被系统省略的恰好是最右边那个数字。
+    // 次数封顶在 99：一行只有 12 字的预算，`×100` 是 4 位数，
+    // 越界后被系统切掉的恰好就是右边那个数字——也就是这个功能唯一新增的信息。
+    // 封顶后 `×99` 固定 3 个字符，不会因次数变大而挤掉别的字。
+    val shown = if (repeat > 99) 99 else repeat
+    return if (shown >= 2) "$phrase\u00d7$shown" else phrase
+}
+
+/**
+ * 胶囊在「一帧帧向前推」时的全部可变状态。
+ *
+ * 抽成数据类而不是散落在 `ChatViewModel` 的几个字段里，
+ * 只为了能被 [advanceLive] 当参数直接驱动——免得又出现
+ * 「逻辑埋在 `collect` 里、单测够不到」。
+ */
+internal data class CapsuleLiveState(
+    /** 第 1 行：流式汇报（已粘滞）。 */
+    val report: String? = null,
+    /** 第 2 行：本帧要显示的动作行。`null` 表示整行省略。 */
+    val action: String? = null,
+    /** 最近一次真实动作行。一轮结束后用它保留末态。 */
+    val lastAction: String? = null,
+    val memory: ActionMemory = ActionMemory(),
+    /**
+     * 上一帧是否处于「正在生成」状态。
+     *
+     * 它是**轮次级**的（`ChatUiState.generating`，由 `turn/start` / `turn/end` 驱动），
+     * 不是 step 级的。旧写法拿「`live` 有没有值」当轮次边界，
+     * 而 `ChatReducer` 在每个 step 的 `assistant/message` 落盘时都会 `dropLive`，
+     * 于是**每一步都被当成新一轮**，计数每格都被清零，
+     * 连续跑 5 次 bash 永远只能显示「正在运行命令…」。
+     */
+    val wasGenerating: Boolean = false,
+    /** 见 [CapsuleState.thinking]。 */
+    val thinking: Boolean = false,
+)
+
+/** 一帧采样：从 `ChatUiState` 里取出来的五样东西。 */
+internal data class CapsuleLiveFrame(
+    /** 轮次级「还在生成」（`ChatUiState.generating`）。轮次边界只能看它。 */
+    val generating: Boolean,
+    /** 这一帧有没有 `live` 预览（step 级）。 */
+    val running: Boolean,
+    val report: String?,
+    val tool: String?,
+    val attemptKey: String?,
+)
+
+/**
+ * 把一帧采样推进状态。**纯函数**，不碰任何外部字段。
+ *
+ * 三条约束，每一条都对应一个真实现象：
+ *  1. **没有工具就不产生动作行**。否则汇报永远被挤到一行 12 字
+ *     （用户抱怨的截断），且连续调用时会变成「正在思考…×37」。
+ *  2. **「正在思考」只在「还在跑 + 无工具 + 无汇报」三者同时成立时为真**。
+ *     这是**结构上**与动作行互斥，不靠字符串比较（第一版就是这么错的）。
+ *  3. **一轮结束时保留上一个真实动作**（`lastAction`），不改写成「正在思考」。
+ */
+internal fun advanceLive(
+    state: CapsuleLiveState,
+    frame: CapsuleLiveFrame,
+): CapsuleLiveState {
+    // 轮次边界看 `generating`，**不看** `running`。
+    //
+    // `running` 是「这一帧有没有 live 预览」，而 `ChatReducer` 在每个 step 的
+    // `assistant/message` 落盘时都会 `dropLive`——多步轮次里清完预览还要继续下一步。
+    // 用 `running` 当边界会把每一步都判成新一轮，计数永远起不来。
+    val newTurn = beginsNewTurn(state.wasGenerating, frame.generating)
+
+    // 换轮就把上一轮的汇报与计数一并清掉，否则模型还没吐字时
+    // 卡片上还挂着上一轮的末句与工具名。
+    val report = stickyText(if (newTurn) null else state.report, frame.report)
+    var memory = if (newTurn) ActionMemory() else state.memory
+    var lastAction = if (newTurn) null else state.lastAction
+
+    val action: String? = when {
+        // 真有工具在跑：翻成人话 + 计数。
+        frame.tool != null && frame.running -> {
+            memory = advanceAction(
+                memory = memory,
+                wasRunning = state.wasGenerating,
+                nowRunning = frame.generating,
+                actionKey = frame.attemptKey,
+                phrase = toolPhrase(frame.tool),
+            )
+            actionLine(frame.tool, memory.repeat).also { lastAction = it }
+        }
+        // 还在同一轮、但这一帧没工具：**动作行整行省略**。
+        //
+        // 不能挂上 `lastAction`：那会让「模型正在写文字」时卡片上还写着
+        // 「▸ 正在运行命令…」——它已经跑完了，这是一句假话。
+        // 不显示就把整行让给汇报（或「正在思考」兜底）。
+        frame.generating -> null
+        // 一轮已经结束：保留最后一个真实动作，别把它改写成「正在思考」。
+        else -> lastAction
+    }
+
+    // 三个条件一个不能少：汇报有字时用户的注意力全给汇报，
+    // 再贴一行「正在思考」只会把它挤回一行。
+    val thinking = frame.generating && frame.tool == null && report == null
+
+    return CapsuleLiveState(
+        report = report,
+        action = action,
+        lastAction = lastAction,
+        memory = memory,
+        wasGenerating = frame.generating,
+        thinking = thinking,
+    )
+}
+
+/**
+ * 给胶囊用的操作行短文案裁剪。
+ *
+ * 与 [CapsuleContent.clip] 同一套逻辑，单独暴露是因为调用方需要在**判重指纹**里就用裁剪后的值——
+ * 用原值判重会让「同一句话末尾多一个字」也算新指纹，于是每条流式 token 都触发一次胶囊重算。
+ *
+ * 与 [clipReportForCapsule] 分开是因为两行预算不同。
  */
 internal fun clipForCapsule(text: String, max: Int = CapsuleContent.ACTION_MAX_CHARS): String =
     CapsuleContent.clip(text, max)
@@ -540,17 +853,37 @@ internal fun capsuleTitle(
     report: String?,
     action: String?,
     fallback: String? = null,
+    /**
+     * 会话还在跑、但既没有汇报也没有动作时，是不是说一句「正在思考」。
+     *
+     * **为什么要单独传进来而不在这里比对字符串**：第一版写的是
+     * `action != THINKING_TEXT`，但 `actionLine` 在连续次数 ≥ 2 时输出的是
+     * `正在思考…×2`，不等于 `THINKING_TEXT`，抑制因此**完全失效**：
+     * 流式期间汇报仍被压到 12 字，还多一行「▸ 正在思考…×37」。
+     * 现在「正在思考」从动作行里彻底拿掉，只作为两行全空时的兜底，
+     * 两者互斥是结构上成立的。
+     */
+    thinking: Boolean = false,
 ): String {
+    val rawReport = report?.takeIf { it.isNotBlank() }
+    // 「正在思考…」只在**什么都没有**时候选。
+    //
+    // 流式正文本身就在告诉用户「它在想」，再占一行写一遍是纯重复——
+    // 而代价是汇报必须从两行（22 字）压到一行（12 字）。用户抱怨的恰恰就是截断，
+    // 为了多显示一句「正在思考」而把上半部汇报砍掉一半，不划算。
     val act = action?.takeIf { it.isNotBlank() }
     // 两行都在时，汇报必须先压到一行，否则它自己占满两行、把操作行挤没。
     // 反过来（只有汇报）才允许它吃掉两行——那时多显示几个字是纯收益。
-    val rep = report?.takeIf { it.isNotBlank() }
+    val rep = rawReport
         ?.let { if (act != null) CapsuleContent.clip(it, CapsuleContent.TITLE_LINE_MAX_CHARS) else it }
     val lines = buildList {
         rep?.let { add(it) }
         act?.let { add("▸ " + it) }
     }
     if (lines.isNotEmpty()) return lines.joinToString("\n")
+    // 两行都空。先说「正在思考」（仅当会话还在跑），
+    // 否则才用会话名兜底——「它在干活」比「它叫什么」更值得占一行。
+    if (thinking) return "▸ " + THINKING_TEXT
     // 两行都空时别交白卷。
     //
     // 真机上确实会出现这一刻：换轮次时 `LiveAttempt` 被清空，而新的汇报还没到，

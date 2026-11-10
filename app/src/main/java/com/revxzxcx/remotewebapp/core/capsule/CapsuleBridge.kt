@@ -57,7 +57,13 @@ object CapsuleBridge {
     }
 
     /** `ChatViewModel` 在 todo / 汇报变化时调用。 */
-    internal fun publishLive(sessionId: String, todos: TodoList?, report: String?, action: String?, running: Boolean) {
+    internal fun publishLive(
+        sessionId: String,
+        todos: TodoList?,
+        report: String?,
+        action: String?,
+        thinking: Boolean,
+    ) {
         // 只发正在看的那个会话：后台会话拿不到 todo，硬发会让卡片显示别人的进度。
         if (_viewing.value != sessionId) return
         _live.value = CapsuleCoordinator.LiveSnapshot(
@@ -65,7 +71,7 @@ object CapsuleBridge {
             todos = todos,
             report = report,
             action = action,
-            running = running,
+            thinking = thinking,
         )
     }
 

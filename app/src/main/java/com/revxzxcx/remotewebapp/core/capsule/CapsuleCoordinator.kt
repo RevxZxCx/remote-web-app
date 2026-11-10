@@ -363,6 +363,7 @@ internal class CapsuleCoordinator(
             otherRunning = otherRunning,
             startedAt = startedAt,
             phase = phase,
+            thinking = snapshot?.thinking == true,
         )
     }
 
@@ -466,14 +467,14 @@ internal class CapsuleCoordinator(
      * @param todos 任务列表（画进度条用）。
      * @param report 最近一次汇报（title 第 1 行）。
      * @param action 当前正在做的事（title 第 2 行）。
-     * @param running 这个会话是否还在跑。
      */
     internal data class LiveSnapshot(
         val sessionId: String,
         val todos: TodoList?,
         val report: String?,
         val action: String?,
-        val running: Boolean,
+        /** 见 [CapsuleState.thinking]。 */
+        val thinking: Boolean = false,
     )
 
     companion object {
