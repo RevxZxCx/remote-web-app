@@ -8,6 +8,7 @@ import com.revxzxcx.remotewebapp.core.session.TodoList
 import com.revxzxcx.remotewebapp.core.session.TodoStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -411,7 +412,10 @@ class CapsuleContentTest {
         )
         assertEquals("待批准", state.capsuleText)
         assertEquals("bash", state.action)
-        assertTrue(state.report.startsWith("需要你批准才能继续"))
+        // B018 之后 report 直接就是会话名：胶囊条上已经是「待批准」，
+        // 卡片第一行再说一遍那句 9 字前缀，真机上被挤成「需要你批准才能继续：按…」，
+        // 剩下一个字毫无信息量。省下的空间留给会话名。
+        assertEquals("重构登录页", state.report)
     }
 
     @Test
@@ -438,9 +442,26 @@ class CapsuleContentTest {
     }
 
     @Test
-    fun `汇报行为空时回落到标题，而不是留一行空白`() {
+    fun `汇报行为空时留空而不是回落到会话标题`() {
+        // B018 之前的写法是 `report.orEmpty().ifEmpty { title }`，于是「这一帧没有汇报」
+        // 会变成「把会话标题抄到第一行」：第一行永远有字，而第二行的动作因为没有新内容
+        // 而消失，用户看到的就是「标题一直是那个，操作一会儿就没了」。
+        // 会话标题本来也不是汇报——它是用户自己起的名字，抄过来是纯噪音。
         val state = CapsuleContent.running("s", "标题在此", null, report = "", action = null, otherRunning = 1, startedAt = 1L)
-        assertEquals("标题在此", state.report)
+        assertTrue(state.report.isBlank())
+    }
+
+    @Test
+    fun `汇报行的字数上限与操作行不同 否则两行会互相挤`() {
+        // 变异体：把 clipReportForCapsule 的默认上限改成 ACTION_MAX_CHARS 时，
+        // 这条必须红。两行可用宽度不同（汇报是整句人话，操作是工具名），
+        // 共用一个上限要么砍汇报太狠、要么让操作行超出可用宽度。
+        val long = "字".repeat(60)
+        val report = clipReportForCapsule(long)
+        val action = clipForCapsule(long)
+        assertEquals(CapsuleContent.REPORT_MAX_CHARS, report.length)
+        assertEquals(CapsuleContent.ACTION_MAX_CHARS, action.length)
+        assertNotEquals(CapsuleContent.REPORT_MAX_CHARS, CapsuleContent.ACTION_MAX_CHARS)
     }
 
     @Test
@@ -631,4 +652,152 @@ class CapsulePendingOrderTest {
 
         assertEquals(listOf("sq"), ids)
     }
+
+}
+
+class CapsuleStickyTextTest {
+
+    @Test
+    fun `没有新内容时保留上一次 而不是清空`() {
+        assertEquals("正在改 ChatViewModel", stickyText("正在改 ChatViewModel", null))
+    }
+
+    @Test
+    fun `空串与空白也算没有新内容 否则空帧会把上一行顶掉`() {
+        assertEquals("上一句汇报", stickyText("上一句汇报", ""))
+        assertEquals("上一句汇报", stickyText("上一句汇报", "   "))
+    }
+
+    @Test
+    fun `有新的就换成新的`() {
+        assertEquals("新的一句", stickyText("旧的一句", "新的一句"))
+    }
+
+    @Test
+    fun `首次没有历史时返回 null 而不是空串`() {
+        assertNull(stickyText(null, null))
+        assertNull(stickyText(null, ""))
+    }
+
+    @Test
+    fun `两行各自独立粘滞 一行更新不该把另一行顶掉`() {
+        var report: String? = "汇报 A"
+        var action: String? = "bash"
+        // 只来新汇报
+        report = stickyText(report, "汇报 B")
+        action = stickyText(action, null)
+        assertEquals("汇报 B", report)
+        assertEquals("bash", action)
+        // 只来新操作
+        report = stickyText(report, null)
+        action = stickyText(action, "grep")
+        assertEquals("汇报 B", report)
+        assertEquals("grep", action)
+    }
+}
+
+class CapsuleTitleTest {
+
+    @Test
+    fun `两行都在时按汇报在前操作在后拼成两行`() {
+        assertEquals("汇报 A" + "\n" + "▸ bash", capsuleTitle("汇报 A", "bash"))
+    }
+
+    @Test
+    fun `同时有操作行时 汇报必须压到一行 否则操作行会被挤没`() {
+        val longReport = "这是一句非常非常长的汇报文本内容会超过一行"
+        val title = capsuleTitle(longReport, "bash")
+        val lines = title.split("\n")
+        assertEquals(2, lines.size)
+        // 第一行必须在一行的容量以内，且带省略号
+        assertEquals(CapsuleContent.TITLE_LINE_MAX_CHARS, lines[0].length)
+        assertTrue(lines[0].endsWith("…"))
+        assertTrue(lines[1].startsWith("▸ "))
+    }
+
+    @Test
+    fun `只有汇报时 不再额外压缩`() {
+        // 没有操作行就不该再砍到一行：多显示几个字是纯收益。
+        // 注意上游（CapsuleContent.running / approval / question）已经按
+        // REPORT_MAX_CHARS 截过一次，capsuleTitle 不应重复截。
+        val report = "abcdefghijklmnopqrstuvwxyz"
+        val title = capsuleTitle(report, null)
+        assertEquals(1, title.split("\n").size)
+        assertEquals(report, title)
+    }
+
+    @Test
+    fun `两行都空时用会话名顶上 而不是交白卷`() {
+        // 真机实测：换轮次瞬间 LiveAttempt 被清空、新的汇报还没到，标题成了空串，
+        // 系统仍按两行排版，卡片上半块整片空白。拿会话名顶上比空白强。
+        assertEquals("某个会话", capsuleTitle(null, null, fallback = "某个会话"))
+        assertEquals("某个会话", capsuleTitle("", "  ", fallback = "某个会话"))
+    }
+
+    @Test
+    fun `有内容时优先用自己的内容 不用会话名`() {
+        assertEquals("汇报 A", capsuleTitle("汇报 A", null, fallback = "某个会话"))
+    }
+
+    @Test
+    fun `会话名也是空时保持空串 不能凭空造字`() {
+        assertEquals("", capsuleTitle(null, null, fallback = null))
+        assertEquals("", capsuleTitle(null, null, fallback = "   "))
+    }
+
+    @Test
+    fun `没有汇报时不能以换行开头 否则白占掉第一行`() {
+        // 旧写法是 report、换行、动作三段直接相加，report 为空时得到「换行 + ▸ 动作」：
+        // 第一行是空的，系统仍按两行排版，真正的内容被挤到第二行。
+        val title = capsuleTitle("", "bash")
+        assertEquals("▸ bash", title)
+        assertFalse(title.startsWith("\n"))
+    }
+
+    @Test
+    fun `没有操作时只有汇报一行`() {
+        assertEquals("汇报 A", capsuleTitle("汇报 A", null))
+    }
+
+    @Test
+    fun `两行都没有时是空串 而不是一个孤零零的换行`() {
+        assertEquals("", capsuleTitle(null, null))
+        assertEquals("", capsuleTitle("   ", "  "))
+    }
+
+    @Test
+    fun `空白行也算没有内容 不能被拼进去`() {
+        assertEquals("▸ bash", capsuleTitle("   ", "bash"))
+        assertEquals("汇报 A", capsuleTitle("汇报 A", "   "))
+    }
+/**
+ * B018、审查第一轮 P2：粘滞的轮次边界。
+ *
+ * 这条逻辑很短（一个 `&&`），但它决定的事情不小：同一会话跑第二轮时，
+ * 卡片上该不该还挂着上一轮的末句与最后一个工具名。
+ * 写测试而不是直接写在协程里，是因为后者测不到（同 [CapsuleStickyTextTest]）。
+ */
+class CapsuleBeginsNewTurnTest {
+
+    @Test
+    fun `上一帧在跑 这一帧不跑 不是新轮开始`() {
+        assertFalse(beginsNewTurn(wasRunning = true, nowRunning = false))
+    }
+
+    @Test
+    fun `上一帧不跑 这一帧在跑 才是新轮开始`() {
+        assertTrue(beginsNewTurn(wasRunning = false, nowRunning = true))
+    }
+
+    @Test
+    fun `一直在跑的轮内不能反复认为是新轮 否则粘滞被取消`() {
+        assertFalse(beginsNewTurn(wasRunning = true, nowRunning = true))
+    }
+
+    @Test
+    fun `一直不在跑就没有新轮`() {
+        assertFalse(beginsNewTurn(wasRunning = false, nowRunning = false))
+    }
+}
+
 }

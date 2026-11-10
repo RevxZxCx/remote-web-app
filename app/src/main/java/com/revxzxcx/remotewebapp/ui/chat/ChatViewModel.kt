@@ -65,8 +65,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.FlowPreview
 import com.revxzxcx.remotewebapp.core.capsule.CapsuleBridge
+import com.revxzxcx.remotewebapp.core.capsule.beginsNewTurn
 import com.revxzxcx.remotewebapp.core.capsule.capsuleActive
 import com.revxzxcx.remotewebapp.core.capsule.clipForCapsule
+import com.revxzxcx.remotewebapp.core.capsule.clipReportForCapsule
+import com.revxzxcx.remotewebapp.core.capsule.stickyText
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -133,6 +136,34 @@ class ChatViewModel(
     private val composerCatalog = ComposerCatalogRepository(connection)
 
     private val _state = MutableStateFlow(ChatUiState())
+
+    /**
+     * B018：胶囊第一行「汇报」的粘滞副本。
+     *
+     * 用户 m04765 第 8 条：*「实际最好做成两列，并且固定，没有新的操作内容的时候
+     * 就不刷新，而不是显示一段时间后就不显示操作了，下一次操作来时才重新显示」*。
+     *
+     * 所以这里不是「当前帧有没有」而是「**最近一次有的**」——助手在几次工具调用之间
+     * 常常长时间没有正文输出，若按帧取，那一行会在整个空档期消失，看起来像断了。
+     * 只在真正出现新正文时覆盖。
+     */
+    private var capsuleReport: String? = null
+
+    /**
+     * B018：胶囊第二行「当前操作」的粘滞副本。理由同上。
+     *
+     * 与 [capsuleReport] 分开保存是刻意的：他说的是「两列」，即两行**各自独立**，
+     * 一行有新内容不该把另一行顶掉。
+     */
+    private var capsuleAction: String? = null
+
+    /**
+     * B018、审查第一轮 P2：上一帧是不是还在跑，用来认出「新一轮开始」。
+     *
+     * 在 false → true 的那一帧把两个粘滞快照清空，否则第二轮开头会拿着上一轮的末句
+     * 和上一轮最后一个工具名当“当前…”显示。
+     */
+    private var capsuleWasRunning: Boolean = false
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
 
     /** 输入框内容（放在 ViewModel 里，旋转屏幕不丢）。 */
@@ -701,8 +732,9 @@ class ChatViewModel(
      * ## 为什么用 `distinctUntilChanged` 折出来的元组做键
      * `_state` 在 assistant-stream 期间每个 token 都变一次。直接订阅会在一次回复里
      * 触发上千次胶囊重算——而 ColorOS 的「轻打扰」恰恰会把频繁变动的胶囊缩成气泡，
-     * 且气泡不会自动展开。这里只关心四样东西：todo、正在跑的那一步、当前动作、
-     * 是否还在跑。它们不变就不推。
+     * 且气泡不会自动展开。这里只关心五路数据：todo 总数、已完成数、
+     * 正在跑的那一步、当前动作、是否还在跑（加上 B018 新增的汇报行）。
+     * 它们不变就不推。
      *
      * ## 为什么不推 `live.text` 全文
      * 卡片上能显示的文字只有三层（标题 2 行 + 计时器 + subText），真机实测
@@ -716,24 +748,61 @@ class ChatViewModel(
                 .map { ui ->
                     val todos = ui.todos
                     val running = ui.live
-                    // 优先用正在生成的那条的动作，没有就退回最后一条助手消息。
-                    val action = running?.toolNames?.values?.lastOrNull()
-                        ?: running?.text?.takeIf { it.isNotBlank() }?.lineSequence()?.lastOrNull { it.isNotBlank() }
+                    // B018：两行各自独立取源。
+                    //   第 1 行「汇报」← 流式正文（助手这一轮说的话）
+                    //   第 2 行「操作」← 最近一次工具名
+                    // 旧实现把 todo 正文塞进 report，于是标题等于把 subText 又抄了一遍，
+                    // 而真正的汇报反而没地方显示。
+                    // 审查第一轮 P2：**指纹里必须用裁剪后的值**。
+                    // 用原值的话，流式期间每多一个字前 22 字就变一次，
+                    // `distinctUntilChanged` 几乎每帧放行，与下面 KDoc 写的
+                    // 「推全文只会让每一帧 hash 都不同」直接矛盾。
+                    val freshReport = running?.text
+                        ?.lineSequence()
+                        ?.lastOrNull { it.isNotBlank() }
+                        ?.trim()
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.let { clipReportForCapsule(it) }
+                    val freshAction = running?.toolNames?.values?.lastOrNull()
+                        ?.trim()
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.let { clipForCapsule(it) }
                     CapsuleFingerprint(
                         total = todos.total,
                         done = todos.done,
                         active = todos.items.firstOrNull { it.status.capsuleActive }?.content,
-                        action = action,
+                        report = freshReport,
+                        action = freshAction,
                         running = running != null,
                     )
                 }
                 .distinctUntilChanged()
                 .collect { fp ->
+                    // B018 粘滞：有新的才覆盖，没有就留着上一次。
+                    // 直接写 `report = fp.report` 会让助手两次工具调用之间的空档期
+                    // 整行消失（用户看到的是「显示一段时间后就不显示了」）。
+                    //
+                    // 但粘滞必须有轮次边界（审查第一轮 P2）：同一会话跑第二轮时，模型还没吐字的那一瞬
+                    // 若不清，卡片上还挂着上一轮的末句与最后一个工具名，看起来像那个工具正在跑。
+                    if (beginsNewTurn(capsuleWasRunning, fp.running)) {
+                        capsuleReport = null
+                        capsuleAction = null
+                    }
+                    capsuleWasRunning = fp.running
+                    capsuleReport = stickyText(capsuleReport, fp.report)
+                    capsuleAction = stickyText(capsuleAction, fp.action)
+                    // 一轮彻底结束（不再 running）时两行都留着：任务卡这时显示的是
+                    // 「已完成」，留着上一次的末态比空着更有信息量。
+                    //
+                    // ⚠ 这两个字段是 ChatViewModel 的私有状态，CapsuleBridge 够不到它们（它只清自己的
+                    // `_live`）。所以断连重连后同一个 VM 的下一次 `_state` 发射会把断连前的旧汇报
+                    // 重新发出。这属于「同一会话内的粘滞」，语义上可接受，但排查「重连后
+                    // 卡片先闪一下旧内容」时不要去 CapsuleBridge 那边找。
                     CapsuleBridge.publishLive(
                         sessionId = sessionId,
                         todos = _state.value.todos,
-                        report = fp.report,
-                        action = fp.action?.let { clipForCapsule(it) },
+                        report = capsuleReport?.let { clipReportForCapsule(it) },
+                        action = capsuleAction?.let { clipForCapsule(it) },
                         running = fp.running,
                     )
                 }
@@ -743,17 +812,18 @@ class ChatViewModel(
     /**
      * 推给胶囊的判重指纹。
      *
-     * 刻意**不含**正文：正文每个 token 都变，含进去等于没判重。
+     * 刻意**不含未裁剪的正文**：正文每个 token 都变，含原值等于没判重。
+     * `report` / `action` 用的是**裁剪后**的值（最多 22 / 20 字），于是一整句话最多变 22 次，
+     * 而不是每个 token 变一次。
      */
     private data class CapsuleFingerprint(
         val total: Int,
         val done: Int,
         val active: String?,
+        val report: String?,
         val action: String?,
         val running: Boolean,
-    ) {
-        val report: String? get() = active
-    }
+    )
 
     /**
      * 冷启动先铺缓存（需求 FR-4.3）。

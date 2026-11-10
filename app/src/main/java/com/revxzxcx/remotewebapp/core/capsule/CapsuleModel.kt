@@ -312,18 +312,32 @@ internal object CapsuleFocus {
 internal object CapsuleContent {
 
     /**
-     * 汇报行（title 第 1 行）的最大字数。
+     * 汇报行的最大字数——**两行总量**，不是单行容量。
      *
      * ## 为什么是 22
-     * 真机实测（调研文档 3.7-H）：`setContentTitle` 是 **2 行硬上限**，
-     * 第 1 行过长会自己折行占满两行，把第 2 行的动作行整体挤掉。
-     * 卡片可用宽度约 300dp，14sp 中文字符约 13dp 一个，一行约 23 个汉字。
-     * 留一个字的余量取 22。
+     * `setContentTitle` 是 2 行硬上限。真机实测（1080 宽 / ColorOS 17 / 默认字号）：
+     * **一行 13 个汉字**，第 14 个就折行。两行约 26 个，留余量取 22。
      *
-     * 注意这是**保守值**：不同 ROM 的字号设置会改变实际容量，
-     * 超出的部分由 [clip] 用省略号收尾，而不是让系统自己截。
+     * ⚠ 这个值**只适用于「只有汇报、没有操作行」**的情形。
+     * 一旦同时还要显示操作行，汇报必须压到一行以内，那时由
+     * [TITLE_LINE_MAX_CHARS]（12）拦一道；否则汇报自己占满两行、`▸` 开头那行
+     * **整行消失**——「操作会消失」的 bug 会以另一个原因复发（B018，2026-11-10 真机）。
+     *
+     * 注意不同 ROM 的字号设置会改变实际容量，超出的部分由 [clip] 用省略号收尾，
+     * 而不是让系统自己截。
      */
     const val REPORT_MAX_CHARS: Int = 22
+
+    /**
+     * **只有汇报、没有操作行**时，title 一行实际放得下的字数。
+     *
+     * 上面 [REPORT_MAX_CHARS] 的 22 是「两行总量」的保守值（与之一致）；一旦同时还要显示操作行，
+     * 汇报必须压到一行以内。真机实测（1080 宽 / ColorOS 17 / 默认字号）：一行 13 个汉字，
+     * 第 14 个就折行。旧实现让汇报用满 22 字 → 它自己占掉两行 → `▸` 开头那行
+     * **整行消失**，于是「操作会消失」的 bug 以另一个原因复发（2026-11-10 13:38 真机复现：
+     * dumpsys 里 title 确有两行，卡片上只剩汇报）。
+     */
+    const val TITLE_LINE_MAX_CHARS: Int = 12
 
     /** 动作行（title 第 2 行）的最大字数。前缀 `▸ ` 占 2 个字符宽度，已从这里扣。 */
     const val ACTION_MAX_CHARS: Int = 20
@@ -398,7 +412,14 @@ internal object CapsuleContent {
         return CapsuleState(
             sessionId = sessionId,
             title = title,
-            report = clip(report.orEmpty().ifEmpty { title.orEmpty() }, REPORT_MAX_CHARS),
+            // B018：**不再回落成会话标题**。
+            //
+            // 旧写法 `report.orEmpty().ifEmpty { title }` 会让「这一帧没有汇报」变成
+            // 「把会话标题抄到第一行」，于是第一行永远有字、第二行的动作却因为没有
+            // 新内容而消失——用户看到的就是「标题一直是那个，操作一会儿就没了」。
+            // 现在没有汇报就留空，由 `CapsuleCenter` 决定整行省略，
+            // 把标题的两行都还给「汇报 / 操作」。
+            report = clip(report.orEmpty(), REPORT_MAX_CHARS),
             action = action?.takeIf { it.isNotBlank() }?.let { clip(it, ACTION_MAX_CHARS) },
             step = step,
             progress = progress,
@@ -424,11 +445,15 @@ internal object CapsuleContent {
     ): CapsuleState = CapsuleState(
         sessionId = sessionId,
         title = title,
-        // 汇报行说清「谁需要你」；动作行给出被拦下的具体工具 —— 那是用户下判断的唯一依据。
-        report = clip(
-            "需要你批准才能继续" + if (!title.isNullOrBlank()) "：$title" else "",
-            REPORT_MAX_CHARS,
-        ),
+        // 汇报行只写会话名，不写「需要你批准才能继续」。
+        //
+        // 理由：胶囊条上的短文本已经是「待批准」（`setShortCriticalText`），
+        // 卡片第一行再说一遍是重复。而那句前缀有 9 个字，占掉一行
+        // （12 字）的四分之三，真机上变成「需要你批准才能继续：按…」
+        // —— 剩下那个字几乎没信息量。省下来的空间留给会话名，
+        // 用户一眼就能看出「是哪个任务在等我批」。
+        report = title?.takeIf { it.isNotBlank() }?.let { clip(it, REPORT_MAX_CHARS) }.orEmpty(),
+        // 动作行给出被拦下的具体工具 —— 那是用户下判断的唯一依据。
         action = toolName?.takeIf { it.isNotBlank() }?.let { clip(it, ACTION_MAX_CHARS) },
         step = null,
         progress = null,
@@ -453,10 +478,9 @@ internal object CapsuleContent {
     ): CapsuleState = CapsuleState(
         sessionId = sessionId,
         title = title,
-        report = clip(
-            "有 $count 个问题需要你回答" + if (!title.isNullOrBlank()) "：$title" else "",
-            REPORT_MAX_CHARS,
-        ),
+        // 同上：短文本已经是「待回答」，“有 N 个问题”那句话占满一行却不如会话名有用。
+        // 题目数已经在下面 subText 的「本组共 N 道」里说了。
+        report = title?.takeIf { it.isNotBlank() }?.let { clip(it, REPORT_MAX_CHARS) }.orEmpty(),
         action = firstQuestion?.takeIf { it.isNotBlank() }?.let { clip(it, ACTION_MAX_CHARS) },
         // 不写「问题 i / 共 n」：这个计数是**这道题在组里的序号**，而卡片上只放
         // 当前这一道，用户答完一道后服务端推来剩下几道，序号会重新从 1 开始——
@@ -499,3 +523,76 @@ internal val TodoStatus.capsuleActive: Boolean
  */
 internal fun clipForCapsule(text: String, max: Int = CapsuleContent.ACTION_MAX_CHARS): String =
     CapsuleContent.clip(text, max)
+
+/**
+ * B018：卡片标题的拼装 —— 「汇报」一行、「操作」一行，**缺一行就整行省略**。
+ *
+ * 抽成纯函数（而不是留在 `CapsuleCenter.build()` 里）有两个理由：
+ * 1. `build()` 是 `private` 且 `@RequiresApi(36)`，单测够不着，于是「report 为空时会
+ *    拼出一个以换行开头的字符串」这种错误可以一路通过全绿测试活到真机（变异验证实测存活）。
+ * 2. 换行符是本项目最容易写错的东西（Python 补丁里一个 `BSN` 没拼好就把 Kotlin 源码劈成两行）。
+ *
+ * 为什么不能无条件拼：`report + "\n" + "▸ " + action` 在 `report` 为空时得到
+ * 一个以换行开头的字符串——第一行是空的，系统仍按两行排版，白占掉一半高度，
+ * 而第二行真正的动作反而被挤得没地方显示。
+ */
+internal fun capsuleTitle(
+    report: String?,
+    action: String?,
+    fallback: String? = null,
+): String {
+    val act = action?.takeIf { it.isNotBlank() }
+    // 两行都在时，汇报必须先压到一行，否则它自己占满两行、把操作行挤没。
+    // 反过来（只有汇报）才允许它吃掉两行——那时多显示几个字是纯收益。
+    val rep = report?.takeIf { it.isNotBlank() }
+        ?.let { if (act != null) CapsuleContent.clip(it, CapsuleContent.TITLE_LINE_MAX_CHARS) else it }
+    val lines = buildList {
+        rep?.let { add(it) }
+        act?.let { add("▸ " + it) }
+    }
+    if (lines.isNotEmpty()) return lines.joinToString("\n")
+    // 两行都空时别交白卷。
+    //
+    // 真机上确实会出现这一刻：换轮次时 `LiveAttempt` 被清空，而新的汇报还没到，
+    // 于是通知标题变成空串——系统照旧按两行排版，卡片上半部分整块空白（实测 13:22:28）。
+    // 拿会话名顶上比空白强：它至少说明「这是哪个任务」，也符合用户最初的抱怨方向
+    // （他嫌的是标题显示 **todo 正文**，不是会话名）。
+    return fallback?.takeIf { it.isNotBlank() }.orEmpty()
+}
+
+/**
+ * B018：粘滞合并 —— 「有新的才换，没有就留旧的」。
+ *
+ * 抽成纯函数而不是写在 `ChatViewModel` 的协程里，是为了能被直接单测与变异验证
+ * （R059 的 `capsulePendingOrder` 同一种理由：埋在私有方法里的逻辑，怎么测都测不到）。
+ *
+ * 判空用 [isNullOrBlank] 而不是 `!= null`：助手在两次工具调用之间会推送**空正文**的
+ * 帧，若只判 null，那一行会被空串顶掉，用户看到的就是「显示一会儿就没了」。
+ */
+internal fun stickyText(previous: String?, fresh: String?): String? =
+    if (fresh.isNullOrBlank()) previous else fresh
+
+/**
+ * B018、审查第一轮 P2：离散判定「这一帧是不是新一轮开始」。
+ *
+ * 粘滞必须有轮次边界：否则同一个会话的第二轮开头、模型还没吐字时，卡片第 1 行仍是
+ * 上一轮的末句、第 2 行仍是上一轮最后一个工具名（`▸ Bash`），看起来像那个工具正在跑。
+ *
+ * 只在 false → true 边沿返回 true：轮内每一帧都清一次等于取消粘滞（300ms 去抖下仍会闪）。
+ *
+ * 抽成纯函数的理由同 [stickyText]：埋在 `ChatViewModel` 的协程里怎么测都测不到。
+ */
+internal fun beginsNewTurn(wasRunning: Boolean, nowRunning: Boolean): Boolean =
+    nowRunning && !wasRunning
+
+/**
+ * 裁「汇报行」（标题第 1 行）。
+ *
+ * 与 [clipForCapsule] 分开是因为两行的预算不同：汇报是整句人话（[CapsuleContent.REPORT_MAX_CHARS]），
+ * 操作是工具名/短句（[CapsuleContent.ACTION_MAX_CHARS]）。共用一个上限会要么把汇报砍太狠、
+ * 要么让操作行超出两行标题的可用宽度（B018）。
+ */
+internal fun clipReportForCapsule(
+    text: String,
+    max: Int = CapsuleContent.REPORT_MAX_CHARS,
+): String = CapsuleContent.clip(text, max)

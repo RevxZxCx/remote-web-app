@@ -179,15 +179,9 @@ internal class CapsuleCenter(private val context: Context) {
      */
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.BAKLAVA)
     private fun build(state: CapsuleState, actions: List<CapsuleAction>): Notification {
-        val title = buildString {
-            append(state.report)
-            state.action?.let {
-                // 换行符强制拆成两行：contentText 被计时器占了（见类 KDoc 第 2 条）。
-                append('\n')
-                append("▸ ")
-                append(it)
-            }
-        }
+        // B018：标题两行各自独立，缺一行就整行省略。拼装逻辑抽在 `capsuleTitle` 里，
+        // 因为 `build()` 是 private + @RequiresApi(36)，单测够不着（变异验证实测存活过）。
+        val title = capsuleTitle(state.report, state.action, fallback = state.title)
 
         val builder = Notification.Builder(context, CHANNEL_ID)
             // 图标必须跟着状态走（R059-B016）：之前这里固定 `ic_capsule`，
