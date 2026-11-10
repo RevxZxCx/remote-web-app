@@ -311,6 +311,68 @@ class SubagentNotifyWiringTest {
             removedBlock.contains("subagents.forget("),
         )
     }
+    @Test
+    fun `冷启动拿全量列表时要顺手把子代理记进登记表 否则 status 帧判不出来`() {
+        // ## 这条用例对应的是一个**真实存在但很难撞见**的窗口
+        //
+        // 服务端不为已存在的会话补发 `api-session/added`（真机实测：App 冷启动后
+        // logcat 里零条 added，直到新建会话才出现一条）。于是冷启动后 `subagents`
+        // 是空的，而此刻子代理的 `status` 帧一到，`isSubagent` 查不到就按规定返回
+        // false（当主会话）——子代理跑完也会弹一条「任务结束」，B011 在这个窗口里复发。
+        //
+        // 全量列表里 `origin` 是有的，所以修复点是「让拿全量的那条路径顺手登记」。
+        val body = codeOnly(bodyOf(coordinatorSource(), "fun rememberSessions(items: List<SessionSummary>)"))
+
+        assertTrue(
+            "rememberSessions 必须调 subagents.remember(items)——只喂标题表的话，" +
+                "冷启动后登记表仍然是空的，这个 bug 就只在「连接期间新建的会话」上不复发",
+            body.contains("subagents.remember(items)"),
+        )
+        assertTrue(
+            "标题表也要喂，否则「任务结束 · 某某会话」会退化成只显示 id",
+            body.contains("names.remember("),
+        )
+    }
+
+    @Test
+    fun `rememberSessions 收的是完整摘要 不是 title 对`() {
+        val coordinator = coordinatorSource()
+        // 签名收 `List<SessionSummary>` 而不是 `List<Pair<String, String>>`：
+        // 后者根本没有 origin 字段，拿它去种登记表是做不到的。
+        // 断言签名而不是只断言实现，是因为**类型本身就是这条修复的核心**：
+        // 早先的 rememberTitles(pairs) 从类型上就不带 origin。
+        assertTrue(
+            "rememberSessions 的入参必须是 List<SessionSummary>（带 origin），" +
+                "收 Pair<id, title> 的话根本拿不到 origin",
+            coordinator.contains("fun rememberSessions(items: List<SessionSummary>)"),
+        )
+        assertFalse(
+            "旧的 rememberTitles(pairs) 必须彻底消失，留着它迟早有人回去调旧的那个",
+            coordinator.contains("fun rememberTitles("),
+        )
+    }
+
+    @Test
+    fun `首页要把完整会话列表交给通知层 不能先 map 成标题对`() {
+        val appRoot = source("src/main/java/com/revxzxcx/remotewebapp/ui/AppRoot.kt")
+        // `homeState.sessions.items` 是 `SessionListResult.items`，也就是**未过滤**的
+        // 全量（含子代理）。它正好是登记表要的那份数据。
+        assertTrue(
+            "AppRoot 必须调 rememberSessions(homeState.sessions.items)",
+            appRoot.contains("notifier.rememberSessions(homeState.sessions.items)"),
+        )
+        // 这条是防回退：曾经这里是 `items.map { it.sessionId to it.title }`，
+        // 一 map 就把 origin 丢了，而丢掉的恰好是本 bug 的关键字段。
+        assertFalse(
+            "不能在调用点 map 成标题对——origin 会在这一步丢掉",
+            appRoot.contains("rememberSessions(homeState.sessions.items.map"),
+        )
+        assertFalse(
+            "旧的 rememberTitles 调用点必须彻底删掉",
+            appRoot.contains("notifier.rememberTitles("),
+        )
+    }
+
 }
 
 /**

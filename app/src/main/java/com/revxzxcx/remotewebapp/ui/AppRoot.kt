@@ -419,9 +419,7 @@ fun AppRoot(container: AppContainer) {
                     // 避免每帧都刷一次标题表。
                     val notifier = container.notifier
                     LaunchedEffect(homeState.sessions.items) {
-                        notifier.rememberTitles(
-                            homeState.sessions.items.map { it.sessionId to it.title },
-                        )
+                        notifier.rememberSessions(homeState.sessions.items)
                     }
 
                     // 进入会话即「看过了」：账本把这条会话的两枚未读提醒熄灭并同步进列表。

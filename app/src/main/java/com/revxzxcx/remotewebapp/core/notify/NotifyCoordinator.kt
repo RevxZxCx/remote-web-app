@@ -7,6 +7,7 @@ import com.revxzxcx.remotewebapp.core.events.SessionNotification
 import com.revxzxcx.remotewebapp.core.protocol.CarrierState
 import com.revxzxcx.remotewebapp.core.session.ChatFrame
 import com.revxzxcx.remotewebapp.core.session.SessionListParser
+import com.revxzxcx.remotewebapp.core.session.SessionSummary
 import com.revxzxcx.remotewebapp.core.session.TurnProbe
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -336,8 +337,26 @@ class NotifyCoordinator(
     }
 
     /** 用首页那份会话列表播种标题表（`session/list` 每次刷新调一次）。 */
-    fun rememberTitles(pairs: List<Pair<String, String>>) {
-        names.remember(pairs)
+    fun rememberSessions(items: List<SessionSummary>) {
+        if (items.isEmpty()) return
+
+        // ## 为什么标题与登记表必须同源（R059-B011 冷启动边界）
+        //
+        // 服务端**不为已存在的会话补发 `api-session/added`**（真机实测：App 冷启动后
+        // logcat 里零条 added，直到新建会话才出现一条）。于是冷启动后
+        // `subagents` 登记表是空的，而此时子代理的 `status` 帧一到，
+        // [SubagentRegistry.isSubagent] 查不到就按设计返回 false（当成主会话）——
+        // B011 在这个窗口里复发：子代理跑完也弹一条「任务结束」。
+        //
+        // 而全量列表里 `origin` 是有的（实测 66 条里 20 条 `subagent`）。
+        // 所以这里把同一份 `List<SessionSummary>` 同时喂给两张表：
+        // 标题表用来写「任务结束 · 某某会话」，登记表用来判该不该发。
+        // 分成两次调用就会出现「标题表更新了、登记表没跟上」这种半截状态。
+        //
+        // 标题为空的条目不影响登记表：[SessionNameTable.remember] 自己会跳过空标题，
+        // 而子代理的 title 恰好全是空的——这不是 bug，不要把它们当成“没收到”。
+        names.remember(items.map { it.sessionId to it.title })
+        subagents.remember(items)
     }
 
     /** 用户点进某个会话时，把它挂着的那条完成通知撤掉（他已经看见了）。 */
