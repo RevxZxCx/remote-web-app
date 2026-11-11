@@ -175,7 +175,7 @@ internal fun CapsuleState.iconRes(): Int = when {
 }
 
 /** 会话此刻所处阶段，决定胶囊条短字与卡片配色。 */
-internal enum class CapsulePhase {
+enum class CapsulePhase {
     /**
      * 不在跑、也没有未读。焦点选举正常情况下不会选出这种会话，
      * 纯防御——但必须有：否则「已经跑完且已读」会被当成 Running。
@@ -193,7 +193,7 @@ internal enum class CapsulePhase {
 }
 
 /** 卡片上要挂哪一组动作按钮。 */
-internal enum class PendingKind {
+enum class PendingKind {
     /** 没有待处理。卡片上只有「⋯」或什么都不挂。 */
     None,
 

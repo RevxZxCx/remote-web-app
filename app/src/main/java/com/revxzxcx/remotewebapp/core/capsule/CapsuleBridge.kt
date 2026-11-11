@@ -35,6 +35,28 @@ object CapsuleBridge {
     /** 用户正看着的会话；`null` = 在列表或设置页。 */
     val viewing: StateFlow<String?> = _viewing.asStateFlow()
 
+    private val _nudges = MutableStateFlow(0)
+
+    /**
+     * 「请重算一次」的计数器（R062-B019 第一轮审查 P1）。
+     *
+     * ## 为什么需要一路假数据
+     * 划掉胶囊不会产生任何会话事件，所以只改 `CapsuleDismissal` 的开关
+     * 传不到 [CapsuleCoordinator] 耳朵里 —— 覆盖账会一直停在
+     * `coversDone = true`，那条被压掉的完成通知再也不会补发。
+     *
+     * 这里不直接持有协调器（信箱的定位就是「谁都不认识谁」），而是让协调器
+     * 多订阅一路自己认识的信号：值一变就重算。
+     *
+     * 用计数器而不是布尔：连续划两次也得各算一次（布尔第二次就不变了）。
+     */
+    internal val nudges: StateFlow<Int> = _nudges.asStateFlow()
+
+    /** 划掉胶囊后由 [CapsuleDismissReceiver] 调用。 */
+    internal fun nudge() {
+        _nudges.value = _nudges.value + 1
+    }
+
     private val _live = MutableStateFlow<CapsuleCoordinator.LiveSnapshot?>(null)
 
     /** 正在看的会话的实时快照（todo + 汇报）。 */
@@ -84,7 +106,7 @@ object CapsuleBridge {
      * 换连接前把信箱清零（R059 第三轮审查 P2）。
      *
      * ## 为什么必须有
-     * 这是**进程级** object，三个 `StateFlow` 会在断连后保留旧值。而
+     * 这是**进程级** object，四个 `StateFlow` 会在断连后保留旧值。而
      * `StateFlow` 的语义是「新订阅者立刻拿到当前值」，所以新连接一 attach，
      * 第一条 `collect` 就会把**上一个账号/工作区**的会话列表推进
      * [CapsuleCoordinator.setSessions]，焦点选举据此选出一个已经不属于这台机器的
@@ -92,6 +114,11 @@ object CapsuleBridge {
      *
      * 只在 `watchCapsule(null)`（断连）时调用，**不要**在每次 attach 前清——
      * 那样同一账号重连会白白闪一下空状态。
+     *
+     * `_nudges` 刻意**不**清零：它不是状态而是「发生过几次划掉」的计数器，
+     * 清零会让下一次订阅从 0 重新开始，与已收到的通知重复触发一次
+     * [CapsuleCoordinator.recomputeNow]；而它本来就是假的业务数据，
+     * 重订阅收到旧值只多跑一次重算，300ms 去抖会合并掉。
      */
     internal fun reset() {
         _sessions.value = emptyList()

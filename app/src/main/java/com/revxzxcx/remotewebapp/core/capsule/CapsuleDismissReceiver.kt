@@ -25,6 +25,14 @@ class CapsuleDismissReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != CapsuleCenter.ACTION_DISMISS) return
         CapsuleDismissal.markDismissed()
+        // 叫醒协调器重算一次（R062-B019 第一轮审查 P1）。
+        //
+        // 划掉胶囊**不产生任何会话事件**，而协调器的重算全挂在
+        // `setSessions` / `setApprovals` / `setQuestions` / `setLive` 上。
+        // 少了这一句，用户划掉之后若停在原画面，覆盖账里那条
+        // `coversDone = true` 会一直留着 —— 通知层据此**永久压掉**该会话的
+        // 完成通知，用户既没有胶囊也没有通知。
+        CapsuleBridge.nudge()
     }
 }
 

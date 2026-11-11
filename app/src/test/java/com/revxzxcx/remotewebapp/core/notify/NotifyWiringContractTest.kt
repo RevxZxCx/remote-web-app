@@ -70,7 +70,7 @@ class NotifyWiringContractTest {
 
     @Test
     fun `换连接必须先清掉三本账 否则旧主机的账会压掉新主机的通知`() {
-        val body = codeOnly(bodyOf(coordinatorSource(), "fun attach(client: RemoteEventsClient?)"))
+        val body = codeOnly(bodyOf(coordinatorSource(), "fun attach(client: RemoteEventsClient?"))
         assertTrue(
             "attach 必须清 approval 通知账：不清的话新主机上同 eventId 的请求会被当成通知过而跳过",
             body.contains("forgetAllNotified()"),
@@ -87,8 +87,13 @@ class NotifyWiringContractTest {
 
     @Test
     fun `清账必须发生在提前返回之前 否则切到空连接时账就留下了`() {
-        val body = codeOnly(bodyOf(coordinatorSource(), "fun attach(client: RemoteEventsClient?)"))
-        val earlyReturn = body.indexOf("if (client == null) return")
+        val body = codeOnly(bodyOf(coordinatorSource(), "fun attach(client: RemoteEventsClient?"))
+        // 早退有两种合法形状：单行 `return`，或块（退配对要顺手丢欠账，见 B019 P1-2）。
+        // 取两者中先出现的那个。
+        val earlyReturn = listOf(
+            body.indexOf("if (client == null) return"),
+            body.indexOf("if (client == null) {"),
+        ).filter { it >= 0 }.minOrNull() ?: -1
         assertTrue("attach 里应有 `if (client == null) return` 的早退", earlyReturn >= 0)
         for (call in listOf("forgetAllNotified()", "edge.reset()", "names.clear()")) {
             val at = body.indexOf(call)
@@ -156,7 +161,7 @@ class NotifyWiringContractTest {
         // 远程监听者然后**等**。没人答就是 `NO_PROVIDER`，任务直接失败。
         // 只订阅 approvals 而不订阅 questions，等于「模型要授权时打断你、
         // 模型要信息时一声不吭让任务挂掉」——这两种情况对用户的意义完全一样。
-        val body = codeOnly(bodyOf(coordinatorSource(), "fun attach(client: RemoteEventsClient?)"))
+        val body = codeOnly(bodyOf(coordinatorSource(), "fun attach(client: RemoteEventsClient?"))
         assertTrue("attach 里必须订阅 client.questions", body.contains("client.questions.collect"))
         assertTrue("订阅要挂在 syncQuestions 上", body.contains("syncQuestions("))
         assertTrue(
@@ -201,7 +206,7 @@ class NotifyWiringContractTest {
 
     @Test
     fun `换连接要复位连接判定器 否则那条连不上会永远挂着`() {
-        val body = codeOnly(bodyOf(coordinatorSource(), "fun attach(client: RemoteEventsClient?)"))
+        val body = codeOnly(bodyOf(coordinatorSource(), "fun attach(client: RemoteEventsClient?"))
         assertTrue(
             "判定器记着上一台断多久、提醒过没有；不复位的话切到一台连得好好的主机后，" +
                 "那条「连不上」永远撤不掉（新连接第一帧被刻意跳过，判定器永远不知道自己恢复了）",

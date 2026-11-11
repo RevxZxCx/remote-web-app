@@ -2,6 +2,8 @@ package com.revxzxcx.remotewebapp.core.capsule
 
 import android.util.Log
 import com.revxzxcx.remotewebapp.core.events.ApprovalRequest
+import com.revxzxcx.remotewebapp.core.notify.CapsuleCoverage
+import com.revxzxcx.remotewebapp.core.notify.CapsuleCoverageRegistry
 import com.revxzxcx.remotewebapp.core.notify.SubagentRegistry
 import com.revxzxcx.remotewebapp.core.events.RemoteEvents
 import com.revxzxcx.remotewebapp.core.events.QuestionRequest
@@ -47,6 +49,14 @@ internal class CapsuleCoordinator(
      * 默认 `null` 便于单测：绝大多数用例只关心焦点选举，不关心子代理。
      */
     private val subagents: SubagentRegistry? = null,
+    /**
+     * 与通知层共享的覆盖账（R062-B019）。
+     *
+     * 每轮 [recompute] 结束时把「胶囊此刻在替谁说话」写进去，通知层据此压掉
+     * 重复的那条普通通知。默认 `null` 便于单测：绝大多数用例只关心焦点选举，
+     * 与通知去重无关。
+     */
+    private val coverage: CapsuleCoverageRegistry? = null,
 ) {
 
     /** 全量会话摘要，由首页在每次 `session/list` 落地后推进来。 */
@@ -101,6 +111,23 @@ internal class CapsuleCoordinator(
 
     /** 上一次发布是否成功。把「发不出」的日志从每次降级成每状态转换一次。 */
     private var lastPostOk: Boolean = true
+
+    /**
+     * 撤掉胶囊，并如实告诉通知层「我已经不覆盖任何会话了」。
+     *
+     * ## 为什么必须收成一个方法
+     * 除了这里，全文件**不该再出现裸的 `center.cancel()`**。`recompute()` 里原本
+     * 有三条出口（选举不出焦点、内容不值得显示、被用户划掉），`detach()` 是第四条。
+     * 任何一条漏了发布覆盖账，通知层就会一直以为胶囊还在替那个会话说话，于是
+     * **永久压掉**它的普通通知——用户既看不到胶囊也收不到通知。
+     *
+     * 收成一个方法就不存在「新加一条 cancel 忘了同步」这件事了。`detach()` 第一次
+     * 写的时候就漏了（测试抓到的），可见这不是假想的风险。
+     */
+    private fun cancelCard() {
+        center.cancel()
+        coverage?.publish(CapsuleCoverage.NONE)
+    }
 
     /**
      * 推入全量会话摘要。
@@ -219,7 +246,15 @@ internal class CapsuleCoordinator(
         viewingSessionId = null
         previousSessionId = null
         startedForSession = null
-        center.cancel()
+        // 走 cancelCard 而不是裸 `center.cancel()`：它同时负责把「胶囊已经不再
+        // 覆盖任何会话」这件事告诉通知层。漏了那一步，通知层会一直以为那个会话
+        // 还显示在胶囊上，于是**永久压掉**它的完成通知（R062-B019）。
+        //
+        // 欠账不清：那些是「本该发但还没发」的，重连后仍然要补。
+        // 现在这句注释是真的了 —— `coverage.reset()` 已拆成 `resetCoverage()`
+        // 与 `clearDeferred()`，`attach(null)`（退配对）才丢欠账，
+        // 普通重连只复位状态（R062-B019 第一轮审查 P1-2）。
+        cancelCard()
     }
 
     /**
@@ -238,6 +273,17 @@ internal class CapsuleCoordinator(
         }
     }
 
+    /**
+     * 请求一次重算（走 300ms 去抖）。
+     *
+     * 给「不是会话事件」的变化用：目前只有「用户划掉胶囊」这一条
+     * （R062-B019 P1）。走去抖而不是直接 [recompute]：划掉可能连着发生，
+     * 而每次去抖都会真的 `notify()` 或 `cancel()` 一遍。
+     */
+    internal fun recomputeNow() {
+        scheduleRecompute()
+    }
+
     /** 立刻重算（单测直接调它，跳过 debounce）。 */
     internal fun recompute() {
         val pendingIds = pendingSessionIds()
@@ -251,7 +297,7 @@ internal class CapsuleCoordinator(
         if (focus == null) {
             previousSessionId = null
             startedForSession = null
-            center.cancel()
+            cancelCard()
             return
         }
 
@@ -266,14 +312,14 @@ internal class CapsuleCoordinator(
         val others = CapsuleFocus.countOthersRunning(sessions, focus.sessionId)
         val state = stateFor(focus.sessionId, focus.title, others, phaseOf(focus))
         if (!state.visible) {
-            center.cancel()
+            cancelCard()
             return
         }
 
         // 用户手动划掉过，且没有新的待处理事项：尊重他的选择，不再自动弹回。
         // 但有待处理时必须出现——那是「任务卡住了」的唯一提示。
         if (CapsuleDismissal.isDismissed() && state.pending == PendingKind.None) {
-            center.cancel()
+            cancelCard()
             return
         }
 
@@ -294,6 +340,43 @@ internal class CapsuleCoordinator(
             )
         }
         lastPostOk = posted
+
+        // 告诉通知层「胶囊此刻在替这个会话说话」（R062-B019）。
+        //
+        // ⚠️ 这一句**不能**放进 `if (posted)` 里。
+        //
+        // `post()` 返回 false 有两种完全不同的原因：
+        // 1. 用户没开「流体云显示实时活动」——这时系统确实没显示卡片，压掉普通通知
+        //    就是**让用户什么都收不到**，绝不能覆盖；
+        // 2. 权限/频道检查通过但 `notify()` 抛了 `SecurityException`——瞬时故障，
+        //    下一轮去抖（300ms 后）就恢复了。
+        //
+        // 两种原因在 `post()` 的返回值上无法区分。但**第二种会自愈**，第一种不会：
+        // 如果因为一次瞬时失败就把它当作「未覆盖」，那条普通通知会立刻发出去，
+        // 而 300ms 后胶囊又显示出来——重复通知照样发生，只是变成偶发的。
+        //
+        // 所以这里的判据是「我**意图**显示什么」，而不是「这一次 notify 成功了没有」。
+        // 用户真没开实时活动时，通知层那条路靠 `posting` 这一项自己复判
+        // （`CapsuleCoverage.coversDone` 的第一个条件），而不是靠这里的 false。
+        //
+        // ## 已知取舍（R062-B019 第一轮审查 P2-2，明确不修）
+        // `posting = center.canPost()` 说的是「资格检查过了」，不是「这一次
+        // `notify()` 成功了」。极少数情况下（检查与投递之间权限被收回）会出现
+        // 胶囊没显示但覆盖成立 —— 真机表现是「这一条通知丢了」，下一轮轮次
+        // 完成时会正常补上。要修它就得把 `post()` 的返回值也编进覆盖判据，
+        // 而返回值无法区分「长期没开」与「瞬时失败」，反而会把偶发失败变成
+        // 每 300ms 一次的重复通知。两害相权取轻。
+        coverage?.publish(
+            CapsuleCoverage(
+                sessionId = focus.sessionId,
+                pending = state.pending,
+                phase = state.phase,
+                // 用户没开「流体云显示实时活动」时，胶囊压根不会出现在屏幕上。
+                // 那种情况下压掉普通通知 = 让用户什么都收不到，所以这一项是
+                // 覆盖成立的前提，而不是可选修饰。
+                posting = center.canPost(),
+            ),
+        )
     }
 
     /**

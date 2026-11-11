@@ -22,6 +22,7 @@ import com.revxzxcx.remotewebapp.core.notify.NoticeIntents
 import com.revxzxcx.remotewebapp.core.notify.NoticeSettings
 import com.revxzxcx.remotewebapp.core.notify.NoticeStatus
 import com.revxzxcx.remotewebapp.core.notify.NotifyCoordinator
+import com.revxzxcx.remotewebapp.core.notify.CapsuleCoverageRegistry
 import com.revxzxcx.remotewebapp.core.notify.SubagentRegistry
 import com.revxzxcx.remotewebapp.core.capsule.CapsuleBridge
 import com.revxzxcx.remotewebapp.core.capsule.CapsuleCenter
@@ -211,6 +212,18 @@ class AppContainer(context: Context) {
      */
     private val subagentRegistry = SubagentRegistry()
 
+    /**
+     * 胶囊 ↔ 通知层的共享覆盖账（R062-B019）。
+     *
+     * **必须由两层共用同一份**：用户报的「开了流体云之后普通通知还在推」不是某处
+     * 漏了判断，而是两层各自订阅同一批事件、谁也不知道对方刚发过什么。这份账是
+     * 那个缺失的交汇点——胶囊层写「我正在替谁说话」，通知层据此压掉重复的那条。
+     *
+     * 两处各记一本会得到「胶囊以为自己在显示、通知层以为没显示」，在真机上表现为
+     * 「有时多一条、有时少一条」——最难查的一类。
+     */
+    private val capsuleCoverage = CapsuleCoverageRegistry()
+
     val notifier: NotifyCoordinator = NotifyCoordinator(
         scope = appScope,
         center = notificationCenter,
@@ -218,6 +231,7 @@ class AppContainer(context: Context) {
         names = SessionNameTable(),
         fetchLastTurn = { sessionId -> fetchLastTurnEnd(sessionId) },
         subagents = subagentRegistry,
+        coverage = capsuleCoverage,
     )
 
     /**
@@ -260,6 +274,8 @@ class AppContainer(context: Context) {
         center = capsuleCenter,
         // 与通知层共用同一份登记表（见 [subagentRegistry]）。
         subagents = subagentRegistry,
+        // 与通知层共用同一份覆盖账（见 [capsuleCoverage]）。
+        coverage = capsuleCoverage,
     )
 
     /** 胶囊订阅事件流的作业（换连接时取消重建）。 */
@@ -295,6 +311,10 @@ class AppContainer(context: Context) {
             appScope.launch { CapsuleBridge.sessions.collect { capsule.setSessions(it) } },
             appScope.launch { CapsuleBridge.viewing.collect { capsule.setViewingSession(it) } },
             appScope.launch { CapsuleBridge.live.collect { capsule.setLive(it) } },
+            // 划掉胶囊之后必须重算一次（R062-B019 第一轮审查 P1）。
+            // 见 `CapsuleBridge.nudges` 的 KDoc：划掉不是会话事件，
+            // 没有这一路信号覆盖账会一直停在 `coversDone = true`。
+            appScope.launch { CapsuleBridge.nudges.collect { capsule.recomputeNow() } },
         )
     }
 
@@ -1175,7 +1195,13 @@ class AppContainer(context: Context) {
         // 通知订阅同样要跟着新连接走：`NotifyCoordinator` 只在构造时订一次是不行的——
         // 换主机就换了一个 `RemoteEventsClient`，旧引用指向一条已死的流，
         // 而那种「静默不再响」最难被发现（用户只会觉得「最近怎么不提醒了」）。
-        notifier.attach(rebuilt.remoteEvents)
+        //
+        // 第三轮审查 P2-2：`dropDeferred` 的判据必须是**换没换主机**，不是「走没走
+        // `Rebuild`」。`planFor`（`core/ActiveLink.kt:105-110`）只比 `(baseUrl, deviceId)`，
+        // 同一台机器重新扫码配对时 `baseUrl` 不变、`deviceId` 会变 → 被判成 `Rebuild`。
+        // 那时若无条件丢欠账，用户就永久收不到那几条——正是 B019 要修的症状。
+        val sameHost = previous?.credential?.hostId == credential.hostId
+        notifier.attach(rebuilt.remoteEvents, dropDeferred = !sameHost)
         watchCapsule(rebuilt.remoteEvents)
         watchCarrier(rebuilt)
         // B004 的关键一行：新簿与新连接在**同一次**赋值里换掉。放到这里（而不是更早）是因为

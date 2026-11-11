@@ -288,8 +288,12 @@ class SubagentNotifyWiringTest {
 
     @Test
     fun `换连接要清掉子代理表 因为不同机器上同一个 id 是另一条会话`() {
-        val body = codeOnly(bodyOf(coordinatorSource(), "fun attach(client: RemoteEventsClient?)"))
-        val earlyReturn = body.indexOf("if (client == null) return")
+        val body = codeOnly(bodyOf(coordinatorSource(), "fun attach(client: RemoteEventsClient?"))
+        // 早退可以是单行 `return`，也可以是块（退配对要丢欠账，见 B019 P1-2）。
+        val earlyReturn = listOf(
+            body.indexOf("if (client == null) return"),
+            body.indexOf("if (client == null) {"),
+        ).filter { it >= 0 }.minOrNull() ?: -1
         val clear = body.indexOf("subagents.clear()")
         assertTrue("attach 里要调 subagents.clear()", clear >= 0)
         assertTrue("清表必须在 `if (client == null) return` 之前", clear in 0 until earlyReturn)
