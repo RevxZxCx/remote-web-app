@@ -79,12 +79,15 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import com.revxzxcx.remotewebapp.core.session.Goal
 import com.revxzxcx.remotewebapp.core.session.GoalPhase
@@ -409,13 +412,19 @@ class ChatViewModel(
      * 同样不并进 [ChatUiState]：投影不是 `session/follow` 的产物。
      *
      * 刷新四条路（缺一不可，见 [refreshQuestions] 的 KDoc）：
-     *  1. `start()` 里一次 unary 首读——`session/control` 的 baseline 只含桌面端
-     *     当前选中会话，冷启动时我们这个会话大概率不在里面；
-     *  2. `session/control` 的 `projection` 帧——桌面端/手机端任何一方回答了问题，
-     *     服务端都会发增量帧，这是「防重复回答」的主要机制；
+     *  1. `start()` 里一次 unary 首读——`session/control` 的 baseline 只含已被物化的
+     *     会话，冷启动时我们这个会话大概率不在里面；
+     *  2. `session/control` 的 `projection` 帧——**这是「别人答掉了卡片消失」的主路径**：
+     *     回答必然提交 `tool/result` / `user/message{source.kind='user-question-reply'}`，
+     *     `userQuestions` 投影随之把该 callId 记进 `settled`，服务端
+     *     `sessionProjections.onChanged` 广播一帧（官方 KDoc：
+     *     "one projection change frame per committed event"），[applyQuestions] 据此摘卡片；
      *  3. `$events` 的 `user-questions/request` waterfall——有提问发生时立刻重读一次
-     *     （投影帧可能因为会话不是当前选中会话而不发）；
-     *  4. 生成中每 [QUESTION_REFRESH_MS] 重读一次——兜底，保证卡片在别人答掉后消失。
+     *     （负责「出现」的即时性，投影帧本身也带 active，两者互为保险）；
+     *  4. 生成中周期性对账（[QUESTION_RECONCILE_MS_WITH_CARD] /
+     *     [QUESTION_RECONCILE_MS_NO_CARD]）——**不是**主路径，只兜事件覆盖不到的四种
+     *     情况：`timed` 门控未命中的旧 schema、断线窗口丢帧、服务端标 `continued`、
+     *     以及未预料的行为变化（详见 [watchQuestions] 里的注释）。
      */
     private val _questions = MutableStateFlow<List<QuestionSet>>(emptyList())
     val questions: StateFlow<List<QuestionSet>> = _questions.asStateFlow()
@@ -436,7 +445,7 @@ class ChatViewModel(
      *
      * ## 两条提问路怎么合并
      * **投影是权威来源**（桌面端 README 原话）。waterfall 只负责「立刻弹」——
-     * 投影最快也要等一次轮询（2.5s）。合并规则：
+     * 投影帧要么等一次对账、要么等 `session/control` 把帧送到。合并规则：
      *  - 投影有 open 组 → 用投影的（带 `callId`，能直接调 `userQuestions/answer`）；
      *  - 投影没有、waterfall 有 → 用 waterfall 的。
      *
@@ -501,7 +510,7 @@ class ChatViewModel(
      *  - [context] 为 null 且不 loading 不 error → 服务端确实没给这些投影（老版本桌面端）。
      *
      * ## 数据从哪来
-     * **打开抽屉时读一次** `session/projections`（一次 ≈88 KB，descriptor 不支持只取
+     * **打开抽屉时读一次** `session/projections`（一次 ≈88 KB 未压缩 / ≈21.7 KB gzip 后，descriptor 不支持只取
      * 指定键，所以不能轮询——3s 一次就是 30 KB/s），之后靠 `session/control` 那条
      * **已经在跑**的投影流打补丁，零额外流量。关掉抽屉不取消订阅：那条流本来是提问/
      * 权限在用，多记六个键不增开销；再打开时直接用累积值立即出图，不用等第二次往返。
@@ -651,6 +660,16 @@ class ChatViewModel(
 
     /** 投影一次性首读 / 失败回补的协程（`session/projections`）。 */
     private var projectionJob: Job? = null
+
+    /**
+     * 最近一次提问投影读**成功了吗**。
+     *
+     * 单独记一份，不复用 [_questionError]：那个是给用户看的文案状态，写入者还有
+     * `submitQuestionGroup` / `answerQuestionGroup`。对账循环借它判「这一轮读到了吗」时，
+     * 用户此间提交失败的文案会被误判成读失败，`stableRounds` 被清零、5s 档的出口失效
+     * （R060 审查 P2-2）。
+     */
+    private var lastQuestionReadFailed = false
 
     /** 生成中周期重读的协程。**不能与 [projectionJob] 共用**。 */
     private var questionPollJob: Job? = null
@@ -1429,13 +1448,19 @@ class ChatViewModel(
      * 提问/权限投影的读取与刷新。
      *
      * 四条刷新路（见 [_questions] 的 KDoc）：
-     *  1. **unary 首读**：`session/control` 的 baseline 只含桌面端当前选中会话
+     *  1. **unary 首读**：`session/control` 的 baseline 只含已被物化的会话
      *     （实测 90 个会话只回 1 个），所以冷启动必须自己读一次；
-     *  2. **control 流**：实时增量帧，只认 `sessionId` 匹配的本会话；
-     *  3. **`$events` waterfall**：收到 `user-questions/request` 就重读一次投影；
-     *  4. **生成中周期重读**：兜底，保证别人答掉后卡片会消失。
+     *  2. **control 流**：实时增量帧，只认 `sessionId` 匹配的本会话。
+     *     **这是「别人答掉了 → 卡片消失」的主路径**：回答必然提交 `tool/result` 或
+     *     `user/message{source.kind='user-question-reply'}`，投影把 callId 记进 `settled`，
+     *     服务端 `sessionProjections.onChanged` 广播一帧（官方 KDoc 承诺
+     *     "one projection change frame per committed event"）；
+     *  3. **`$events` waterfall**：收到 `user-questions/request` 就重读一次投影，
+     *     负责「卡片出现」的即时性；
+     *  4. **生成中周期对账**：兜事件覆盖不到的情况（`timed` 门控未命中、断线丢帧、
+     *     服务端标 `continued`），**不是**主路径。
      *
-     * 后三条都由 [_questions]/[ChatUiState.generating] 的变化驱动，所以整个逻辑是
+     * 前三条都由 [_questions]/[ChatUiState.generating] 的变化驱动，所以整个逻辑是
      * 「先铺首读 → 之后只按事件刷新」，没有常驻轮询在会话不生成时跑。
      */
     private fun watchQuestions() {
@@ -1447,7 +1472,7 @@ class ChatViewModel(
                 // 作为**流的终止原因**抛给收集方。而 [watchQuestions] 只在 `init` 里调一次，
                 // `start()`（`session/follow`）重连的是它自己那条流，**不会**重订 control ——
                 // 所以这里不重试就等于「这条会话的实时投影永久失效」：桌面端把问题答掉之后，
-                // 手机端不会消失卡片，只能等下一次 `questionSignal` 或生成中轮询兜底。
+                // 手机端不会收到那帧 settled，只能等生成中周期的对账兜底。
                 .retryWhen { cause, attempt ->
                     if (cause is TypertException && cause.isUnpaired) {
                         // 凭证失效：重试只会每 30s 打一次 403，交给「重新配对」出口。
@@ -1503,7 +1528,7 @@ class ChatViewModel(
                                 // ── R040：上下文遥测的六个键走同一条流，零额外流量。
                                 // 服务端在投影变化时推增量帧（`SessionControlController` 构造
                                 // 时订阅了 `sessionProjections.onChanged`），所以这里不必轮询
-                                // 那个 88 KB 的全量读。
+                                // 那个 88 KB（未压缩）的全量读。
                                 in CONTEXT_PROJECTION_KEYS -> applyContextProjection(
                                     frame.key,
                                     frame.value,
@@ -1512,12 +1537,12 @@ class ChatViewModel(
                         }
 
                         is SessionProjectionRepository.ProjectionFrame.Baseline -> {
-                            // baseline 只含桌面端当前选中会话，所以绝大多数时候这里是空操作。
+                            // baseline 只含已被物化的会话，所以绝大多数时候这里是空操作。
                             val values = (frame.projections[sessionId] as? JsonObject)
                                 ?.get("values") as? JsonObject
                             if (values != null) {
-                                // baseline 里也带着上下文六个键（如果桌面端当前选中的就是这个
-                                // 会话），直接吸收能省掉一次 88 KB 的 unary 读。
+                                // baseline 里也带着上下文六个键（如果这个会话已被物化、
+                                // 会话），直接吸收能省掉一次 88 KB（未压缩）的 unary 读。
                                 var merged = contextValues.get()
                                 CONTEXT_PROJECTION_KEYS.forEach { key ->
                                     val incoming = values[key]
@@ -1544,19 +1569,133 @@ class ChatViewModel(
             // waterfall 帧一到就**同步**铺默认草稿，不能只等 refreshQuestions() 的 unary
             // 往返：那张卡是 `interactive` 立刻渲染出来的，等投影的几百毫秒里用户点「提交」
             // 会撞上「还没有草稿」而被挡住，报的还是一句看不懂的错。
-            connection.remoteEvents.questionSignal.collect {
-                seedWaterfallDefaults()
-                refreshQuestions()
-            }
+            // 节流：多组提问并发时（多个工具同时发问）会连来好几帧，每帧一次
+            // 21.7 KB 整包读正是这次要消掉的模式。`seedWaterfallDefaults()` 仍在
+            // 去抖窗口结束后跑一次，卡片本身由推送立即渲染，不受影响。
+            connection.remoteEvents.questionSignal
+                .debounce(QUESTION_SIGNAL_DEBOUNCE_MS)
+                .collect {
+                    seedWaterfallDefaults()
+                    refreshQuestions()
+                }
         }
         viewModelScope.launch {
             _state.map { it.generating }.distinctUntilChanged().collect { generating ->
                 questionPollJob?.cancel()
                 if (!generating) return@collect
                 questionPollJob = viewModelScope.launch {
+                    // 生成态的首读：`turn/start` 之前若已积了卡片（上一轮留下的），
+                    // 只有这一刻才看得到。一次 21.7 KB。
+                    refreshQuestions()
+                    // ── 之后是「对账」，不是「轮询」（D221）──
+                    //
+                    // 原来这里是 `while(true){ delay(2.5s); refreshQuestions() }`（D220 后
+                    // 空闲降到 30s）。那条设计的前提是「回答发生后手机收不到任何东西」——
+                    // 查官方源码后确认**前提是错的**：
+                    //
+                    //   `packages/interaction/user-questions/src/projection.ts` 的
+                    //   `userQuestionProjectionDefinition` 把 `settled` 放进了 wire 视图
+                    //   （`wire: { view: state => state.questions }`，而
+                    //   `questions = { active, settled }`）。`settled` 的两个写入点都是
+                    //   **已提交的 Session 事件**：`tool/result`（按 toolCallId 归组）与
+                    //   `user/message`（`source.kind === 'user-question-reply'`）。
+                    //   投影服务自己的 `sessionProjections.onChanged` KDoc 原文：
+                    //   "called once per client-visible unit whose raw view changed by
+                    //   `Object.is`, per committed event"；本机 `SessionControlController`
+                    //   构造时订阅它，收到就无条件 `broadcast`（无 session / key 过滤）。
+                    //   → **谁答掉的都会有一帧**，而上面 `collect` 已经处理这一帧
+                    //   （`KEY_USER_QUESTIONS` → `applyQuestions`，`settledCallIds` 摘卡片）。
+                    //
+                    // 也就是说：**「回答产生事件」DSH 本来就实现了**，只是此前不知道。
+                    // 剩下的这一层只做对账，覆盖四种事件覆盖不到的情况：
+                    //   1. `timed` 门控——投影只在会话 header 声明了带 `timeout` 参数的
+                    //      `ask_user_question` schema 时才跟踪（官方文档
+                    //      `docs/subsystems/user-questions.md`:158 原文 "Native calls are
+                    //      tracked only when that header declares the timed
+                    //      `ask_user_question` schema with a `timeout` parameter; the
+                    //      blocking legacy tool never declares it"）。未声明 → 投影恒空
+                    //      → 永远没有 settled 帧。
+                    //   2. 断线重连窗口里丢掉的帧（`retryWhen` 重订后不会补发旧帧）。
+                    //   3. 服务端把问题标成 `continued`（超时 `ASK_TIMED_OUT`、结果 pending、
+                    //      `TOOL_OUTCOME_UNKNOWN`）而不是 settled —— 卡片要留到用户点掉。
+                    //   4. 兜底一切未预料的服务端行为变化。
+                    // 档位按「屏上有没有卡片」定：有卡片才可能有「该消失」的状态要收敛。
+                    // 不生成时整个协程根本不存在（`generating` 为假的 collect 分支直接 return），
+                    // 所以「不生成 = 零请求」是结构性的，不靠任何一次判断。
+                    //
+                    // 卡片的来源有两个（见 [interactive] 的合并规则）：投影组的 [_questions]，
+                    // 和 waterfall 立刻推来的 `remoteEvents.questions`。判据必须和那边一致——
+                    // 只看 `_questions` 的话，waterfall 卡片在场时 `_questions` 还是空的，
+                    // 档位会停在 60s，屏上明明有卡片却用最慢的节奏对账（M053 真机实测：
+                    // 卡片弹出后实测间隔仍是 59.9s，期望 5s）。
+                    //
+                    // 但只按 waterfall 判会反过来踩坑：`timed` 门控下投影永远为空（会话没声明
+                    // 带 timeout 的 schema），waterfall 卡片却可能一直挂着没有 cancel 帧，
+                    // 5s 档就会无休止跑下去——那正是这次要根治的流量黑洞。所以给 5s 档加一个
+                    // 出口：连续 [QUESTION_RECONCILE_MAX_PROJECTION_MISSES] 次读到投影为空，
+                    // 就认定这张卡投影跟踪不到，退回 60s，不再为它高频重读。
+                    var projectionMisses = 0
+                    // 上一次轮次里「waterfall 上挂着的卡片」的身份集合。换了一张卡就重置
+                    // 容错计数——否则第一张 tracking 不到的卡耗光 3 次配额之后，后面每一张
+                    // 新卡都直接被判 60s，等于 5s 档只对第一张卡生效。
+                    var lastPushedKeys: Set<String> = emptySet()
+                    // 上一次读到的投影内容指纹，以及它连续多少轮**一模一样**。
+                    // 这是 5s 档的第二个出口：卡片在场但内容长期不变，说明没有任何东西
+                    // 需要收敛——最典型的是服务端标成 `continued` 的组（超时 / 结果 pending /
+                    // `TOOL_OUTCOME_UNKNOWN`）。那种组会一直留在 `active` 里，而客户端
+                    // `isOpen` 只排除 `closed`（服务端从不下发 `closed`），于是
+                    // `projectedCard` 恒真、5s 档跑到本轮 turn 结束：
+                    // 5s × 21.7 KB ≈ 4.34 KB/s ≈ 375 MB/天，等于把这次省下的流量又花回去一半。
+                    var lastFingerprint: String = ""
+                    var stableRounds = 0
                     while (true) {
-                        delay(QUESTION_REFRESH_MS)
+                        val projectedCard = _questions.value.isNotEmpty()
+                        val fingerprint = questionSetFingerprint(_questions.value)
+                        if (fingerprint != lastFingerprint) {
+                            stableRounds = 0
+                            lastFingerprint = fingerprint
+                        }
+                        val pushedKeys = connection.remoteEvents.questions.value
+                            .filter { it.belongsTo(sessionId) }
+                            .mapTo(mutableSetOf()) { it.callId ?: waterfallCallId(it.eventId) }
+                        if (pushedKeys != lastPushedKeys) {
+                            projectionMisses = 0
+                            lastPushedKeys = pushedKeys
+                        }
+                        val waitingCard = projectedCard &&
+                            stableRounds < QUESTION_RECONCILE_MAX_STABLE_ROUNDS
+                        val pushedOnlyCard = !projectedCard && pushedKeys.isNotEmpty() &&
+                            projectionMisses < QUESTION_RECONCILE_MAX_PROJECTION_MISSES
+                        val interval = if (waitingCard || pushedOnlyCard) {
+                            QUESTION_RECONCILE_MS_WITH_CARD
+                        } else {
+                            QUESTION_RECONCILE_MS_NO_CARD
+                        }
+                        // 等待必须能被 waterfall 帧打断。`delay()` 是循环里唯一的挂起点，
+                        // 而 `questionSignal.collect` 跑在另一个协程、只调 `refreshQuestions()`，
+                        // 打断不了它：处在 60s 档时卡片弹出来了，也要等满 60s 才会重新求值
+                        // 判据、升到 5s 档。「卡片在场就 5s 对账」在首跳上并不成立（审查 P2-1）。
+                        // 等到信号就立刻重算，没等到就按当前档位到点重算。
+                        withTimeoutOrNull(interval) {
+                            connection.remoteEvents.questionSignal.drop(1).first()
+                        }
                         refreshQuestions()
+                        // 必须等这一轮**真的读完**再判空。`refreshQuestions()` 本身只是
+                        // `viewModelScope.launch`，不等就会读到上一轮的 `_questions`，
+                        // 计数整体滞后一轮：真卡只被判 2 次就放弃，假卡多跑一轮 5s。
+                        projectionJob?.join()
+                        // 读失败不能算成「投影为空」：网络抖动连着三次就把本该 5s 的档位
+                        // 提前降到 60s，而投影其实一直在。`_questionError` 由
+                        // [refreshQuestions] 在成功时清空、失败时写入，正好是「这一轮读到了吗」。
+                        val readOk = !lastQuestionReadFailed
+                        projectionMisses = if (readOk && _questions.value.isEmpty()) {
+                            projectionMisses + 1
+                        } else if (readOk) {
+                            0
+                        } else {
+                            projectionMisses
+                        }
+                        stableRounds = if (readOk) stableRounds + 1 else 0
                     }
                 }
             }
@@ -1569,8 +1708,8 @@ class ChatViewModel(
      * 失败**不清空**已有卡片：一次网络抖动就让待答问题消失，用户会以为问题已经被
      * 别人答掉了（实际上没有），比留着卡片更糟。错误只写进 [_questionError]。
      *
-     * 重入守卫只保护**一次性读**（首读、失败回补）。生成中的周期轮询走
-     * [questionPollJob]，与 [projectionJob] 分开——早先两者共用一个字段，轮询循环
+     * 重入守卫只保护**一次性读**（首读、失败回补）。生成中的周期性「对账」走
+     * [questionPollJob]，与 [projectionJob] 分开——早先两者共用一个字段，对账循环
      * 自己把自己 `isActive == true` 拦住，整段生成期里 unary 兜底刷新一次都没跑过，
      * 回答失败后的回读也被吞掉。
      */
@@ -1582,9 +1721,11 @@ class ChatViewModel(
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Exception) {
+                lastQuestionReadFailed = true
                 _questionError.value = describe(cause)
                 return@launch
             }
+            lastQuestionReadFailed = false
             _questionError.value = null
             applyQuestions(snapshot.questions ?: UserQuestionsSnapshot.EMPTY)
             snapshot.permission?.let { found ->
@@ -1602,7 +1743,7 @@ class ChatViewModel(
      * 明它可能过期。
      *
      * 重入守卫用 [contextJob] 而不是复用 [projectionJob]：那个正在读提问/权限，两者
-     * 撞在一起会让侧边栏一直转圈（提问刷新是生成中每 2.5s 一次的）。
+     * 撞在一起会让侧边栏一直转圈（提问对账在生成中会周期性触发，见 [watchQuestions]）。
      */
     fun refreshContext() {
         if (contextJob?.isActive == true) return
@@ -1820,15 +1961,25 @@ class ChatViewModel(
         // `interactive` 就改读真实 callId，键不迁移的话这些输入从界面上消失
         // （map 里还在，但再也读不到）——R026 审查 P2。
         //
-        // 迁移条件：合成键对应的 waterfall 条目**还活着**（说明投影组就是它），
+        // 迁移条件：合成键对应的 waterfall 条目**还活着**，且能找到「就是它」的投影组，
         // 且真实 callId 那一侧还没有草稿（避免覆盖用户后来直接按真实 callId 填的东西）。
+        //
+        // 怎么配对：帧上**没有** `wait.callId` 时才用合成键（有的话 `interactive` 直接用
+        // 真实 callId，压根不需要迁移），所以这里不能靠 callId 配对——按**题面 id 集合**
+        // 配对。早先这行写的是 `open.firstOrNull { it.callId == request.callId }`，
+        // 而 `QuestionSet.callId` 是非空 `String`、外层又已过滤 `callId == null`，
+        // 条件恒假 ⇒ 整段迁移从未执行过（死代码），用户在瀑布卡上填的草稿在投影到位后
+        // 会静默丢失（R060 审查 P2-1）。
         connection.remoteEvents.questions.value
             .filter { it.belongsTo(sessionId) && it.callId == null }
             .forEach { request ->
                 val from = waterfallCallId(request.eventId)
-                val to = open.firstOrNull { it.callId == request.callId }?.callId
-                    ?: return@forEach
-                migrateQuestionDrafts(from, to)
+                if (!_state.value.questionDrafts.containsKey(from)) return@forEach
+                val ids = request.questions.mapTo(mutableSetOf()) { it.id }
+                val target = open.firstOrNull { set ->
+                    set.questions.mapTo(mutableSetOf()) { it.id } == ids
+                } ?: return@forEach
+                migrateQuestionDrafts(from, target.callId)
             }
         // 卡片消失（被别人答掉 / 被撤销）时草稿也要跟着走，否则同一 callId 若被服务端
         // 复用，旧草稿会套到新问题上。
@@ -1995,31 +2146,99 @@ class ChatViewModel(
             return
         }
         if (answerJob?.isActive == true) return
-        val fromProjection = _questions.value.any { it.callId == callId }
         answerJob = viewModelScope.launch {
+            // 判据必须在协程里取。外面取完到真正发出之间隔着一次调度，期间对账可能刚
+            // 刷新过投影（`_questions` 变空或变满），按旧判据就会选错路：
+            // 该走投影却走了 waterfall（服务端回「不在等待」），或者反过来。
+            val fromProjection = _questions.value.any { it.callId == callId }
             try {
                 if (fromProjection) {
-                    projections.answerQuestions(sessionId, callId, answers)
-                    _questions.value = _questions.value.filterNot { it.callId == callId }
-                    // waterfall 上可能还挂着同一条（`callId` 对上就是同一个问题）。
-                    // 不摘的话投影组一消失，`interactive` 会回退到一张已经答过的卡片，
-                    // 用户再点一次就是对同一个 eventId 发第二次 outcome。
-                    connection.remoteEvents.forgetQuestion(callId)
+                    answerViaProjection(callId, answers)
                 } else {
                     connection.remoteEvents.answerQuestions(callId, answers)
                 }
-                // 草稿跟着卡片一起走：答案已经进了服务端，留着草稿只会让下一组同 id 的题
-                // 一开始就带着上一次的选项。**必须在成功分支里清**——放在协程外面的话，
-                // 回答失败时用户手打的自定义答案已经没了，而卡片还在，只能重打一遍。
-                _state.value = ChatReducer.clearQuestion(_state.value, callId)
-                _questionError.value = null
+                finishAnswered(callId)
             } catch (cause: kotlinx.coroutines.CancellationException) {
                 throw cause
             } catch (cause: Exception) {
-                _questionError.value = describe(cause)
-                // 以服务端为准：可能别人已经答掉了（卡片不该回来），也可能还开着（该回来）。
-                refreshQuestions()
+                // 投影路被拒时**先试另一条**：最典型的是「别人刚答掉」与「投影还没跟上、
+                // 但瀑布条目已经能答」这两种竞态，投影拒绝并不代表这条提问死了。
+                // 只有瀑布侧也确实没有这个 callId 时，才把原始错误报给用户。
+                val rescued = fromProjection && tryAnswerViaWaterfall(callId, answers, cause)
+                if (rescued) {
+                    // **rescue 是成功分支**，必须和主路做同样的收尾。曾经这里只把错误吞掉
+                    // 就结束：`_questions` 没摘、草稿没清，`interactive` 的第二优先级
+                    // （投影提问）仍高于瀑布，卡片会继续显示一张已经答过的题——用户再点
+                    // 一次就是对同一组发第三个 outcome（R060 审查 P1-3）。
+                    finishAnswered(callId)
+                } else {
+                    _questionError.value = describe(cause)
+                    // 以服务端为准：可能别人已经答掉了（卡片不该回来），也可能还开着（该回来）。
+                    refreshQuestions()
+                }
             }
+        }
+    }
+
+    /**
+     * 回答成功后统一的本地收尾：摘掉投影组与瀑布孪生、清掉本地草稿。
+     *
+     * 主路与 rescue 路必须共用这一份。曾经 rescue 路不走这里，卡片留在屏上
+     * （见调用点的注释）。
+     */
+    private fun finishAnswered(callId: String) {
+        _questions.value = _questions.value.filterNot { it.callId == callId }
+        connection.remoteEvents.forgetQuestion(callId)
+        // 草稿跟着卡片一起走：答案已经进了服务端，留着草稿只会让下一组同 id 的题
+        // 一开始就带着上一次的选项。
+        _state.value = ChatReducer.clearQuestion(_state.value, callId)
+        _questionError.value = null
+    }
+
+    /** 投影路回答 + 摘掉投影组与瀑布孪生。失败向上抛，由调用方决定要不要改走另一条路。 */
+    private suspend fun answerViaProjection(callId: String, answers: List<AskAnswer>) {
+        projections.answerQuestions(sessionId, callId, answers)
+        // 本地摘除（投影组 + waterfall 孪生）统一在 [finishAnswered] 里做。
+        // waterfall 上可能还挂着同一条（`callId` 对上就是同一个问题）：不摘的话投影组一
+        // 消失，`interactive` 会回退到一张已经答过的卡片，用户再点一次就是对同一个
+        // eventId 发第二次 outcome。
+    }
+
+    /**
+     * 投影路失败后改走 waterfall 路，成功返回 true。
+     *
+     * 只在瀑布侧**确实还挂着**这个 callId 时才试——否则 `answerQuestions` 会抛
+     * 「这一组问题已经不在等待回答了」，把用户的注意力引到一条本来就不通的路。
+     *
+     * 重复 outcome 的风险：上游提问实现里对同一 callId 的第二次回答会抛 `REPLY_QUEUED`
+     * 拒绝（这是读 DSH 源码得到的结论，**本仓库内无出处可复核**）。真正危险的是
+     * **超时类失败**：unary read timeout 30s，请求可能已经到了服务端、只是响应丢了，
+     * 此时再走瀑布路就是第二次 outcome。所以超时类异常**不 rescue**，只对「明确没送出去」
+     * 的失败（连接被拒、DNS、协议层断言）才改道。
+     */
+    private suspend fun tryAnswerViaWaterfall(
+        callId: String,
+        answers: List<AskAnswer>,
+        rescueBodyFailure: Exception,
+    ): Boolean {
+        val key = callId.removePrefix(RemoteEvents.WATERFALL_PREFIX)
+        val hasWaterfallEntry = connection.remoteEvents.questions.value.any {
+            it.callId == callId || it.callId == key || it.eventId == key || it.eventId == callId
+        }
+        if (!hasWaterfallEntry) return false
+        // 超时意味着「可能已经送到」，不能改道重发（见 KDoc）。
+        if (rescueBodyFailure is java.net.SocketTimeoutException ||
+            rescueBodyFailure is java.io.InterruptedIOException
+        ) {
+            return false
+        }
+        return try {
+            connection.remoteEvents.answerQuestions(callId, answers)
+            true
+        } catch (cause: kotlinx.coroutines.CancellationException) {
+            throw cause
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -2037,6 +2256,29 @@ class ChatViewModel(
      * 「投影那组」与「waterfall 那组」的草稿会互相覆盖。
      */
     private fun waterfallCallId(eventId: String): String = WATERFALL_PREFIX + eventId
+
+    /**
+     * 一组提问的**内容指纹**，用来判断「投影这几轮到底有没有变」。
+     *
+     * 取的是**所有会出现在屏上的内容**：组身份与状态、每道题的 id / 题干 / 是否多选，
+     * 以及每个选项的文案。只有草稿（本地，投影里没有）不参与——它变化不来自服务端。
+     * 顺序敏感：组的顺序变了说明 `active` 真的动过，不该算「稳定」。
+     *
+     * 曾经只算 `id` + `options.size`，而 KDoc 却声称「只取会改变屏上该显示什么的部分」——
+     * 服务端原地改题面时客户端会误判成稳定、第 4 轮就退回 60s（审查 P2-3）。
+     */
+    private fun questionSetFingerprint(sets: List<QuestionSet>): String = buildString {
+        sets.forEach { set ->
+            append(set.callId).append(':').append(set.state).append('|')
+            set.questions.forEach { question ->
+                append(question.id).append('/').append(question.question).append('/')
+                append(if (question.multiSelect) 'M' else 'S').append('[')
+                question.options.forEach { option -> append(option.label).append(',') }
+                append(']')
+            }
+            append(';')
+        }
+    }
 
     // ---------------------------------------------------------------- 附件（需求 FR-5）
 
@@ -2580,13 +2822,70 @@ class ChatViewModel(
         private val WATERFALL_PREFIX: String get() = RemoteEvents.WATERFALL_PREFIX
 
         /**
-         * 生成中重读提问投影的间隔。
+         * 生成中与投影**对账**的间隔（屏上**有**待答卡片时，D223）。
          *
-         * 只在 [ChatUiState.generating] 为真时跑：提问只可能在工具执行期间出现，
-         * 不生成时没有任何东西会新建提问。2.5s 足够让「别人答掉了」在两次心跳内
-         * 反映到手机上，而每秒最多一次 unary RPC 的代价可以忽略。
+         * 「卡片该消失了」的正常路径是推送，不是这条：回答动作必然提交 `tool/result`
+         * 或 `user/message{source.kind='user-question-reply'}`，`userQuestions` 投影跟着
+         * 变成 `settled`，服务端 `onChanged` 广播一帧，`watchQuestions()` 的 `collect`
+         * 立刻摘掉卡片。所以这里的 5s 只在对账失败时兜底（丢帧、重连窗口、`continued`
+         * 状态、`timed` 门控未命中的会话）。
+         *
+         * 取 5s 而不是 2.5s：卡片在场时用户正盯着屏，晚 5 秒收敛一个**异常**状态
+         * 可以接受，而每次对账都是整包 21.7 KB（gzip 后；未压缩 88 KB），
+         * descriptor 不支持按 key 取，频率是唯一的成本控制点。
          */
-        private const val QUESTION_REFRESH_MS = 2_500L
+        private const val QUESTION_RECONCILE_MS_WITH_CARD = 5_000L
+
+        /**
+         * 生成中与投影对账的间隔（屏上**没有**待答卡片时，D223）。
+         *
+         * 卡片的**出现**完全靠推送（`$events` waterfall + `session/control` 增量帧），
+         * 不依赖这里；屏上没卡片时也就没有「该消失」的状态要收敛。60s 纯粹是
+         * 「万一前面那些事件机制整体失效」的最后一道栅栏。
+         *
+         * 成本：60s × 21.7 KB ≈ 0.36 KB/s。相比之下 D220 的 30s 档是 0.72 KB/s，
+         * 原始 2.5s 是 8.7 KB/s（≈0.74 GB/天，服务器出向额度就是被它吃穿的）。
+         */
+        private const val QUESTION_RECONCILE_MS_NO_CARD = 60_000L
+
+        /**
+         * 5s 档在「只有 waterfall 卡片、投影一直是空」时的容忍次数（D223）。
+         *
+         * 卡片可能只存在于 `remoteEvents.questions` 而投影始终读不到它——最典型的是
+         * `timed` 门控未命中的会话（会话 header 没声明带 `timeout` 的
+         * `ask_user_question` schema，官方投影不跟踪），其次是服务端标了 `continued`
+         * 但没再发 `cancel` 帧的卡片。这两种情况下 5s 档没有任何东西可收敛，
+         * 继续跑就是回到流量黑洞。
+         *
+         * 取 3 次：5s × 3 = 15s。真实「投影稍晚才跟上」的情况（waterfall 先到、
+         * 投影帧随后到）通常在几百毫秒内收敛，15s 有充足余量；真跟不上就在第 4 轮
+         * 退回 60s，最多浪费 3 次整包读（≈65 KB）。
+         */
+        private const val QUESTION_RECONCILE_MAX_PROJECTION_MISSES = 3
+
+        /**
+         * 5s 档在「投影内容连续这么多轮完全没变」时的容忍轮数（D223 补丁二）。
+         *
+         * 卡片在场不等于「有状态要收敛」。最典型的反例是服务端标成 `continued` 的组
+         * （`ASK_TIMED_OUT`、`tool/result` 带 pending、`TOOL_OUTCOME_UNKNOWN`）：它一直
+         * 留在 `active` 里，客户端 `isOpen` 只排除 `closed`（服务端从不下发 `closed`），
+         * 于是档位恒判 5s、跑到本轮 turn 结束。5s × 21.7 KB ≈ 4.34 KB/s ≈ 375 MB/天，
+         * 会把这次省下的流量吃掉一半。
+         *
+         * 取 3 轮：正常的「别人答掉了」会在下一轮就变化（投影指纹改变 ⇒ 计数清零），
+         * 15s 内毫无变化基本就可以确定没有东西在变。之后退回 60s，若真有迟到的变化，
+         * 投影指纹一变就立刻回到 5s。
+         */
+        private const val QUESTION_RECONCILE_MAX_STABLE_ROUNDS = 3
+
+        /**
+         * `questionSignal` 的去抖窗口。
+         *
+         * waterfall 每来一帧就触发一次整包 21.7 KB 读 + 一次全量 `seedDefaults` 遍历。
+         * 单组提问时只有一帧，无所谓；多组并发提问会变成「N 帧 → N 次整包读」。
+         * 卡片由推送立即渲染，去抖只推迟「去重读投影」这一步，不影响用户看到卡片。
+         */
+        private const val QUESTION_SIGNAL_DEBOUNCE_MS = 1_000L
 
         /**
          * 草稿去抖窗口（毫秒）。

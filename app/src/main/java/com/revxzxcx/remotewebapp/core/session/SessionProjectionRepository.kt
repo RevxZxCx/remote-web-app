@@ -16,9 +16,9 @@ import kotlinx.serialization.json.JsonPrimitive
  * 三个 RPC 的数据源。
  *
  * 为什么需要三条路而不是一条：
- *  - **unary `session/projections`** 是唯一能给「桌面端当前选中会话以外的会话」读投影的路。
+ *  - **unary `session/projections`** 是唯一能给「控制流 baseline 里没有的会话」读投影的路。
  *    实测（`F:\bot\_ctlprobe3.mjs`）`session/control` 的 baseline 在 90 个会话里只返回
- *    **1 个**（桌面端当前选中那个），所以冷启动不能只靠它。
+ *    **1 个**（其它会话还没被物化/attach），所以冷启动不能只靠它。
  *  - **stream `session/control`** 提供实时 `projection` 帧（`{type:'projection', sessionId, key, value, seq}`），
  *    是「别人在桌面端答掉了这个问题」能立刻反应到手机上的唯一途径。
  *  - **unary `userQuestions/answer`** 是唯一的写入口。
@@ -44,7 +44,7 @@ class SessionProjectionRepository(
      *
      * 给「对话详情」侧边栏用：那边要的是 `contextTimeline` / `costUsage` / `tokenUsage` /
      * `contextPressure` / `contextBreakdown` / `sessionStats` 六个键，且**一次读全**
-     * （响应 ≈88 KB，其中 `contextHeaders` 70 KB + `turnOutline` 11 KB 占了绝大部分，
+     * （响应 ≈88 KB 未压缩 / ≈21.7 KB gzip 后，其中 `contextHeaders` 70 KB + `turnOutline` 11 KB 占了绝大部分，
      * 但 descriptor 不支持只取指定键，所以要么全拿要么不拿）。
      *
      * 会话不存在时服务端整体回 `null`，这里返回 null 而不是空对象——调用方据此区分
@@ -56,12 +56,6 @@ class SessionProjectionRepository(
         (raw as? JsonObject)?.get("values") as? JsonObject
     }
 
-    /** 只读提问投影（生成中周期重读用，比 [read] 少解析一个键）。 */
-    suspend fun readQuestions(sessionId: String): UserQuestionsSnapshot? = read(sessionId).questions
-
-    /** 只读权限投影。 */
-    suspend fun readPermission(sessionId: String): PermissionSnapshot? = read(sessionId).permission
-
     /**
      * 订阅实时投影流。
      *
@@ -70,7 +64,7 @@ class SessionProjectionRepository(
      *
      * 帧只有两种，其余形状一律忽略：
      *  - `{type:'baseline', value:{projections:{<sessionId>:{asOfSeq, values}}}}` —— 首帧，
-     *    但只含桌面端当前选中会话（见 KDoc）；
+     *    但只含已被物化的会话（见 KDoc）；
      *  - `{type:'projection', sessionId, key, value, seq}` —— 增量。
      */
     fun control(): Flow<ProjectionFrame> =
@@ -133,7 +127,7 @@ class SessionProjectionRepository(
         /**
          * 同一次响应的原始 `values`。
          *
-         * 带出来是为了让「问一次拿三个键」成为可能：`session/projections` 一次 88 KB，
+         * 带出来是为了让「问一次拿三个键」成为可能：`session/projections` 一次 88 KB（未压缩），
          * 侧边栏再单独发一次请求就是白拉第二遍 88 KB。
          */
         val values: JsonObject? = null,
@@ -145,7 +139,7 @@ class SessionProjectionRepository(
 
     /** `session/control` 的两种有用帧。 */
     sealed interface ProjectionFrame {
-        /** 首帧：`{<sessionId>:{asOfSeq, values}}`，只含桌面端当前选中会话。 */
+        /** 首帧：`{<sessionId>:{asOfSeq, values}}`，只含已被物化的会话。 */
         data class Baseline(val projections: JsonObject) : ProjectionFrame
 
         /** 增量帧：某个会话的某个投影变了。 */

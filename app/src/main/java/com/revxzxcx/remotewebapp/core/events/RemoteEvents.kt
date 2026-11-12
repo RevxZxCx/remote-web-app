@@ -396,8 +396,9 @@ data class ApprovalRequest(
  * ## 为什么投影之外还要接 waterfall
  * `userQuestions` 投影的 `active` 只包含**已经开始等待回答**的提问组。当
  * `agent.status === 'awaiting_user'` 时提问组已经在那儿了，投影刷新足够；
- * 但投影是轮询出来的（[SessionProjectionRepository] 有一条 2.5s 的兜底循环），
  * 而 waterfall 是**服务端主动推送**——模型刚发问的那一刻就该弹卡片。
+ * （投影本身也有推送：`session/control` 增量帧，但它要求控制流已建立且该会话
+ * 已被物化；waterfall 是更早到达的一手信号，负责把首读提前到「刚发问」。）
  * 所以两条路都接：waterfall 负责「立刻弹」，投影负责「权威同步」。
  *
  * 桌面端就是这么做的（`dsh-client-ui-user-questions/lib/client.js` 的

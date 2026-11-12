@@ -99,9 +99,9 @@ class RemoteEventsClient(
      * 「有新的提问请求到达」的信号：每收到一次 `user-questions/request` waterfall 就 +1。
      *
      * 与 [questions] 并存的原因：[questions] 只在 `wait.callId` 存在时才能直接回答，
-     * 而**权威的提问列表来自 `userQuestions` 投影**（轮询 + `session/control`）。
-     * 这个信号就是「立刻去重读投影」的触发器——投影刷新几秒一次的节奏对
-     * 「模型刚发问」来说太慢。
+     * 而**权威的提问列表来自 `userQuestions` 投影**（`session/control` 增量帧推送）。
+     * 这个信号就是「立刻去重读投影」的触发器——投影帧只在该会话已被物化、
+     * 控制流已建立时才到，waterfall 可以更早。
      */
     private val _questionSignal = MutableStateFlow(0L)
 
@@ -374,8 +374,9 @@ class RemoteEventsClient(
                         _questionSignal.value = _questionSignal.value + 1
                     }
                     // 请求本身也放出来：弹卡片要的是「立刻」，而 `userQuestions` 投影
-                    // 是轮询出来的（最快也要等下一次刷新）。投影仍是权威来源——
-                    // `ChatViewModel` 把两条路合并，投影缺席时才用这里的内容。
+                    // 靠 `session/control` 增量帧推送（要求该会话已被物化、控制流已建立），
+                    // 比这一手 waterfall 晚。投影仍是权威来源——`ChatViewModel` 把两条路
+                    // 合并，投影缺席时才用这里的内容。
                     val request = QuestionRequest.parse(
                         eventId = eventId,
                         agentId = obj.text("agentId"),

@@ -231,7 +231,7 @@ object ChatArgs {
      *
      * 实测（`F:\bot\_projprobe.mjs`）：参数只有 `sessionId`，**不是** address 联合；
      * 返回 `{asOfSeq, values}`，会话不存在时返回 `null`。
-     * 这是唯一能给「非桌面端当前选中会话」读投影的路（`session/control` 的 baseline
+     * 这是唯一能给「控制流 baseline 里没有的会话」读投影的路（`session/control` 的 baseline
      * 只含当前选中会话，见 [SessionProjectionRepository.control] 的 KDoc）。
      */
     fun projections(sessionId: String): JsonObject = request {

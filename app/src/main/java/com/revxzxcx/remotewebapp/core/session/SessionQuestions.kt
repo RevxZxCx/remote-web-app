@@ -12,7 +12,7 @@ import kotlinx.serialization.json.put
  *
  * 这两个投影只通过两条路可读：
  * 1. unary `session/projections {request:{sessionId}}` → `{asOfSeq, values}`（或 `null`）；
- * 2. stream `session/control` 的 `projection` 帧（baseline 只含桌面端当前选中会话，所以不能只靠它）。
+ * 2. stream `session/control` 的 `projection` 帧（baseline 只含已被物化的会话，所以不能只靠它）。
  *
  * wire 形状由 `dsh-api-user-questions/lib/types/record.js` 与 `typert.remote-client.js:92-150`
  * 逐字抄来，字段全部可选（服务端会加字段，客户端不能崩）。
