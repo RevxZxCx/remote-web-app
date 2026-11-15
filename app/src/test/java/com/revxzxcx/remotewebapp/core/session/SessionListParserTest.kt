@@ -270,6 +270,44 @@ class SessionListParserTest {
     }
 
     @Test
+    fun `解析 projections 里的 todos 投影`() {
+        // R062-B020：`session/list` 的 projections.values.todos 本来就带全部会话的
+        // todo，胶囊在拿不到前台快照时靠它画进度条与步骤行。
+        val result = parser.parse(
+            obj(
+                """{"items":[
+                     {"sessionId":"hasTodo","updatedAt":100,
+                      "projections":{"values":{"todos":[
+                        {"content":"读代码","status":"completed"},
+                        {"content":"写用例","status":"in_progress"},
+                        {"content":"跑回归","status":"pending"}]}}}]}""",
+            ),
+        )
+        val todos = result.todos["hasTodo"]
+        assertTrue(todos != null)
+        assertEquals(3, todos!!.items.size)
+        assertEquals(1, todos.active)
+        assertEquals("写用例", todos.items[1].content)
+    }
+
+    @Test
+    fun `空 todos 数组不进表 有到空时条目消失`() {
+        // 刻意区分「没有任务」与「没读到」：空数组不入表，条目消失而不是保留旧值，
+        // 否则会话跑完之后卡片会赖着上一轮的进度条。
+        val result = parser.parse(
+            obj(
+                """{"items":[
+                     {"sessionId":"empty","updatedAt":100,
+                      "projections":{"values":{"todos":[]}}},
+                     {"sessionId":"absent","updatedAt":200,
+                      "projections":{"values":{}}}]}""",
+            ),
+        )
+        assertTrue(result.todos.isEmpty())
+        assertEquals(2, result.items.size)
+    }
+
+    @Test
     fun `缺 sessionId 的条目既不进 items 也不进 usages`() {
         // 没有 id 就无法成为列表项，用量表也不该出现一个空键。
         val result = parser.parse(

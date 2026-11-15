@@ -315,6 +315,10 @@ class AppContainer(context: Context) {
             // 见 `CapsuleBridge.nudges` 的 KDoc：划掉不是会话事件，
             // 没有这一路信号覆盖账会一直停在 `coversDone = true`。
             appScope.launch { CapsuleBridge.nudges.collect { capsule.recomputeNow() } },
+            // 逐会话 todo（R062-B020）：让后台会话也能画进度条。
+            // 与上面三路同源——`CapsuleBridge` 是进程级信箱，换连接不会换掉它，
+            // 旧值由 `CapsuleBridge.reset()` 与 `capsule.detach()` 两边一起清。
+            appScope.launch { CapsuleBridge.todos.collect { capsule.setTodos(it) } },
         )
     }
 
@@ -336,8 +340,13 @@ class AppContainer(context: Context) {
     /**
      * 正在看的会话的实时快照（R059）：todo 进度与汇报正文。
      *
-     * 只有这条会话有这些数据（`session/list` 里没有 todo），所以后台会话选成焦点时
-     * 卡片没有进度条——那是诚实的降级，不是 bug。
+     * `report`（流式汇报正文）与 `action`（当前动作行）只存在于正在看的这条会话：
+     * 它们来自 `ChatViewModel` 的 `LiveAttempt`，后台会话没有。
+     *
+     * 但 `todos` **不再**只属于这里：`session/list` 的投影本来就带 todo，
+     * 由 `HomeViewModel` 经 `CapsuleBridge.publishTodos` 投进 [CapsuleCoordinator.setTodos]，
+     * 后台会话靠它画进度条与步骤行（R062-B020）。所以拿不到快照时缺的是汇报与动作,
+     * 而不是进度。
      */
     internal fun publishLiveForCapsule(snapshot: CapsuleCoordinator.LiveSnapshot?) {
         capsule.setLive(snapshot)

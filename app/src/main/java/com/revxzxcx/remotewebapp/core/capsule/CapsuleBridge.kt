@@ -10,8 +10,8 @@ import kotlinx.coroutines.flow.asStateFlow
  * 界面 → 胶囊的进程级中转站（R059）。
  *
  * ## 为什么需要它
- * 三路数据分散在不同层：会话列表在 `HomeViewModel`、正在看的会话在 `AppRoot`
- * 的状态机里、todo 与汇报在 `ChatViewModel`。它们**都拿不到** `AppContainer`
+ * 数据分散在不同层：会话列表（含 todo 投影）在 `HomeViewModel`、正在看的会话在
+ * `AppRoot` 的状态机里、流式汇报与动作在 `ChatViewModel`。它们**都拿不到** `AppContainer`
  * （`ChatViewModel` 的构造参数只有 `connection` / `sessionId` / `cache` / `ownerId`），
  * 而胶囊需要「无论界面在不在都要能发通知」——它挂在应用作用域上。
  *
@@ -57,6 +57,28 @@ object CapsuleBridge {
         _nudges.value = _nudges.value + 1
     }
 
+    private val _todos = MutableStateFlow<Map<String, TodoList>>(emptyMap())
+
+    /**
+     * 逐会话的 todo（R062-B020）。键是会话 id。
+     *
+     * ## 与 [live] 的分工（这是 B020 的修法核心）
+     * [live] 只有**正在看的那个**会话有，且绑在会话页生命周期上（一 `onCleared`
+     * 就断）。而状态栏上的胶囊恰恰是「我不在 App 里」时才看的东西——所以它需要
+     * 一份**不依赖会话页**的进度来源，这就是这一路。
+     *
+     * 数据来自 `session/list` 的 `projections.values.todos`（早就在响应体里，
+     * 此前被解析器丢掉）。通道是现成的：`api-session/activity` 帧 →
+     * `HomeViewModel.scheduleSessionsRefresh()`（1500ms 去抖）→ 全量刷新 →
+     * 本信箱。**零新增请求、零轮询**（用户 m11152 的硬约束）。
+     *
+     * ## 为什么是整张 map 而不是「当前焦点会话的 todo」
+     * 焦点由 `CapsuleFocus.elect` 在协调器内部选举，信箱不该复算一遍它——
+     * 两处各算一次必然在某次边界上不一致（正是 B019 那类「两个模块各说各话」的
+     * 形状）。整张 map 交过去，协调器自己按焦点取，口径只有一处。
+     */
+    internal val todos: StateFlow<Map<String, TodoList>> = _todos.asStateFlow()
+
     private val _live = MutableStateFlow<CapsuleCoordinator.LiveSnapshot?>(null)
 
     /** 正在看的会话的实时快照（todo + 汇报）。 */
@@ -76,6 +98,14 @@ object CapsuleBridge {
         if (_live.value != null && _live.value?.sessionId != sessionId) {
             _live.value = null
         }
+    }
+
+    /** 首页在 `session/list` 解析出 todo 后调用（R062-B020）。 */
+    fun publishTodos(items: Map<String, TodoList>) {
+        // 相等就不发：`StateFlow` 自己会去重，但这里先挡一下能省掉协调器侧
+        // 一次 300ms 去抖排队（列表每 1.5s 刷新一次，内容多数时候没变）。
+        if (_todos.value == items) return
+        _todos.value = items
     }
 
     /** `ChatViewModel` 在 todo / 汇报变化时调用。 */
@@ -106,7 +136,7 @@ object CapsuleBridge {
      * 换连接前把信箱清零（R059 第三轮审查 P2）。
      *
      * ## 为什么必须有
-     * 这是**进程级** object，四个 `StateFlow` 会在断连后保留旧值。而
+     * 这是**进程级** object，五个 `StateFlow` 会在断连后保留旧值。而
      * `StateFlow` 的语义是「新订阅者立刻拿到当前值」，所以新连接一 attach，
      * 第一条 `collect` 就会把**上一个账号/工作区**的会话列表推进
      * [CapsuleCoordinator.setSessions]，焦点选举据此选出一个已经不属于这台机器的
@@ -124,5 +154,8 @@ object CapsuleBridge {
         _sessions.value = emptyList()
         _viewing.value = null
         _live.value = null
+        // todo 也属于上一个连接（R062-B020）：它和 `_sessions` 是同一次响应里
+        // 的两半，留一半会让新连接的焦点会话拿到上一台机器的进度条。
+        _todos.value = emptyMap()
     }
 }

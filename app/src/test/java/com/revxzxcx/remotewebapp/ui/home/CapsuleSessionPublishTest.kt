@@ -129,6 +129,46 @@ class CapsuleSessionPublishTest {
     }
 
     @Test
+    fun `todo 投影也要跟着一起发布 两条路径都不能漏`() {
+        // R062-B020：会话在后台时胶囊的进度条来自 `session/list` 的 todo 投影，
+        // 不来自前台 live 快照。发布链与 sessions 一样有两条路径，漏一条就
+        // 复发 B017 那个形态（state 更新了，胶囊还停在上一帧）。
+        val text = homeSource()
+
+        val full = bodyOf(text, "private fun loadSessions()")
+        assertTrue(
+            "loadSessions 里必须有 CapsuleBridge.publishTodos(result.todos)——" +
+                "它直接写 _state，不走 applySessions，漏了就只能等下一次全量刷新",
+            full.contains("CapsuleBridge.publishTodos(result.todos)"),
+        )
+
+        val incremental = bodyOf(text, "private fun applySessions(items: List<SessionSummary>)")
+        val publish = incremental.indexOf("CapsuleBridge.publishTodos(result.todos)")
+        val shortCircuit = incremental.indexOf("if (result == current.sessions) return")
+        assertTrue("applySessions 里要发布 todo", publish >= 0)
+        assertTrue(
+            "todo 的发布同样必须在相等短路之前：内容没变不等于胶囊层已经知道",
+            publish < shortCircuit,
+        )
+    }
+
+    @Test
+    fun `applySessions 重建结果时要把 todo 继承过来 不能重置成空表`() {
+        // 增量帧只带 items，不动 todo；若重建 SessionListResult 时不显式继承，
+        // `todos` 会退化成默认的 emptyMap()，于是任意一条增量帧都会把整张表清空，
+        // 胶囊的进度条随之消失——而且下一次全量刷新之前一直空着。
+        val body = bodyOf(
+            homeSource(),
+            "private fun applySessions(items: List<SessionSummary>)",
+        )
+        assertTrue(
+            "applySessions 里重建 SessionListResult 时要带上 todos = current.sessions.todos，" +
+                "否则增量帧会把整张 todo 表清空",
+            body.contains("todos = current.sessions.todos"),
+        )
+    }
+
+    @Test
     fun `reset 之后是空列表 因为旧主机的会话不属于新连接`() {
         val before = CapsuleBridge.sessions.value
         try {

@@ -799,17 +799,22 @@ class CapsuleCoverageTest {
     }
 
     @Test
-    fun `Bridge 的 reset 要清三路真状态 但不能清 nudges`() {
+    fun `Bridge 的 reset 要清四路真状态 但不能清 nudges`() {
         val body = codeOnly(bodyOf(codeOnly(bridgeSource()), "internal fun reset()"))
 
         assertTrue(body.contains("_sessions.value = emptyList()"))
         assertTrue(body.contains("_viewing.value = null"))
         assertTrue(body.contains("_live.value = null"))
+        // R062-B020：todo 表也是上一个连接的状态。漏清它，重连后第一帧焦点
+        // 会话会拿到上一台机器的进度条（与 _sessions 漏清同一类症状）。
+        assertTrue("todo 表也要清", body.contains("_todos.value = emptyMap()"))
         assertTrue("nudges 是计数器不是状态，不该被 reset 清掉", !body.contains("_nudges.value"))
 
-        // KDoc 说的路数必须与实际一致（第四轮审查 P3-3：原写「三个」）
+        // KDoc 说的路数必须与实际一致（第四轮审查 P3-3 原写「三个」；
+        // R062-B020 加了 todos 这一路，所以现在是五个）
         val kdoc = bridgeSource()
-        assertTrue("要说四个 StateFlow", kdoc.contains("四个 `StateFlow`"))
+        assertTrue("要说五个 StateFlow", kdoc.contains("五个 `StateFlow`"))
+        assertTrue("不能还留着「四个」", !kdoc.contains("四个 `StateFlow`"))
         assertTrue("不能还留着「三个」", !kdoc.contains("三个 `StateFlow`"))
     }
 }

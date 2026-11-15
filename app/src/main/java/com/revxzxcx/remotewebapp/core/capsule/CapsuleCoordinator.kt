@@ -16,7 +16,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * 把三路数据合成一条胶囊（R059）。
+ * 把各路数据（会话列表、列表投影里的 todo、正在看的快照、待处理请求）合成一条胶囊（R059）。
  *
  * ## 为什么是「拉平到一个 recompute」而不是各订阅各发
  * 真机实测（调研文档 3.7-A）：多条 promoted 通知不会变成多个胶囊，系统只给
@@ -28,13 +28,20 @@ import kotlinx.coroutines.launch
  * ## 数据来源与各自的缺口（必须如实处理，不能编）
  * | 来源 | 给什么 | 缺什么 |
  * |---|---|---|
- * | `session/list`（[setSessions]） | 全部会话的运行态、未读标记 | **没有 todo** |
+ * | `session/list`（[setSessions]） | 全部会话的运行态、未读标记 | **没有 todo**（另走 [setTodos]） |
  * | `approvals` / `questions` | 谁在等人、等的是什么 | 与 todo 无关联 |
- * | 正在看的会话（[setLive]） | todo 进度、汇报正文 | 只有这一个会话有 |
+ * | 正在看的会话（[setLive]） | todo 进度、汇报正文、操作行 | 只有这一个会话有 |
+ * | `session/list` 的 todo 投影（[setTodos]） | **全部会话**的 todo 进度 | 1.5s 去抖，没有汇报正文 |
  *
- * 所以：**只有正在看的那个会话能画出进度条**。后台会话选成焦点时，
- * 卡片只有汇报行和计时器，没有进度条——这是诚实的降级，
- * 比编一个假的 `n/m` 好（用户一旦发现进度条是假的，整条胶囊都不可信了）。
+ * ## 进度条有两个来源，优先级见 [capsuleTodos]
+ * 曾经这里写的是「只有正在看的那个会话能画出进度条」。B020 把那条限制去掉了
+ * 一半：`session/list` 的 `projections.values.todos` 本来就带着所有会话的 todo，
+ * 只是解析层此前丢掉了。现在后台会话也有进度条与「第 N 步 / 共 M 步」。
+ *
+ * **仍然拿不到的**是汇报正文与操作行（它们只存在于正在看的会话的流式快照里），
+ * 为它单开 `session/follow` 被 R007 的 P1-1 结论否决（N 条并发流 + N 个缓存写入
+ * 入口）。所以后台会话的卡片是：标题 = 会话名，进度条 + 步骤行真实，
+ * 汇报行缺席。这仍是诚实的降级——比编一个假的 `n/m` 好。
  */
 internal class CapsuleCoordinator(
     private val scope: CoroutineScope,
@@ -94,6 +101,25 @@ internal class CapsuleCoordinator(
      */
     @Volatile
     private var live: LiveSnapshot? = null
+
+    /**
+     * 逐会话的 todo（R062-B020），键是会话 id。
+     *
+     * ## 为什么需要第四路数据
+     * 类 KDoc 的表格说「只有正在看的会话有 todo」——那是 B020 修之前的事实。
+     * `session/list` 的 `projections.values.todos` 其实一直带着所有会话的 todo，
+     * 只是解析层没取。现在它被 [setTodos] 推进来，于是**后台会话也能画进度条**：
+     *
+     * | 来源 | 覆盖范围 | 及时性 |
+     * |---|---|---|
+     * | [live]（会话页快照） | 只有前台那一个 | 每帧 |
+     * | [setTodos]（列表投影） | 全部会话 | 1.5s 去抖 |
+     *
+     * 取值顺序必须是 `live` 优先、本表兜底（见 [stateFor]）：前台快照更及时，
+     * 而兜底让「用户根本没打开过这个会话」也能有进度。
+     */
+    @Volatile
+    private var todosBySession: Map<String, TodoList> = emptyMap()
 
     /** 上一轮焦点，用于粘滞（第 3 层）。 */
     private var previousSessionId: String? = null
@@ -168,6 +194,24 @@ internal class CapsuleCoordinator(
         scheduleRecompute()
     }
 
+    /**
+     * 推入逐会话的 todo 映射（R062-B020）。
+     *
+     * 由首页在 `session/list` 解析出 todo 之后调用（`CapsuleBridge.todos`）。
+     * 与 [setSessions] 是**同一次响应**的两半，但走两条独立入口：会话摘要变化
+     * 频繁（每次运行态翻转都要发），todo 变化少得多，捆在一起会让每次状态翻转
+     * 都白搬一份 todo 表。
+     *
+     * **不改 [setSessions] 的签名**是刻意的：`SubagentRegistryTest` 有三处用
+     * `bodyOf(..., "fun setSessions(items: List<SessionSummary>)")` 按签名抓函数体
+     * 做结构断言，改签名会让它们全部失效——那是本项目的既有测试手法，不该为了
+     * 一次功能改动去推翻。
+     */
+    fun setTodos(items: Map<String, TodoList>) {
+        todosBySession = items
+        scheduleRecompute()
+    }
+
     /** 推入审批列表（来自 `RemoteEventsClient.approvals`）。 */
     fun setApprovals(items: List<ApprovalRequest>) {
         // 新的待处理事项必须能顶掉用户上一次的手动隐藏，否则一次误划会
@@ -233,6 +277,9 @@ internal class CapsuleCoordinator(
         detached = true
         recomputeJob?.cancel()
         recomputeJob = null
+        // todo 映射属于上一个连接（R062-B020）：`CapsuleBridge.reset()` 已经清了
+        // 它那一侧，这里同步清掉自己这份，否则重连后的第一帧焦点会拿到旧进度。
+        todosBySession = emptyMap()
         // `CapsuleDismissal` 是进程级单例，`detach()` 不清它就会出现
         // 「划掉胶囊 → 断连 → 连另一台机器，那台有会话在跑」这条路径上全程静默：
         // recompute 每次都命中 `dismissed && pending == None` 直接 cancel，
@@ -310,7 +357,8 @@ internal class CapsuleCoordinator(
         previousSessionId = focus.sessionId
 
         val others = CapsuleFocus.countOthersRunning(sessions, focus.sessionId)
-        val state = stateFor(focus.sessionId, focus.title, others, phaseOf(focus))
+        val fallbackTodos = todosBySession[focus.sessionId]
+        val state = stateFor(focus.sessionId, focus.title, others, phaseOf(focus), fallbackTodos)
         if (!state.visible) {
             cancelCard()
             return
@@ -401,12 +449,16 @@ internal class CapsuleCoordinator(
      *
      * @param phase 由 [phaseOf] 从会话摘要算出，**不要**在这里再看 live 快照判相位：
      * 后台会话没有快照，旧写法会把「已经跑完」当成「还在跑」。
+     * @param fallbackTodos 列表投影里的 todo（R062-B020）。**只有在**没有前台
+     *   live 快照时才用它——前台快照每帧都在更新，比 1.5s 去抖的列表投影及时，
+     *   而两者混用会让卡片在「前台看着」与「切出去」之间来回跳一个人的进度。
      */
     private fun stateFor(
         sessionId: String,
         title: String?,
         otherRunning: Int,
         phase: CapsulePhase,
+        fallbackTodos: TodoList? = null,
     ): CapsuleState {
         // 待处理优先：它决定按钮，也决定用户在通知栏能做的最有价值的一件事。
         approvals.firstOrNull { it.agentId == sessionId }?.let { request ->
@@ -440,7 +492,8 @@ internal class CapsuleCoordinator(
         return CapsuleContent.running(
             sessionId = sessionId,
             title = title,
-            todos = snapshot?.todos,
+            // B020：有 live 用 live，没有就回落到列表投影。判据见 [capsuleTodos]。
+            todos = capsuleTodos(snapshot, fallbackTodos),
             report = snapshot?.report,
             action = snapshot?.action,
             otherRunning = otherRunning,
@@ -640,3 +693,27 @@ internal fun capsulePendingOrder(
     }
     return ordered.distinct()
 }
+
+/**
+ * 决定这一帧该用哪份 todo（R062-B020）。
+ *
+ * ## 为什么不能写成 `snapshot?.todos ?: fallback`
+ * `snapshot.todos` 为 null 有两种完全不同的成因，而 `?.` 会把它们合并：
+ * 1. **没有 live 快照** —— 用户在别的页面、或干脆退出了 App。这时该回落，
+ *    正是 B020 要修的场景。
+ * 2. **有快照但这一帧还没 todo** —— 会话刚开跑，服务端还没推 `todo/write`。
+ *    这时**不该**回落：列表投影里那份是上一轮的旧进度，显示它会让进度条
+ *    在「上一轮的 3/5」和「这一轮的空白」之间来回跳。
+ *
+ * 所以判据是 `snapshot != null`（有没有快照），而不是 `snapshot.todos != null`
+ * （这一帧有没有 todo）。这两个条件看着像，行为差别在 case 2。
+ *
+ * ## 为什么抽成顶层函数
+ * 上一版这段判断埋在 `private fun stateFor` 里，唯一入口是 `recompute()`，
+ * 而 `recompute()` 又被四层焦点选举包着——测试怎么都测不到（R059 的 M2
+ * 变异体存活就是这么来的）。抽出来之后可以直接断言三种输入组合。
+ */
+internal fun capsuleTodos(
+    snapshot: CapsuleCoordinator.LiveSnapshot?,
+    fallback: TodoList?,
+): TodoList? = if (snapshot != null) snapshot.todos else fallback

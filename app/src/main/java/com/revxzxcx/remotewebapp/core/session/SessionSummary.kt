@@ -135,6 +135,42 @@ data class SessionListResult(
      * 缺失某一项表示「这条会话没有洞察数据」，**不是「用量为 0」**。
      */
     val usages: Map<String, SessionUsage> = emptyMap(),
+
+    /**
+     * 逐会话的 todo 列表（R062-B020），键是会话 id。
+     *
+     * ## 它解决的是什么
+     * 流体云胶囊在后台会话上原本**只能**显示「执行中 + 计时器」：进度条、第几步、
+     * 步骤正文都只存在于 `ChatViewModel` 的实时快照里，而那份快照绑在会话页的
+     * 生命周期上（`AppRoot` 的 `rememberScopedViewModelStoreOwner` 一 `onCleared`
+     * 就没了）。用户切出去看状态栏时，卡片信息量掉到最低——这正是 B020。
+     *
+     * 修法不是给后台会话单开 `session/follow`（R007 P1-1 已否决：N 条并发流 +
+     * N 个缓存写入口），而是认领一个**早就在同一份响应里**的事实：
+     * `session/list` 的 `projections.values.todos` 本来就带 todo 数组
+     * （实测 516 个会话中 118 条有，形状 `[{content, status}]`，正好是
+     * [GoalTodoParser.parseTodos] 吃的形状）。所以这条链路**零新增请求**，
+     * 只是把已经在响应体里、此前被丢掉的那一段接出来。
+     *
+     * ## 为什么不塞进 [SessionSummary]（与 [usages] 同一个理由）
+     * `SessionSummary` 是 `@Parcelable`，还会经 `CacheMappers` 进 Room
+     * （`CachedSession` 只有 12 列，没有 todos）。把 todo 挂上去要连带把
+     * `GoalTodo.kt` 整个改成 Parcelable，并给数据库加列做迁移——为了一个
+     * 只在焦点会话上读的派生数据，代价完全不划算。
+     *
+     * 分开还有一个直接好处：todo 变化不需要重建 `SessionSummary` 实例，
+     * 而 `SessionSummary` 的相等性被 `applySessions` 的短路与列表重组依赖着。
+     *
+     * ## 与这个包其余部分的关系
+     * **不进 Room 缓存**（与 [usages] 一致）：冷启动时这份映射是空的，胶囊就退回
+     * 「只有运行态」的旧行为，而不是拿上次进程的旧进度画一条假进度条。
+     *
+     * 条目缺失 = 没有可显示的 todo：可能是没有任务，也可能是没读到（冷启动、
+     * 该会话投影里本就没有 `todos` 字段）。两者在胶囊侧的行为相同（不画进度条），
+     * 所以不必区分；解析器还有一层额外收紧——空数组**不进表**，于是「有到空」
+     * 表现为条目消失而不是保留旧值。
+     */
+    val todos: Map<String, TodoList> = emptyMap(),
 ) {
     val isEmpty: Boolean get() = items.isEmpty()
 

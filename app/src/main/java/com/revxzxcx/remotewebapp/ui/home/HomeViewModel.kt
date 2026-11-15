@@ -585,7 +585,14 @@ class HomeViewModel(
         // 会话与它的用量是一一对应的，不能因为一次状态翻转就把整张用量表清空——
         // 否则用户每看到一次绿点亮起，洞察抽屉里的总额就会归零一次。
         // 新增的会话在下次全量刷新时补进来（`loadSessions` 是权威来源）。
-        val result = SessionListResult(items = items, usages = current.sessions.usages)
+        val result = SessionListResult(
+            items = items,
+            usages = current.sessions.usages,
+            // R062-B020：todo 表也必须跟着继承，理由与 usages 逐字相同——
+            // 这条路径只改标志位，不能因为一次运行态翻转就把整张 todo 表清空，
+            // 否则用户每看到一次绿点亮起，胶囊上的进度条就会消失一次。
+            todos = current.sessions.todos,
+        )
         // 发布**必须在相等短路之前**（审查 P1）。
         //
         // 相等意味着 `_state` 不用改，但胶囊层的快照未必是最新的：进程内可能刚经历过
@@ -605,6 +612,9 @@ class HomeViewModel(
         // ⚠ 不要在短路之后**再**发一次：同一份 `items` 发两次，第二次必然被
         // `MutableStateFlow` 的相等去重吞掉，功能上零收益，却让读者以为有两个发布点。
         CapsuleBridge.publishSessions(items)
+        // todo 与上面是**同一次响应**的两半，必须在同一处发布（R062-B020）。
+        // 放在相等短路之前与 `publishSessions` 同理：内容没变不等于对面已经知道。
+        CapsuleBridge.publishTodos(result.todos)
         if (result == current.sessions) return
         _state.value = current
             .copy(sessions = result, sessionsError = null)
@@ -831,6 +841,10 @@ class HomeViewModel(
                         failureReasons = ledger.failureReasons(),
                     ),
                     usages = loadedFull.usages,
+                    // R062-B020：todo 表必须跟着整表一起留下来。与上面 usages 的
+                    // 教训同源——重建 `SessionListResult` 时只传 items 会把另一半
+                    // 清空（真机验收抓到的 P1 就是 usages 那次）。
+                    todos = loadedFull.todos,
                 )
                 _state.value = _state.value
                     .copy(
@@ -853,6 +867,9 @@ class HomeViewModel(
                 // 而 `applySessions` 内部有 `if (result == current.sessions) return` 的相等短路，
                 // 恰好在「增量内容与已有相同」时也不发布——两条路一起把全量堵死了。
                 CapsuleBridge.publishSessions(result.items)
+                // 全量路径也必须单独发 todo：本方法直接写 `_state`，不经过
+                // `applySessions`（同一个坑 B017 已经踩过一次，见上面的长注释）。
+                CapsuleBridge.publishTodos(result.todos)
                 // 会话列表是权威全量（实测无游标、limit 被忽略），直接整表覆盖。
                 cache?.let { store ->
                     viewModelScope.launch { store.writeSessions(ownerId, result.items) }

@@ -34,6 +34,10 @@ class SessionListParser {
         val obj = element as? JsonObject ?: return SessionListResult()
         val summaryList = ArrayList<SessionSummary>()
         val usageMap = LinkedHashMap<String, SessionUsage>()
+        // R062-B020：todo 也在这条记录里（`projections.values.todos`），
+        // 与用量同一条遍历取出。形状 `[{content, status}]` 正好是
+        // `GoalTodoParser.parseTodos` 吃的形状，不需要任何额外请求。
+        val todoMap = LinkedHashMap<String, TodoList>()
         (obj["items"] as? JsonArray)?.forEach { item ->
             val raw = item as? JsonObject ?: return@forEach
             val summary = summaryOf(raw) ?: return@forEach
@@ -43,8 +47,14 @@ class SessionListParser {
             // 读不到用量的会话不进 map —— 它不是「0 用量」，是「没有数据」。
             val values = raw["projections"].asObject()?.get("values").asObject()
             SessionUsage.of(summary.sessionId, values)?.let { usageMap[summary.sessionId] = it }
+            // 只有**真的带 todo 且非空**才进 map。空数组不进：那表示「这条会话
+            // 没有任务」，而读取方（胶囊）需要把「没有」和「没读到」区分开——
+            // 前者该老老实实不画进度条，后者也一样，但缓存/诊断时能看出差别。
+            GoalTodoParser.parseTodos(values)
+                .takeIf { it.items.isNotEmpty() }
+                ?.let { todoMap[summary.sessionId] = it }
         }
-        return SessionListResult(items = summaryList, usages = usageMap)
+        return SessionListResult(items = summaryList, usages = usageMap, todos = todoMap)
     }
 
     /** 解析一条 `SessionSummary`；缺 `sessionId` 视为无效条目，返回 `null`。 */
