@@ -365,9 +365,16 @@ class CapsuleCoverageTest {
             "attach 要接受 dropDeferred 参数",
             notify.contains("fun attach(client: RemoteEventsClient?, dropDeferred: Boolean = client == null)"),
         )
+        // B019 复查把这一行包进了块（块里还要清 postedDone），
+        // 所以判据退到「dropDeferred 是条件、clearDeferred 在它管辖内」这两条上。
         assertTrue(
             "clearDeferred 的判据要挂在 dropDeferred 上，不是挂在 client == null 上",
-            notify.contains("if (dropDeferred) coverage?.clearDeferred()"),
+            notify.contains("if (dropDeferred) coverage?.clearDeferred()") ||
+                notify.contains("if (dropDeferred) {"),
+        )
+        assertTrue(
+            "dropDeferred 为真时必须真的清掉欠账",
+            notify.contains("coverage?.clearDeferred()"),
         )
         // 第三轮审查把判据从「走没走 Rebuild」收紧到「hostId 有没有变」，
         // 形状改成 `dropDeferred = !sameHost`；具体断言见下面那条用例。
@@ -419,8 +426,12 @@ class CapsuleCoverageTest {
         val body = codeOnlyStrict(bodyOf(coordinatorSource(), "private suspend fun flushDeferred("))
         assertTrue("postDone 必须包在 runCatching 里", body.contains("runCatching {"))
         assertTrue("失败要放回账本", body.contains("registry.deferDone(sessionId, pending)"))
-        // 放回必须挂在实际结果上，不能无条件放（那会变成无限重复补发）
-        assertTrue("要按投递结果决定是否放回", body.contains("if (!ok) registry.deferDone("))
+        // 放回必须挂在实际结果上，不能无条件放（那会变成无限重复补发）。
+        // B019 复查在 else 分支里加了 `postedDone[sessionId] = pending`，
+        // 所以这里认两种形状：单行 if，或带 else 的块。
+        val guarded = body.contains("if (!ok) registry.deferDone(") ||
+            (body.contains("if (!ok) {") && body.indexOf("if (!ok) {") < body.indexOf("registry.deferDone("))
+        assertTrue("要按投递结果决定是否放回", guarded)
     }
 
     @Test
@@ -667,8 +678,12 @@ class CapsuleCoverageTest {
         // （第二轮审查 P2-1）。换主机走 `Rebuild` → `attach(新 client)`，原先
         // 挂在 `client == null` 上把这条路漏了，上一台的欠账会活下来并被下面
         // 新建的 `state.collect` 当场重放出去，变成新主机的僵尸通知。
+        // B019 复查把这一行包进了块（块里还要清 postedDone），
+        // 所以锚点退到 `if (dropDeferred)` 本身，形状两种都认。
         val clearAt = body.indexOf("if (dropDeferred) coverage?.clearDeferred()")
+            .let { if (it >= 0) it else body.indexOf("if (dropDeferred) {") }
         assertTrue("丢欠账要挂在 dropDeferred 上", clearAt > 0)
+        assertTrue("块里要真的清欠账", body.contains("coverage?.clearDeferred()"))
         assertTrue("丢欠账要在 push 订阅之前，否则订阅一上来就把它们发出去", clearAt < body.indexOf("coverageJob = scope.launch"))
     }
 
@@ -790,11 +805,18 @@ class CapsuleCoverageTest {
         // 构造点只有一个：压制那条走 `DeferredDone(failed, reason, sessionName)`；
         // 投递失败放回时复用现成的 `pending` 对象（它本来就带着 sessionName），
         // 不该、也确实没有再构造一次。
+        // B019 复查新增了第二个构造点：`deliver` 里发完成通知前先记一笔
+        // `postedDone[sessionId] = DeferredDone(notice.failed, notice.reason, sessionName)`，
+        // 供 `withdrawCoveredDone` 撤通知时转成欠账。两处都必须带 sessionName，
+        // 所以这里改成「所有构造点都带」而不是「只有一处」。
+        val deferredCtor = Regex("DeferredDone\\(" + "[" + "^" + ")]*")
+            .findAll(codeOnlyStrict(coordinatorSource()))
+            .filterNot { it.value.contains("class DeferredDone") }
+            .toList()
         assertEquals(
             "构造欠账时必须把 sessionName 传进去",
-            1,
-            Regex("DeferredDone\\(" + "[" + "^" + ")]*sessionName")
-                .findAll(text).count(),
+            deferredCtor.size,
+            deferredCtor.count { it.value.contains("sessionName") },
         )
     }
 
@@ -816,5 +838,101 @@ class CapsuleCoverageTest {
         assertTrue("要说五个 StateFlow", kdoc.contains("五个 `StateFlow`"))
         assertTrue("不能还留着「四个」", !kdoc.contains("四个 `StateFlow`"))
         assertTrue("不能还留着「三个」", !kdoc.contains("三个 `StateFlow`"))
+    }
+
+    // ================================================================
+    // B019 复查缺陷（真机 2026-11-16 01:33 复现）
+    //
+    // 现象：胶囊显示「已完成」→ 用户划掉胶囊 → **通知栏没有补发完成通知**。
+    // 根因：`withdrawCoveredDone` 只 `center.cancelDone(sessionId)` 不记账，
+    // 于是 `flushDeferred` 面对的是一本空账。
+    // 而这条时序**不是罕见分支**：`api-session/status` 一到就 `deliver` 直接发，
+    // 胶囊的覆盖状态要等 `session/list` 去抖 1.5 秒才翻成已完成 ——
+    // 每一轮跑完都先走「先发后接管」。
+    // ================================================================
+
+    @Test
+    fun `撤掉被覆盖的完成通知时必须记账 否则用户两头都空`() {
+        val body = codeOnlyStrict(
+            bodyOf(coordinatorSource(), "private fun withdrawCoveredDone("),
+        )
+
+        // 核心：撤与记必须在同一个函数里成对出现。
+        assertTrue("要真的撤通知", body.contains("center.cancelDone(sessionId)"))
+        assertTrue(
+            "撤的同时必须把内容取出来记账，否则 flushDeferred 无账可补",
+            body.contains("postedDone.remove(sessionId)"),
+        )
+        assertTrue(
+            "取到的内容要投进欠账本",
+            body.contains("coverage?.deferDone(sessionId, pending)"),
+        )
+    }
+
+    @Test
+    fun `撤通知要幂等 覆盖期间每轮重算都会调它`() {
+        val body = codeOnlyStrict(
+            bodyOf(coordinatorSource(), "private fun withdrawCoveredDone("),
+        )
+
+        // 覆盖期间 recompute 每轮都调一次，不能因此重复记账。
+        // `remove` 天然幂等（第一次取走内容、之后拿到 null），所以必须用
+        // remove 而不是 `get` + 无条件 `deferDone`。
+        assertFalse(
+            "用 get 会让每轮重算都重新记一次账",
+            body.contains("postedDone.get(sessionId)"),
+        )
+        assertTrue(
+            "取不到内容时不能凭空造欠账（那条通知不是我们发的）",
+            body.contains("if (pending != null)"),
+        )
+    }
+
+    @Test
+    fun `发完成通知时要先记账后投递 否则撤得掉却补不回来`() {
+        val body = codeOnlyStrict(bodyOf(coordinatorSource(), "private fun deliver("))
+
+        val putAt = body.indexOf("postedDone[sessionId] = DeferredDone(")
+        val postAt = body.indexOf("center.postDone(")
+
+        assertTrue("deliver 里要记下这条完成通知的内容", putAt >= 0)
+        assertTrue("deliver 里要投递", postAt >= 0)
+        assertTrue(
+            "必须先记后发：postDone 抛 SecurityException 时，先发的话内容就丢了",
+            putAt < postAt,
+        )
+    }
+
+    @Test
+    fun `补发成功后要回记 否则胶囊再次接管时又补不回来`() {
+        val body = codeOnlyStrict(bodyOf(coordinatorSource(), "private suspend fun flushDeferred("))
+
+        assertTrue(
+            "补发失败要放回欠账本",
+            body.contains("registry.deferDone(sessionId, pending)"),
+        )
+        assertTrue(
+            "补发成功要回记 postedDone，否则第二轮接管时撤得掉却补不回来",
+            body.contains("postedDone[sessionId] = pending"),
+        )
+    }
+
+    @Test
+    fun `会话结束的几条清账路径必须成对 否则账本留僵尸`() {
+        val text = codeOnlyStrict(coordinatorSource())
+
+        // 四条会「丢掉这条会话一切待办」的路径，每一条清欠账时都要同时清 postedDone，
+        // 否则下次胶囊接管时会用一份属于已消失会话的内容记一笔。
+        val opened = codeOnly(bodyOf(text, "fun onSessionOpened("))
+        assertTrue("打开会话：清欠账", opened.contains("coverage?.dropDeferred(sessionId)"))
+        assertTrue("打开会话：也要清 postedDone", opened.contains("postedDone.remove(sessionId)"))
+
+        val handle = codeOnly(bodyOf(text, "private fun handle(notification: SessionNotification)"))
+        assertTrue("会话被删：清欠账", handle.contains("coverage?.dropDeferred("))
+        assertTrue("会话被删：也要清 postedDone", handle.contains("postedDone.remove(notification.sessionId)"))
+
+        val attach = codeOnly(bodyOf(text, "fun attach("))
+        assertTrue("换主机：清欠账", attach.contains("coverage?.clearDeferred()"))
+        assertTrue("换主机：也要清 postedDone", attach.contains("postedDone.clear()"))
     }
 }

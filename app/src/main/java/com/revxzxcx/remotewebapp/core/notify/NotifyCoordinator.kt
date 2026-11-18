@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 把「连接上发生的事」翻译成「系统通知」（R056）。
@@ -95,6 +96,29 @@ class NotifyCoordinator(
 
     /** 已就哪些 `turn/end` 发过通知（见 [OutcomeLedger]）。 */
     private val outcomes = OutcomeLedger()
+
+    /**
+     * 通知栏里**当前那条**「任务结束」的内容，按会话记着。
+     *
+     * ## 为什么需要（B019 复查抓到的真缺陷）
+     * [withdrawCoveredDone] 要在胶囊接管时把那条通知撤掉，但「先发后接管」
+     * 时序下用户划掉胶囊后 [flushDeferred] 需要有账可补。原先只调
+     * `center.cancelDone` 不记账 —— 通知被撤走、账本里也没有，
+     * 用户最终**既没有胶囊也没有通知**，是这个 patch 里唯一「彻底无信息」的路径。
+     *
+     * 这个时序不是罕见分支：`api-session/status` 一到就 `deliver` 直接发，
+     * 而胶囊的覆盖状态要等 `session/list` 去抖 1.5 秒后才翻成已完成，
+     * **每一轮跑完都先走「先发后接管」**。
+     *
+     * ## 为什么存整条而不是只存一个标记
+     * 补发要用 `failed` / `reason` / `sessionName`。撤通知的那一刻手里只有
+     * `sessionId`（[CapsuleCoverage] 只带这个），从别处都拼不回来。
+     *
+     * ## 为什么是 `ConcurrentHashMap`
+     * [deliver] 走事件协程，[withdrawCoveredDone] 走覆盖状态收集器，
+     * 两条协程都会碰它，且都不在 `outcomeMutex` 里。
+     */
+    private val postedDone = ConcurrentHashMap<String, DeferredDone>()
 
     /** 账号问题的提醒账（R056 缺口 4）。 */
     private val accounts = AccountNoticeGate()
@@ -215,7 +239,19 @@ class NotifyCoordinator(
         // 走 `Rebuild` → `attach(新client)` 的路径漏了出去：上一台的欠账活着，
         // 而下面那个 `state.collect` 一订阅就重放当前值，把它们当场补发成
         // 新主机的僵尸通知。改由调用方显式声明（默认值保持「退配对就丢」）。
-        if (dropDeferred) coverage?.clearDeferred()
+        if (dropDeferred) {
+            coverage?.clearDeferred()
+            // 换主机后旧会话的完成通知不再属于任何人，
+            // 留着只会在下次胶囊接管时补出一条指向已不存在会话的通知。
+            //
+            // ⚠ 隐式耦合：[NotificationCenter.cancelAll] 不认识 `postedDone`（它只清 id
+            // 池与审批表）。当前两个调用点（退配对、换主机）都保证紧跟
+            // 一次 `dropDeferred = true` 的 attach，所以不漏。**将来新增 cancelAll 调用点时
+            // 必须同步走这里**，否则 `postedDone` 会留下「通知已被撤、账还活着」
+            // 的条目，[withdrawCoveredDone] 会把它们投成欠账，用户收到一条凭空
+            // 出现的完成通知。
+            postedDone.clear()
+        }
         if (client == null) return
 
         linkJob = scope.launch {
@@ -421,6 +457,7 @@ class NotifyCoordinator(
         // 点开时若胶囊还覆盖着，flush 会被 `coversDone` 跳过；等胶囊让位后照样补发，
         // 而用户其实早就看过了。与 `Removed` 分支对齐。
         coverage?.dropDeferred(sessionId)
+        postedDone.remove(sessionId)
         if (!hasPendingDone(sessionId)) return
         center.cancelDone(sessionId)
     }
@@ -465,6 +502,7 @@ class NotifyCoordinator(
                 // 会话被删了，欠着的那条也不用补了——补出去只会是一条点不开的
                 // 僵尸通知（R062-B019）。
                 coverage?.dropDeferred(notification.sessionId)
+                postedDone.remove(notification.sessionId)
                 // 审批通知不在这里撤：`eventId` 与 `sessionId` 没有稳定映射，
                 // 硬要按会话找会误撤别人的。它们会在 `syncApprovals` 下一次对账时
                 // 因「不在 approvals 列表里」被统一撤掉。
@@ -654,6 +692,10 @@ class NotifyCoordinator(
                 // 原地替换）。既然胶囊接管了，那条也该跟着撤——否则用户看到的正是
                 // 「胶囊说已完成 + 通知栏还说已完成」这副重复景象。
                 center.cancelDone(sessionId)
+                // 账本已经记下了这条（`deferUnlessCovered` 的返回值为 true
+                // 就是记成功的证据），这里把只用于「撤了再补」的副本清掉，
+                // 免得胶囊接管时用旧内容再记一遍。
+                postedDone.remove(sessionId)
                 return
             }
         }
@@ -676,7 +718,19 @@ class NotifyCoordinator(
     private fun withdrawCoveredDone(state: CapsuleCoverage) {
         val sessionId = state.sessionId ?: return
         if (!state.coversDone(sessionId)) return
+        // 撤的同时必须记账（B019 复查缺陷）：否则用户划掉胶囊之后
+        // `flushDeferred` 无账可补，通知栏与胶囊**两头都空**。
+        //
+        // `remove` 同时保证了幂等：覆盖期间每轮重算都会调到这里，
+        // 第一次取走内容并记账，之后取到 `null` 只做幂等的 `cancelDone`。
+        val pending = postedDone.remove(sessionId)
         center.cancelDone(sessionId)
+        if (pending != null) {
+            coverage?.deferDone(sessionId, pending)
+            return
+        }
+        // 取不到内容说明这条通知不是我们发的（比如上一轮遗留），
+        // 撤掉即可，不能凭空造一条没有 `failed` / `reason` 的欠账。
     }
 
     /**
@@ -727,7 +781,13 @@ class NotifyCoordinator(
                     silent = delivery == NoticeDelivery.Silent,
                 )
             }.onFailure { Log.w(TAG, "flushDeferred post failed", it) }.isSuccess
-            if (!ok) registry.deferDone(sessionId, pending)
+            if (!ok) {
+                registry.deferDone(sessionId, pending)
+            } else {
+                // 补发成功 = 通知栏里又有这条了，回记一笔，
+                // 否则胶囊再次接管时它撤得掉却再也补不回来。
+                postedDone[sessionId] = pending
+            }
         }
     }
 
@@ -745,8 +805,14 @@ class NotifyCoordinator(
             // `when` 必须穷尽，且 [deliver] 是 public 之外唯一入口、将来若有人
             // 绕过 `decide` 直接投递，这里静默反而比崩掉安全（通知层不该抛）。
             is OutcomeNotice.Skip -> Unit
-            is OutcomeNotice.Done ->
+            is OutcomeNotice.Done -> {
+                // 先记后发：`postDone` 末尾是裸 `nm.notify`，权限在 `canPost()`
+                // 之后被收回会抛 `SecurityException`。先发后记的话，那条通知
+                // 一旦落地就再没人记得它的内容，胶囊接管时撤得掉却补不回来。
+                // 记了却发失败只是留一条会重新过门控的欠账，比丢信息安全。
+                postedDone[sessionId] = DeferredDone(notice.failed, notice.reason, sessionName)
                 center.postDone(sessionId, sessionName, notice.failed, notice.reason, silent)
+            }
             is OutcomeNotice.Attention ->
                 center.postAttention(sessionId, notice.title, notice.text, silent)
         }
